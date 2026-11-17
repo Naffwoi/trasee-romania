@@ -3,22 +3,26 @@ import 'dart:math' as math;
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:maplibre/maplibre.dart' as ml;
+import 'package:wanderer/provider/compass_heading_stream_provider.dart';
 import 'package:wanderer/provider/foreground_position_stream_provider.dart';
+import 'package:wanderer/util/map/heading_math.dart';
 
-/// The on-map "you are here" indicator: a blue dot with a white border,
-/// optionally with a rotating heading wedge behind it.
+const Color kGoogleMapsBlue = Color(0xFF4285F4);
+
+/// The on-map "you are here" indicator: a Google Maps blue dot with a white
+/// border and a rotating radial-gradient flashlight cone behind it.
 class LocationPuck extends StatelessWidget {
   const LocationPuck({
     super.key,
-    this.size = 18,
+    this.size = 88,
     this.dotSize = 18,
     this.heading,
     this.headingAccuracy,
-    this.showHeading = false,
+    this.showHeading = true,
   });
 
   /// Overall bounding box (matches the enclosing [ml.Marker]'s size) — also
-  /// the wedge's canvas when [showHeading] is on.
+  /// the cone's canvas when [showHeading] is on.
   final double size;
 
   /// Diameter of the static dot.
@@ -27,123 +31,248 @@ class LocationPuck extends StatelessWidget {
   final double? heading;
   final double? headingAccuracy;
 
-  /// Whether to draw the heading wedge at all. Off by default since most
-  /// callers (trail/search maps) have no heading data.
+  /// Whether to draw the heading flashlight cone at all.
   final bool showHeading;
 
   @override
   Widget build(BuildContext context) {
-    // geolocator reports negative heading/accuracy when stationary or
-    // low-confidence — treat those as "no heading" rather than jittering.
     final hasValidHeading =
-        showHeading &&
-        heading != null &&
-        heading! >= 0 &&
-        headingAccuracy != null &&
-        headingAccuracy! >= 0;
-    return Stack(
-      alignment: Alignment.center,
-      children: [
-        if (hasValidHeading)
-          Transform.rotate(
-            angle: heading! * math.pi / 180,
-            child: CustomPaint(
-              size: Size(size, size),
-              // Wedge base sits just outside the dot's painted edge (radius
-              // + border) so it stays visible regardless of how dotSize/size
-              // are tuned relative to each other.
-              painter: _HeadingWedgePainter(dotSize / 2 + 3),
-            ),
-          ),
-        Container(
-          width: dotSize,
-          height: dotSize,
-          decoration: BoxDecoration(
-            color: Colors.blue,
-            shape: BoxShape.circle,
-            border: Border.all(color: Colors.white, width: 3),
-            boxShadow: [
-              BoxShadow(
-                color: Colors.black.withValues(alpha: .3),
-                blurRadius: 4,
-                offset: const Offset(0, 1),
+        showHeading && heading != null && heading!.isFinite && heading! >= 0;
+    final halfAngleDeg = coneHalfAngleFromAccuracy(headingAccuracy);
+
+    return IgnorePointer(
+      child: SizedBox(
+        width: size,
+        height: size,
+        child: Stack(
+          alignment: Alignment.center,
+          children: [
+            if (hasValidHeading && size > dotSize)
+              Transform.rotate(
+                key: const ValueKey('gmaps-heading-cone'),
+                angle: heading! * math.pi / 180.0,
+                child: CustomPaint(
+                  size: Size(size, size),
+                  painter: _FlashlightConePainter(
+                    halfAngleDeg: halfAngleDeg,
+                  ),
+                ),
               ),
-            ],
-          ),
+            Container(
+              width: dotSize,
+              height: dotSize,
+              decoration: BoxDecoration(
+                color: kGoogleMapsBlue,
+                shape: BoxShape.circle,
+                border: Border.all(color: Colors.white, width: 3),
+                boxShadow: [
+                  BoxShadow(
+                    color: Colors.black.withValues(alpha: .35),
+                    blurRadius: 4,
+                    offset: const Offset(0, 1),
+                  ),
+                ],
+              ),
+            ),
+          ],
         ),
-      ],
+      ),
     );
   }
 }
 
-class _HeadingWedgePainter extends CustomPainter {
-  const _HeadingWedgePainter(this.innerRadius);
+class _FlashlightConePainter extends CustomPainter {
+  const _FlashlightConePainter({required this.halfAngleDeg});
 
-  /// Radius of the dot (including its border) that the wedge must clear —
-  /// the wedge is drawn behind the dot, so any part inside this radius would
-  /// be fully occluded regardless of canvas size.
-  final double innerRadius;
+  final double halfAngleDeg;
 
   @override
   void paint(Canvas canvas, Size size) {
-    final paint = Paint()..color = Colors.blue.withValues(alpha: .5);
-    final center = Offset(size.width / 2, size.height / 2);
-    final outerRadius = size.width / 2;
-    // Guard against a canvas no larger than the dot — nothing to draw.
-    if (outerRadius <= innerRadius) return;
-    final backRadius = innerRadius;
-    final wingRadius = backRadius + (outerRadius - backRadius) * 0.3;
-    const wingAngle = 20 * math.pi / 180;
+    final radius = size.width / 2;
+    if (radius <= 0) return;
+    final center = Offset(radius, size.height / 2);
+    final sweepRadians = (halfAngleDeg * 2) * math.pi / 180.0;
+    // -pi/2 is straight up (North = 0 deg)
+    final startAngle = -math.pi / 2 - sweepRadians / 2;
 
-    Offset polar(double radius, double angleFromUp) =>
-        center +
-        Offset(radius * math.sin(angleFromUp), -radius * math.cos(angleFromUp));
+    final rect = Rect.fromCircle(center: center, radius: radius);
+    final paint = Paint()
+      ..shader = RadialGradient(
+        colors: [
+          kGoogleMapsBlue.withValues(alpha: 0.50),
+          kGoogleMapsBlue.withValues(alpha: 0.18),
+          kGoogleMapsBlue.withValues(alpha: 0.0),
+        ],
+        stops: const [0.18, 0.60, 1.0],
+      ).createShader(rect);
 
     final path = Path()
-      ..moveTo(polar(outerRadius, 0).dx, polar(outerRadius, 0).dy)
-      ..lineTo(polar(wingRadius, wingAngle).dx, polar(wingRadius, wingAngle).dy)
-      ..lineTo(polar(backRadius, 0).dx, polar(backRadius, 0).dy)
-      ..lineTo(
-        polar(wingRadius, -wingAngle).dx,
-        polar(wingRadius, -wingAngle).dy,
-      )
+      ..moveTo(center.dx, center.dy)
+      ..arcTo(rect, startAngle, sweepRadians, false)
       ..close();
+
     canvas.drawPath(path, paint);
   }
 
   @override
-  bool shouldRepaint(covariant _HeadingWedgePainter oldDelegate) =>
-      oldDelegate.innerRadius != innerRadius;
+  bool shouldRepaint(covariant _FlashlightConePainter oldDelegate) =>
+      oldDelegate.halfAngleDeg != halfAngleDeg;
 }
 
-/// Location layer for screens driven by [foregroundPositionStreamProvider]
-/// (no heading data available — [LocationPuck.showHeading] stays false).
-class LocationMarkerLayer extends ConsumerWidget {
-  const LocationMarkerLayer({super.key, this.dotSize = 18});
-
-  final double dotSize;
+class _AccuracyHaloPainter extends CustomPainter {
+  const _AccuracyHaloPainter();
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
-    // liveLocationProvider (not the raw stream) so the receiver is held open
-    // only while this layer is mounted.
+  void paint(Canvas canvas, Size size) {
+    final radius = size.width / 2;
+    if (radius < 4) return;
+    final center = Offset(radius, size.height / 2);
+    final fillPaint = Paint()
+      ..style = PaintingStyle.fill
+      ..color = kGoogleMapsBlue.withValues(alpha: 0.12);
+    final strokePaint = Paint()
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 1.0
+      ..color = kGoogleMapsBlue.withValues(alpha: 0.30);
+
+    canvas.drawCircle(center, radius, fillPaint);
+    canvas.drawCircle(center, radius, strokePaint);
+  }
+
+  @override
+  bool shouldRepaint(covariant _AccuracyHaloPainter oldDelegate) => false;
+}
+
+/// Live location + compass layer for interactive maps.
+/// Combines [liveLocationProvider] (GPS fix + accuracy) and [liveCompassProvider]
+/// (device orientation azimuth while stationary or moving) and compensates for
+/// the current [ml.MapCamera.bearing].
+class LocationMarkerLayer extends ConsumerStatefulWidget {
+  const LocationMarkerLayer({
+    super.key,
+    this.dotSize = 18,
+    this.coneSize = 88,
+  });
+
+  final double dotSize;
+  final double coneSize;
+
+  @override
+  ConsumerState<LocationMarkerLayer> createState() =>
+      _LocationMarkerLayerState();
+}
+
+class _LocationMarkerLayerState extends ConsumerState<LocationMarkerLayer> {
+  double? _cachedZoom;
+  double? _cachedLat;
+  double _cachedMetersPerPx = 0.0;
+
+  double _resolveMetersPerPixel(
+    ml.MapController? controller,
+    ml.MapCamera? camera,
+    double lat,
+  ) {
+    if (controller == null || camera == null) return 0.0;
+    if (_cachedZoom != null &&
+        _cachedLat != null &&
+        (camera.zoom - _cachedZoom!).abs() < 0.02 &&
+        (lat - _cachedLat!).abs() < 0.005) {
+      return _cachedMetersPerPx;
+    }
+    try {
+      final mpp = controller.getMetersPerPixelAtLatitude(lat);
+      if (mpp.isFinite && mpp > 0) {
+        _cachedZoom = camera.zoom;
+        _cachedLat = lat;
+        _cachedMetersPerPx = mpp;
+        return mpp;
+      }
+    } catch (_) {
+      // Ignore if controller is mocked or native projection is not ready yet.
+    }
+    return 0.0;
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final controller = ml.MapController.maybeOf(context);
+    final camera = ml.MapCamera.maybeOf(context);
+    final cameraBearing = camera?.bearing ?? 0.0;
+
     final positionStream = ref.watch(liveLocationProvider);
+    final compassStream = ref.watch(liveCompassProvider);
+
     return StreamBuilder<LocationMarkerPosition?>(
       stream: positionStream,
-      builder: (context, snapshot) {
-        final position = snapshot.data;
+      builder: (context, posSnapshot) {
+        final position = posSnapshot.data;
         if (position == null) return const SizedBox.shrink();
-        return ml.WidgetLayer(
-          markers: [
-            ml.Marker(
-              point: ml.Geographic(
-                lat: position.latitude,
-                lon: position.longitude,
-              ),
-              size: Size(dotSize, dotSize),
-              child: LocationPuck(size: dotSize, dotSize: dotSize),
-            ),
-          ],
+
+        final point = ml.Geographic(
+          lat: position.latitude,
+          lon: position.longitude,
+        );
+
+        double haloDiameterPx = 0;
+        if (controller != null &&
+            camera != null &&
+            position.accuracy.isFinite &&
+            position.accuracy >= 5.0) {
+          final clampedMeters = position.accuracy.clamp(5.0, 2000.0);
+          final mpp = _resolveMetersPerPixel(
+            controller,
+            camera,
+            position.latitude,
+          );
+          if (mpp > 0) {
+            haloDiameterPx = ((clampedMeters / mpp) * 2.0).clamp(0.0, 640.0);
+          }
+        }
+
+        return StreamBuilder<CompassHeadingReading?>(
+          stream: compassStream,
+          builder: (context, compassSnapshot) {
+            final compass = compassSnapshot.data;
+            final double? rawWorldHeading =
+                compass?.heading ??
+                ((position.heading != null &&
+                        position.heading!.isFinite &&
+                        position.heading! >= 0)
+                    ? position.heading
+                    : null);
+            final double? screenHeading = rawWorldHeading == null
+                ? null
+                : normalizeHeading(rawWorldHeading - cameraBearing);
+            final double? accuracy = compass != null
+                ? compass.accuracy
+                : position.headingAccuracy;
+
+            return ml.WidgetLayer(
+              markers: [
+                if (haloDiameterPx >= widget.dotSize + 6)
+                  ml.Marker(
+                    point: point,
+                    size: Size(haloDiameterPx, haloDiameterPx),
+                    child: const IgnorePointer(
+                      child: SizedBox.expand(
+                        child: CustomPaint(painter: _AccuracyHaloPainter()),
+                      ),
+                    ),
+                  ),
+                ml.Marker(
+                  point: point,
+                  size: Size(widget.coneSize, widget.coneSize),
+                  child: LocationPuck(
+                    size: widget.coneSize,
+                    dotSize: widget.dotSize,
+                    heading: screenHeading,
+                    headingAccuracy: accuracy,
+                    showHeading: true,
+                  ),
+                ),
+              ],
+            );
+          },
         );
       },
     );

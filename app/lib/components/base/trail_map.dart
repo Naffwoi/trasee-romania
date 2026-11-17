@@ -6,11 +6,13 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:maplibre/maplibre.dart' as ml;
 import 'package:wanderer/components/base/platform_view_pop_guard.dart';
 import 'package:wanderer/components/base/wanderer_attribution.dart';
+import 'package:wanderer/components/map/location_follow_controller.dart';
 import 'package:wanderer/components/map/location_marker_layer.dart';
 import 'package:wanderer/components/map/trail_layer.dart';
 import 'package:wanderer/models/trail.dart';
 import 'package:wanderer/models/waypoint.dart';
 import 'package:wanderer/provider/local_settings_provider.dart';
+import 'package:wanderer/provider/location_tracking_mode_provider.dart';
 import 'package:wanderer/provider/map_style_json_provider.dart';
 import 'package:wanderer/provider/region/tile_proxy_provider.dart';
 import 'package:wanderer/util/map/reliable_fit_bounds.dart';
@@ -42,6 +44,7 @@ class TrailMap extends ConsumerStatefulWidget {
 
   final bool showTrail;
   final bool showLocation;
+  final ValueNotifier<LocationTrackingMode>? trackingMode;
   final Waypoint? selectedWaypoint;
 
   final void Function(ml.Geographic point)? onTap;
@@ -62,6 +65,7 @@ class TrailMap extends ConsumerStatefulWidget {
     this.controls = const [],
     this.showTrail = true,
     this.showLocation = false,
+    this.trackingMode,
     this.selectedWaypoint,
     this.elevationMarkerPosition,
     this.initialCameraFitPadding = const EdgeInsets.all(40),
@@ -254,6 +258,8 @@ class _TrailMapState extends ConsumerState<TrailMap>
         if (widget.elevationMarkerPosition != null) _buildElevationMarker(),
 
         if (widget.showLocation) const LocationMarkerLayer(),
+        if (widget.trackingMode != null)
+          LocationFollowController(trackingMode: widget.trackingMode!),
 
         const WandererMapScalebar(alignment: Alignment.topLeft),
         const WandererAttribution(

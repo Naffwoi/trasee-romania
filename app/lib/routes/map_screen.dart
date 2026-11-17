@@ -17,6 +17,7 @@ import 'package:wanderer/components/base/wanderer_attribution.dart';
 import 'package:wanderer/components/base/wanderer_offline_state.dart';
 import 'package:wanderer/components/map/cluster_layer.dart';
 import 'package:wanderer/components/map/center_on_location_button.dart';
+import 'package:wanderer/components/map/location_follow_controller.dart';
 import 'package:wanderer/components/map/location_marker_layer.dart';
 import 'package:wanderer/components/map/trail_layer.dart'
     show trailPolylineLayers;
@@ -30,6 +31,7 @@ import 'package:wanderer/models/route_travel_bucket.dart';
 import 'package:wanderer/models/trail.dart';
 import 'package:wanderer/provider/foreground_position_stream_provider.dart';
 import 'package:wanderer/provider/local_settings_provider.dart';
+import 'package:wanderer/provider/location_tracking_mode_provider.dart';
 import 'package:wanderer/provider/map_camera_provider.dart';
 import 'package:wanderer/provider/map_style_json_provider.dart';
 import 'package:wanderer/provider/map_style_sources_provider.dart';
@@ -105,6 +107,9 @@ class _MapScreenState extends ConsumerState<MapScreen>
   /// platform view out of the frame: no overlay surfaces and no raster/
   /// platform-thread merge while the sheet's list scrolls.
   final ValueNotifier<bool> _mapCovered = ValueNotifier<bool>(false);
+  final ValueNotifier<LocationTrackingMode> _trackingMode = ValueNotifier(
+    LocationTrackingMode.freeTracking,
+  );
 
   late final AnimationController _mapButtonController;
   late final Animation<double> _mapButtonScale;
@@ -261,6 +266,7 @@ class _MapScreenState extends ConsumerState<MapScreen>
     _sheetController.dispose();
     _sheetSize.dispose();
     _mapCovered.dispose();
+    _trackingMode.dispose();
     _mapButtonController.dispose();
     _searchAreaController.dispose();
     super.dispose();
@@ -684,14 +690,24 @@ class _MapScreenState extends ConsumerState<MapScreen>
                     ],
                   ),
                 const LocationMarkerLayer(),
+                LocationFollowController(trackingMode: _trackingMode),
                 // Clears the search bar below the status bar.
                 Positioned(
                   top: MediaQuery.paddingOf(context).top + 76,
                   right: 8,
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.center,
-                    children: const [
-                      WandererMapCompass(hideIfRotatedNorth: true),
+                    children: [
+                      WandererMapCompass(
+                        hideIfRotatedNorth: true,
+                        onPressed: () {
+                          if (_trackingMode.value ==
+                              LocationTrackingMode.followHeadingUp) {
+                            _trackingMode.value =
+                                LocationTrackingMode.followNorthUp;
+                          }
+                        },
+                      ),
                     ],
                   ),
                 ),
@@ -729,11 +745,8 @@ class _MapScreenState extends ConsumerState<MapScreen>
               );
             },
             child: CenterOnLocationButton(
-              onPressed: (center) => _controller?.animateCamera(
-                center: center,
-                zoom: _kPointZoom,
-                nativeDuration: const Duration(milliseconds: 750),
-              ),
+              trackingMode: _trackingMode,
+              onPressed: (_) {},
             ),
           ),
 

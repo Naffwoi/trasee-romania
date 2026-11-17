@@ -7,12 +7,16 @@ import 'package:maplibre/maplibre.dart' as ml;
 import 'package:wanderer/components/base/trail_collection_map.dart';
 import 'package:wanderer/components/base/wanderer_attribution.dart';
 import 'package:wanderer/components/base/wanderer_error.dart';
+import 'package:wanderer/components/map/center_on_location_button.dart';
+import 'package:wanderer/components/map/location_follow_controller.dart';
+import 'package:wanderer/components/map/location_marker_layer.dart';
 import 'package:wanderer/components/map/map_marker_gestures.dart';
 import 'package:wanderer/components/map/trail_layer.dart'
     show TrailLayer, trailPolylineLayers;
 import 'package:wanderer/components/trail/trail_list_item.dart';
 import 'package:wanderer/models/category.dart';
 import 'package:wanderer/models/trail.dart';
+import 'package:wanderer/provider/location_tracking_mode_provider.dart';
 import 'package:wanderer/provider/trail/category_provider.dart';
 import 'package:wanderer/provider/trail/list_provider.dart';
 import 'package:wanderer/provider/trail/subcategory_provider.dart';
@@ -35,6 +39,15 @@ class _ListDetailMapScreenState extends ConsumerState<ListDetailMapScreen> {
   ml.MapController? _controller;
   Trail? _selectedTrail;
   ml.LngLatBounds? _combinedBoundsCache;
+  final ValueNotifier<LocationTrackingMode> _trackingMode = ValueNotifier(
+    LocationTrackingMode.freeTracking,
+  );
+
+  @override
+  void dispose() {
+    _trackingMode.dispose();
+    super.dispose();
+  }
 
   void _deselect() {
     setState(() => _selectedTrail = null);
@@ -186,16 +199,35 @@ class _ListDetailMapScreenState extends ConsumerState<ListDetailMapScreen> {
                 children: [
                   if (markers.isNotEmpty)
                     ml.WidgetLayer(allowInteraction: true, markers: markers),
-                  const SafeArea(
+                  const LocationMarkerLayer(),
+                  LocationFollowController(trackingMode: _trackingMode),
+                  SafeArea(
                     child: WandererMapCompass(
                       hideIfRotatedNorth: true,
-                      padding: EdgeInsets.only(top: 0, right: 8),
+                      padding: const EdgeInsets.only(top: 0, right: 8),
+                      onPressed: () {
+                        if (_trackingMode.value ==
+                            LocationTrackingMode.followHeadingUp) {
+                          _trackingMode.value =
+                              LocationTrackingMode.followNorthUp;
+                        }
+                      },
                     ),
                   ),
                   const WandererMapScalebar(),
                   const WandererAttribution(),
                 ],
               ),
+
+              if (_selectedTrail == null)
+                Positioned(
+                  bottom: MediaQuery.paddingOf(context).bottom + 24,
+                  right: 16,
+                  child: CenterOnLocationButton(
+                    trackingMode: _trackingMode,
+                    onPressed: (_) {},
+                  ),
+                ),
 
               if (_selectedTrail != null)
                 Positioned(

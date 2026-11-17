@@ -5,6 +5,7 @@ import 'package:font_awesome_flutter/font_awesome_flutter.dart';
 import 'package:maplibre/maplibre.dart' as ml;
 import 'package:wanderer/components/base/wanderer_error.dart';
 import 'package:wanderer/components/base/trail_map.dart';
+import 'package:wanderer/components/map/center_on_location_button.dart';
 import 'package:wanderer/components/trail/elevation_profile.dart';
 import 'package:wanderer/components/trail/waypoint_sheet.dart';
 import 'package:wanderer/i18n/app_localizations.dart';
@@ -12,6 +13,7 @@ import 'package:wanderer/models/trail.dart';
 import 'package:wanderer/models/trail_sync_state.dart';
 import 'package:wanderer/models/waypoint.dart';
 import 'package:wanderer/provider/auth_provider.dart';
+import 'package:wanderer/provider/location_tracking_mode_provider.dart';
 import 'package:wanderer/provider/trail/local_trail_provider.dart';
 import 'package:wanderer/provider/trail/trail_provider.dart';
 import 'package:wanderer/actions/launch_navigation.dart';
@@ -41,6 +43,8 @@ class _TrailDetailMapScreenState extends ConsumerState<TrailDetailMapScreen> {
 
   final DraggableScrollableController _sheetController =
       DraggableScrollableController();
+  final ValueNotifier<LocationTrackingMode> _trackingMode =
+      ValueNotifier(LocationTrackingMode.freeTracking);
 
   ml.MapController? _mapController;
 
@@ -62,6 +66,7 @@ class _TrailDetailMapScreenState extends ConsumerState<TrailDetailMapScreen> {
   @override
   void dispose() {
     _sheetController.dispose();
+    _trackingMode.dispose();
     super.dispose();
   }
 
@@ -116,6 +121,7 @@ class _TrailDetailMapScreenState extends ConsumerState<TrailDetailMapScreen> {
             onWaypointTap: _onWaypointSelected,
             selectedWaypoint: selectedWaypoint,
             showLocation: true,
+            trackingMode: _trackingMode,
             initialCameraFitPadding: EdgeInsets.only(
               bottom: 300,
               left: 40,
@@ -124,7 +130,22 @@ class _TrailDetailMapScreenState extends ConsumerState<TrailDetailMapScreen> {
             ),
             controls: [
               _buildMapControls(context, trail),
-              const WandererMapCompass(hideIfRotatedNorth: true),
+              Padding(
+                padding: const EdgeInsets.only(right: 8, bottom: 8),
+                child: CenterOnLocationButton(
+                  trackingMode: _trackingMode,
+                  onPressed: (_) {},
+                ),
+              ),
+              WandererMapCompass(
+                hideIfRotatedNorth: true,
+                onPressed: () {
+                  if (_trackingMode.value ==
+                      LocationTrackingMode.followHeadingUp) {
+                    _trackingMode.value = LocationTrackingMode.followNorthUp;
+                  }
+                },
+              ),
             ],
             onMapCreated: (controller) => _mapController = controller,
           ),

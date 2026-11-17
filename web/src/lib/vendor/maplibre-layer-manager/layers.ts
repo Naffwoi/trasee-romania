@@ -503,7 +503,7 @@ export type MapState = {
 export const defaultMapState: MapState = {
     base: "OpenFreeMap",
     overlays: {
-        hiking: false,
+        hiking: true,
         cycling: false,
         MTB: false,
         skiing: false,

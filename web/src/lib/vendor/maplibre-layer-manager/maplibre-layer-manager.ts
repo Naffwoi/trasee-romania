@@ -18,7 +18,7 @@ export class LayerManager {
         this.map = map;
         this.overpassActionFactory = options?.overpassActionFactory;
 
-        const storedMapState = localStorage.getItem("map-state")
+        const storedMapState = localStorage.getItem("wanderer-ro-map-state-v1")
         if (storedMapState) {
             this.state = JSON.parse(storedMapState)
 
@@ -27,7 +27,7 @@ export class LayerManager {
                 this.state.pois.amenity = this.state.pois.ammenity;
                 delete this.state.pois.ammenity;
 
-                localStorage.setItem('map-state', JSON.stringify(this.state));
+                localStorage.setItem('wanderer-ro-map-state-v1', JSON.stringify(this.state));
             }
         } else {
             this.state = defaultMapState
@@ -76,7 +76,7 @@ export class LayerManager {
         this.updateOverpassLayer(newState);
 
         this.state = newState
-        localStorage.setItem("map-state", JSON.stringify(this.state));
+        localStorage.setItem("wanderer-ro-map-state-v1", JSON.stringify(this.state));
     }
 
     updateOverpassLayerAfterMapMoveBinded = this.updateOverpassLayerAfterMapMove.bind(this);

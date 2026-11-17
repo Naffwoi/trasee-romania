@@ -29,9 +29,8 @@
     );
 
     let navBarItems = [
-        { text: "Home", value: "/" },
-        { text: $_("trail", { values: { n: 2 } }), value: "/trails" },
         { text: $_("map"), value: "/map" },
+        { text: $_("trail", { values: { n: 2 } }), value: "/trails" },
         { text: $_("list", { values: { n: 2 } }), value: "/lists" },
     ];
 
@@ -90,7 +89,7 @@
     function handleLogout() {
         drawerOpen = false;
         void logout();
-        window.location.assign("/");
+        window.location.assign("/map");
     }
 
     function handleDropdownClick(item: { text: string; value: any }) {
@@ -177,11 +176,9 @@
 </Drawer>
 
 <nav
-    class="app-navbar flex justify-between items-center p-6 {page.url.pathname === '/'
-        ? 'sticky top-0 z-10 bg-background'
-        : ''}"
+    class="app-navbar flex justify-between items-center px-4 py-2.5 border-b border-input-border/40"
 >
-    <a href="/">
+    <a href="/map">
         {#if $theme == "light"}
             <LogoText></LogoText>
         {:else}

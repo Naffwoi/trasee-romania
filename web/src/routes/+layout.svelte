@@ -8,7 +8,6 @@
     import { page } from "$app/state";
     import { PUBLIC_IS_DEMO } from "$app/env/public";
     import Toast from "#lib/components/base/toast.svelte";
-    import Footer from "#lib/components/footer.svelte";
     import NavBar from "#lib/components/nav_bar.svelte";
     import PageLoadingBar from "#lib/components/page_loading_bar.svelte";
     import UploadDialog from "#lib/components/settings/upload_dialog.svelte";
@@ -49,7 +48,11 @@
         } catch {
             // The notice is optional when browser storage is disabled.
         }
-        if (page.data.origin != location.origin) {
+        const configuredOrigin = page.data.origin;
+        const allowedOrigins = new Set(
+            [configuredOrigin, "https://maps.skillfy.ro", "https://trasee.skillfy.ro"].filter(Boolean),
+        );
+        if (configuredOrigin && !allowedOrigins.has(location.origin)) {
             showWarning = true;
         }
         if (data.user) {
@@ -234,5 +237,3 @@
 <Toast></Toast>
 <UploadDialog></UploadDialog>
 {@render children?.()}
-
-<Footer></Footer>

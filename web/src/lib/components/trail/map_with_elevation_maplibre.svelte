@@ -25,6 +25,7 @@
     import { TerrainLayer } from "#lib/vendor/maplibre-layer-manager/terrain-layer.ts";
     import { TrailLayer } from "#lib/vendor/maplibre-layer-manager/trail-layer.ts";
     import { StyleSwitcherControl } from "#lib/vendor/maplibre-style-switcher/style-switcher-control.ts";
+    import { UserLocationControl } from "#lib/vendor/maplibre-user-location/user-location-control.ts";
     import type { Feature, FeatureCollection, GeoJSON } from "geojson";
     import * as M from "maplibre-gl";
     import "maplibre-gl/dist/maplibre-gl.css";
@@ -76,6 +77,7 @@
             trail: Trail,
         ) => void;
         oninit?: (map: M.Map) => void;
+        onlocationerror?: (message: string) => void;
         autoGeolocateOnDrawing?: boolean;
         buildPoiAnchorAction?: OverpassPopupActionFactory;
     }
@@ -113,6 +115,7 @@
         oncontextmenu,
         onUnclusteredClick,
         oninit,
+        onlocationerror,
         autoGeolocateOnDrawing = false,
         buildPoiAnchorAction = undefined,
     }: Props = $props();
@@ -938,7 +941,7 @@
         }
     }
 
-    let geolocateControl: M.GeolocateControl;
+    let geolocateControl: UserLocationControl | undefined;
 
     onMount(async () => {
         const initialState = {
@@ -1004,16 +1007,14 @@
         scale = { control: new M.ScaleControl({ maxWidth: 120, unit: page.data.settings?.unit ?? "metric" }), position: scalePosition };
         map.addControl(scale.control, scalePosition);
 
-        geolocateControl = new M.GeolocateControl({
-            positionOptions: {
+        if (finalMapOptions.interactive !== false) {
+            geolocateControl = new UserLocationControl({
                 enableHighAccuracy: true,
-            },
-            fitBoundsOptions: {
                 animate: fitBounds == "animate",
-            },
-            trackUserLocation: true,
-        });
-        map.addControl(geolocateControl);
+                onError: onlocationerror,
+            });
+            map.addControl(geolocateControl);
+        }
 
         if (showStyleSwitcher) {
             map.addControl(switcherControl);
@@ -1136,10 +1137,7 @@
         if (!page.data.settings?.behavior) return;
 
         if (page.data.settings.behavior.allowAutoGeolocate === true) {
-            if (geolocateControl._watchState === "OFF") {
-                geolocateControl.options.trackUserLocation = true;
-                geolocateControl.trigger();
-            }
+            geolocateControl?.trigger();
         }
     }
 

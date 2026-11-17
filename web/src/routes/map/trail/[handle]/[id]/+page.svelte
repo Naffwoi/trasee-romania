@@ -58,6 +58,23 @@
         const base = `/map/trail/${page.params.handle}/${trail.id ?? page.params.id}/navigate`;
         return share ? `${base}?share=${encodeURIComponent(share)}` : base;
     });
+
+    function requestIosCompassPermissionFromStartTap() {
+        try {
+            if (typeof DeviceOrientationEvent !== "undefined") {
+                const req = (
+                    DeviceOrientationEvent as unknown as {
+                        requestPermission?: () => Promise<string>;
+                    }
+                ).requestPermission;
+                if (typeof req === "function") {
+                    void req.call(DeviceOrientationEvent).catch(() => {});
+                }
+            }
+        } catch {
+            // Non-blocking best-effort iOS compass unlock on user tap
+        }
+    }
 </script>
 
 <MetaTags
@@ -105,7 +122,8 @@
 
     <!-- Top Floating Header -->
     <header
-        class="fixed top-3.5 inset-x-3.5 z-35 flex items-center justify-between gap-2 pointer-events-none"
+        style="top: calc(0.875rem + env(safe-area-inset-top, 0px));"
+        class="fixed inset-x-3.5 z-35 flex items-center justify-between gap-2 pointer-events-none"
     >
         <div class="flex items-center gap-2 min-w-0">
             <button
@@ -129,6 +147,7 @@
         >
             <a
                 href={navigateHref}
+                onclick={requestIosCompassPermissionFromStartTap}
                 class="inline-flex items-center gap-1.5 rounded-full bg-emerald-700 hover:bg-emerald-800 text-white px-3 py-1.5 text-xs font-semibold whitespace-nowrap shadow-sm transition-colors"
             >
                 <i class="fa-solid fa-location-arrow text-[11px]" aria-hidden="true"></i>
@@ -148,7 +167,8 @@
 
     <!-- Floating Map Action Pill on Left-Top -->
     <div
-        class="fixed top-16 left-3.5 z-35 rounded-3xl bg-menu-background/95 backdrop-blur shadow-md border border-input-border/50 p-1 flex flex-col gap-1"
+        style="top: calc(4rem + env(safe-area-inset-top, 0px));"
+        class="fixed left-3.5 z-35 rounded-3xl bg-menu-background/95 backdrop-blur shadow-md border border-input-border/50 p-1 flex flex-col gap-1"
     >
         <button
             type="button"

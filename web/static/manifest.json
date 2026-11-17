@@ -1,8 +1,8 @@
 {
-  "name": "wanderer",
-  "short_name": "wanderer",
+  "name": "Trasee România",
+  "short_name": "Trasee RO",
   "lang": "ro",
-  "description": "Catalog interactiv de trasee montane și rute GPS",
+  "description": "Catalog interactiv de trasee montane și navigație GPS live",
   "start_url": "/map",
   "display": "standalone",
   "background_color": "#ffffff",

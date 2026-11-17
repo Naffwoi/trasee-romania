@@ -412,6 +412,7 @@
 <section
     data-testid="live-elevation-sheet"
     aria-label={$_("elevation-profile", { default: "Elevation profile" })}
+    style="padding-bottom: env(safe-area-inset-bottom, 0px);"
     class="bg-menu-background/96 backdrop-blur-md text-content rounded-t-2xl shadow-[0_-8px_28px_rgba(0,0,0,0.22)] border-t border-input-border/60 pointer-events-auto"
 >
     {#if confirmingExit}

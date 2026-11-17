@@ -18,8 +18,17 @@
 
     let createMenuOpen = $state(false);
     let profileMenuOpen = $state(false);
+    let iosInstallModalOpen = $state(false);
     let navElement = $state<HTMLElement>();
     let urlImportModal: UrlImportModal;
+
+    const isStandaloneApp = $derived.by(() => {
+        if (typeof window === "undefined") return false;
+        return (
+            window.matchMedia?.("(display-mode: standalone)")?.matches === true ||
+            (navigator as unknown as { standalone?: boolean }).standalone === true
+        );
+    });
 
     const pathname = $derived(page.url.pathname);
     const activeTab = $derived.by(() => {
@@ -68,7 +77,8 @@
 <nav
     bind:this={navElement}
     aria-label="Primary navigation"
-    class="app-navbar fixed bottom-0 inset-x-0 z-45 h-16 bg-menu-background/98 backdrop-blur-md border-t border-input-border/50 shadow-[0_-2px_16px_rgba(0,0,0,0.08)] select-none"
+    style="height: calc(4rem + env(safe-area-inset-bottom, 0px)); padding-bottom: env(safe-area-inset-bottom, 0px);"
+    class="app-navbar fixed bottom-0 inset-x-0 z-45 bg-menu-background/98 backdrop-blur-md border-t border-input-border/50 shadow-[0_-2px_16px_rgba(0,0,0,0.08)] select-none"
 >
     <div class="max-w-3xl mx-auto h-full flex items-center justify-around px-2 relative">
         <!-- 1. Trails (/map) -->
@@ -255,6 +265,17 @@
                     <button
                         type="button"
                         onclick={() => {
+                            closeMenus();
+                            iosInstallModalOpen = true;
+                        }}
+                        class="w-full flex items-center gap-3 px-3 py-2.5 rounded-xl text-sm font-medium text-left hover:bg-secondary-hover cursor-pointer"
+                    >
+                        <i class="fa-solid fa-mobile-screen-button w-4 text-center text-emerald-600 dark:text-emerald-400" aria-hidden="true"></i>
+                        <span>{$_("install-on-iphone", { default: "Instalează pe iPhone" })}</span>
+                    </button>
+                    <button
+                        type="button"
+                        onclick={() => {
                             toggleTheme();
                         }}
                         class="w-full flex items-center gap-3 px-3 py-2.5 rounded-xl text-sm font-medium text-left hover:bg-secondary-hover cursor-pointer"
@@ -284,5 +305,80 @@
         </div>
     </div>
 </nav>
+
+{#if iosInstallModalOpen}
+    <div
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="ios-install-title"
+        class="fixed inset-0 z-70 flex items-end sm:items-center justify-center bg-black/50 backdrop-blur-xs p-4"
+        onclick={(e) => {
+            if (e.target === e.currentTarget) iosInstallModalOpen = false;
+        }}
+        onkeydown={(e) => {
+            if (e.key === "Escape") iosInstallModalOpen = false;
+        }}
+        tabindex="-1"
+    >
+        <div
+            class="w-full max-w-md rounded-3xl bg-menu-background text-content border border-input-border/70 shadow-2xl p-5 space-y-4"
+            style="margin-bottom: env(safe-area-inset-bottom, 0px);"
+        >
+            <div class="flex items-center justify-between gap-3">
+                <div class="flex items-center gap-3">
+                    <div class="w-10 h-10 rounded-2xl bg-emerald-600/15 text-emerald-600 dark:text-emerald-400 flex items-center justify-center text-lg">
+                        <i class="fa-brands fa-apple" aria-hidden="true"></i>
+                    </div>
+                    <div>
+                        <h2 id="ios-install-title" class="text-base font-bold leading-tight">
+                            Instalează pe iPhone
+                        </h2>
+                        <p class="text-xs text-content/65">
+                            Aplicație full-screen cu GPS, busolă și redresare traseu
+                        </p>
+                    </div>
+                </div>
+                <button
+                    type="button"
+                    aria-label={$_("close", { default: "Close" })}
+                    onclick={() => (iosInstallModalOpen = false)}
+                    class="w-8 h-8 rounded-full bg-content/[0.07] hover:bg-secondary-hover flex items-center justify-center text-content/70 cursor-pointer"
+                >
+                    <i class="fa-solid fa-xmark" aria-hidden="true"></i>
+                </button>
+            </div>
+
+            {#if isStandaloneApp}
+                <div class="rounded-2xl bg-emerald-600/12 border border-emerald-500/30 p-3.5 text-xs font-semibold text-emerald-700 dark:text-emerald-300 flex items-center gap-2.5">
+                    <i class="fa-solid fa-circle-check text-base" aria-hidden="true"></i>
+                    <span>Aplicația rulează deja instalată pe ecranul principal al iPhone-ului!</span>
+                </div>
+            {:else}
+                <ol class="space-y-3 text-sm">
+                    <li class="flex items-start gap-3">
+                        <span class="w-6 h-6 rounded-full bg-emerald-600 text-white text-xs font-bold flex items-center justify-center shrink-0 mt-0.5">1</span>
+                        <span>Deschide <strong>trasee.skillfy.ro</strong> în browserul <strong>Safari</strong> pe iPhone.</span>
+                    </li>
+                    <li class="flex items-start gap-3">
+                        <span class="w-6 h-6 rounded-full bg-emerald-600 text-white text-xs font-bold flex items-center justify-center shrink-0 mt-0.5">2</span>
+                        <span>Apasă butonul <strong>Partajează (Share)</strong> <i class="fa-solid fa-arrow-up-from-bracket mx-1 text-blue-500" aria-hidden="true"></i> din bara de jos a Safari.</span>
+                    </li>
+                    <li class="flex items-start gap-3">
+                        <span class="w-6 h-6 rounded-full bg-emerald-600 text-white text-xs font-bold flex items-center justify-center shrink-0 mt-0.5">3</span>
+                        <span>Derulează în jos și alege <strong>„Adaugă la ecranul principal”</strong> (<em>Add to Home Screen</em>) → <strong>Adaugă</strong>.</span>
+                    </li>
+                </ol>
+            {/if}
+
+            <button
+                type="button"
+                onclick={() => (iosInstallModalOpen = false)}
+                class="w-full py-2.5 rounded-2xl bg-emerald-700 hover:bg-emerald-800 text-white text-sm font-semibold cursor-pointer transition-colors"
+            >
+                Am înțeles
+            </button>
+        </div>
+    </div>
+{/if}
 
 <UrlImportModal bind:this={urlImportModal}></UrlImportModal>

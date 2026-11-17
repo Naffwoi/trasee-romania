@@ -999,6 +999,32 @@
         compassSensor = new CompassSensor();
         compassSensor.start((reading) => handleCompassReading(reading.heading, reading.accuracy));
 
+        // On iOS Safari / standalone PWA, DeviceOrientationEvent.requestPermission()
+        // requires a user gesture if not already unlocked from the Start button.
+        let removeIosCompassGesture: (() => void) | null = null;
+        if (
+            typeof window !== "undefined" &&
+            typeof DeviceOrientationEvent !== "undefined" &&
+            typeof (
+                DeviceOrientationEvent as unknown as {
+                    requestPermission?: () => Promise<string>;
+                }
+            ).requestPermission === "function"
+        ) {
+            const onFirstGesture = () => {
+                void compassSensor?.requestPermissionFromGesture().then((granted) => {
+                    if (granted) {
+                        compassSensor?.start((reading) =>
+                            handleCompassReading(reading.heading, reading.accuracy),
+                        );
+                    }
+                });
+            };
+            window.addEventListener("click", onFirstGesture, { capture: true, once: true });
+            removeIosCompassGesture = () =>
+                window.removeEventListener("click", onFirstGesture, { capture: true });
+        }
+
         if (typeof navigator !== "undefined" && navigator.geolocation) {
             try {
                 watchId = navigator.geolocation.watchPosition(
@@ -1081,6 +1107,7 @@
         }
 
         return () => {
+            removeIosCompassGesture?.();
             if (typeof document !== "undefined") {
                 document.removeEventListener("visibilitychange", handleVisibilityChange);
             }
@@ -1120,7 +1147,8 @@
 
     <!-- Top Navigation Banner -->
     <div
-        class="fixed top-3 inset-x-3 z-30 max-w-xl mx-auto pointer-events-none"
+        style="top: calc(0.75rem + env(safe-area-inset-top, 0px));"
+        class="fixed inset-x-3 z-30 max-w-xl mx-auto pointer-events-none"
     >
         {#if activePoints.length === 0}
             <div
@@ -1156,7 +1184,7 @@
     <!-- Floating Right Controls: 3D/2D Pitch Toggle & Recenter Pill -->
     <div
         class="fixed right-3 z-30 flex flex-col items-end gap-2 pointer-events-none transition-all duration-200"
-        style="bottom: {sheetExpanded ? '248px' : '92px'};"
+        style="bottom: calc({sheetExpanded ? '248px' : '92px'} + env(safe-area-inset-bottom, 0px));"
     >
         <button
             type="button"

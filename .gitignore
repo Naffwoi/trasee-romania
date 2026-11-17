@@ -23,3 +23,5 @@ plugin_dist/
 CLAUDE.md
 DESIGN.md
 PRODUCT.md
+__pycache__/
+*.py[cod]

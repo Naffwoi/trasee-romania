@@ -437,7 +437,7 @@
     }
     .map-search-header {
         position: fixed;
-        top: 14px;
+        top: calc(14px + env(safe-area-inset-top, 0px));
         left: 16px;
         right: 16px;
         max-width: 520px;

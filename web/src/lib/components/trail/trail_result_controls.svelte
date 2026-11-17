@@ -28,9 +28,10 @@
         searchExpansion?: SearchExpansion;
         onsearchposition?: (position: SearchPosition) => void;
         onsearchexpansion?: (expansion: SearchExpansion) => void;
+        mobileChip?: boolean;
     }
     let { sort, order = "+", sortOptions, display = "cards", displayOptions = [],
-        pageSize = 25, pageSizes = [], wide = false, onsort, ondisplay, onpagesize, onwidthtoggle, selectionActions, buttonsOnly = false, actions, afterView, showResultOptions = true, viewActions, searchPosition = "top", searchExpansion = "overlay", onsearchposition, onsearchexpansion }: Props = $props();
+        pageSize = 25, pageSizes = [], wide = false, onsort, ondisplay, onpagesize, onwidthtoggle, selectionActions, buttonsOnly = false, actions, afterView, showResultOptions = true, viewActions, searchPosition = "top", searchExpansion = "overlay", onsearchposition, onsearchexpansion, mobileChip = false }: Props = $props();
     const id = $props.id();
     let root: HTMLDivElement;
     let sortButton = $state<HTMLButtonElement>();
@@ -133,7 +134,7 @@
 
 <svelte:window onpointerdown={outside} onkeydown={keydown} onresize={positionMenu} onscroll={positionMenu} />
 
-<div class="result-controls" class:buttons-only={buttonsOnly} class:hide-mobile-options={!showResultOptions} bind:this={root} onfocusout={focusOut}>
+<div class="result-controls" class:buttons-only={buttonsOnly} class:mobile-chip={mobileChip} class:hide-mobile-options={!showResultOptions} bind:this={root} onfocusout={focusOut}>
     <div class="result-summary">
         {#if selectionActions}{@render selectionActions()}{/if}
     </div>
@@ -143,7 +144,7 @@
         <div class="menu-anchor">
             <button type="button" class="btn-icon control-button" bind:this={sortButton} aria-label={`${$_("sort")}: ${sortLabel()}`} title={`${$_("sort")}: ${sortLabel()}`} aria-expanded={open === "sort"} aria-controls={`${id}-sort`} onclick={() => toggle("sort")}>
                 <i class={`fa ${order === "+" ? "fa-arrow-down-short-wide" : "fa-arrow-down-wide-short"}`} aria-hidden="true"></i>
-                <span class="control-copy">{sortLabel()}</span><i class="fa fa-chevron-down chevron" aria-hidden="true"></i>
+                <span class="control-copy">{mobileChip ? $_("sort") : sortLabel()}</span>{#if !mobileChip}<i class="fa fa-chevron-down chevron" aria-hidden="true"></i>{/if}
             </button>
             {#if open === "sort"}
             <div id={`${id}-sort`} class="result-menu" class:above role="region" aria-label={$_("sort")} style={`max-height: ${maxHeight}px`}>
@@ -270,5 +271,30 @@
         .result-controls { gap: .5rem; }
         .result-buttons { gap: .15rem; }
         .result-menu:not(.view-menu) { right: var(--result-sort-menu-offset, -2.65rem); }
+    }
+    .mobile-chip { min-height: 0; }
+    .mobile-chip .result-summary { display: none; }
+    .mobile-chip .control-copy { display: inline !important; }
+    .mobile-chip :global(:where(.control-button)) {
+        background: rgba(var(--menu-background));
+        border: 1px solid rgba(var(--input-border), 0.45);
+        border-radius: 9999px !important;
+        box-shadow: 0 3px 10px rgb(0 0 0 / 0.14);
+        color: rgba(var(--content));
+        font-size: 0.85rem;
+        font-weight: 500;
+        gap: 0.45rem;
+        min-height: 2.25rem;
+        padding: 0.4rem 0.95rem !important;
+        width: auto !important;
+    }
+    .mobile-chip :global(.control-button:hover) {
+        background: rgba(var(--secondary-hover));
+    }
+    .mobile-chip .chevron { display: none; }
+    .mobile-chip .result-menu {
+        border-radius: 1rem;
+        left: 0;
+        right: auto;
     }
 </style>

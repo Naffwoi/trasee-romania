@@ -25,6 +25,7 @@
         { text: $_("norwegian"), value: "no" },
         { text: $_("polish"), value: "pl" },
         { text: $_("portuguese"), value: "pt" },
+        { text: $_("romanian"), value: "ro" },
         { text: $_("russian"), value: "ru" },
         { text: $_("chinese"), value: "zh" },
     ];

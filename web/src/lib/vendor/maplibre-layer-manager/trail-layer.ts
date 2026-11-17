@@ -11,10 +11,27 @@ export class TrailLayer implements BaseLayer {
     constructor(id: string, geojson: GeoJSON.FeatureCollection, color: string, options?: {
         listeners?: { onMouseUp?: (e: MapMouseEvent) => void; onMouseDown?: (e: MapMouseEvent) => void; onEnter?: (e: MapMouseEvent) => void; onLeave?: (e: MapMouseEvent) => void; onMouseMove?: (e: MapMouseEvent) => void; }
     }) {
+        const casingLayer: M.LineLayerSpecification = {
+            id: `${id}-casing`,
+            type: "line",
+            source: id,
+            layout: {
+                "line-cap": "round",
+                "line-join": "round",
+            },
+            paint: {
+                "line-color": "#ffffff",
+                "line-width": 9,
+            },
+        };
         const layer: M.LineLayerSpecification = {
             id: id,
             type: "line",
             source: id,
+            layout: {
+                "line-cap": "round",
+                "line-join": "round",
+            },
             paint: {
                 "line-color": color,
                 "line-width": 5,
@@ -30,7 +47,7 @@ export class TrailLayer implements BaseLayer {
                     data: geojson,
                 }
             },
-            layers: [layer]
+            layers: [casingLayer, layer]
 
         };
 

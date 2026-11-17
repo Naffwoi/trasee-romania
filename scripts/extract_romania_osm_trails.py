@@ -22,6 +22,8 @@ from typing import Iterable
 
 import osmium
 
+from dem_elevation import DemTileCache, enrich_segments_with_elevation
+
 RO_LAT_MIN, RO_LAT_MAX = 43.4, 48.5
 RO_LON_MIN, RO_LON_MAX = 20.0, 30.0
 MIN_DISTANCE_METERS = 400.0
@@ -187,7 +189,7 @@ def segment_distance(pts: Iterable[tuple[float, float]]) -> float:
     return total
 
 
-def build_gpx_xml(name: str, desc: str, segments: list[list[tuple[float, float]]]) -> str:
+def build_gpx_xml(name: str, desc: str, segments: list[list[tuple[float, float, float | None]]]) -> str:
     safe_name = saxutils.escape(name)
     safe_desc = saxutils.escape(desc)
     lines = [
@@ -202,8 +204,11 @@ def build_gpx_xml(name: str, desc: str, segments: list[list[tuple[float, float]]
     ]
     for seg in segments:
         lines.append("    <trkseg>")
-        for lon, lat in seg:
-            lines.append(f'      <trkpt lat="{lat:.6f}" lon="{lon:.6f}"></trkpt>')
+        for lon, lat, ele in seg:
+            if ele is not None:
+                lines.append(f'      <trkpt lat="{lat:.6f}" lon="{lon:.6f}"><ele>{ele:.1f}</ele></trkpt>')
+            else:
+                lines.append(f'      <trkpt lat="{lat:.6f}" lon="{lon:.6f}"></trkpt>')
         lines.append("    </trkseg>")
     lines.extend(["  </trk>", "</gpx>", ""])
     return "\n".join(lines)
@@ -254,7 +259,11 @@ class WayGeometryCollector(osmium.SimpleHandler):
             self.ways[wid] = coords
 
 
-def build_trail_record(rel: dict, ways: dict[int, list[tuple[float, float]]]) -> tuple[dict, str] | None:
+def build_trail_record(
+    rel: dict,
+    ways: dict[int, list[tuple[float, float]]],
+    dem: DemTileCache,
+) -> tuple[dict, str] | None:
     rel_id: int = rel["id"]
     tags: dict[str, str] = rel["tags"]
     route_type = tags.get("route", "hiking")
@@ -264,13 +273,21 @@ def build_trail_record(rel: dict, ways: dict[int, list[tuple[float, float]]]) ->
         return None
 
     raw_segments = stitch_ways(way_coords)
-    segments = [downsample_segment(seg) for seg in raw_segments if len(seg) >= 2]
-    if not segments:
+    segments_2d = [downsample_segment(seg) for seg in raw_segments if len(seg) >= 2]
+    if not segments_2d:
         return None
 
-    distance_m = sum(segment_distance(seg) for seg in segments)
+    distance_m = sum(segment_distance(seg) for seg in segments_2d)
     if distance_m < MIN_DISTANCE_METERS:
         return None
+
+    segments, ele_metrics = enrich_segments_with_elevation(segments_2d, dem)
+    elevation_gain = int(ele_metrics["elevation_gain"])
+    elevation_loss = int(ele_metrics["elevation_loss"])
+    min_ele = int(ele_metrics["min_ele"])
+    max_ele = int(ele_metrics["max_ele"])
+    start_ele = int(ele_metrics["start_ele"])
+    end_ele = int(ele_metrics["end_ele"])
 
     marking = parse_osmc_marking(tags.get("osmc:symbol"))
     from_tag = tags.get("from", "").strip()
@@ -308,16 +325,24 @@ def build_trail_record(rel: dict, ways: dict[int, list[tuple[float, float]]]) ->
 
     difficulty = SAC_DIFFICULTY_MAP.get(sac_scale)
     if not difficulty:
-        difficulty = "moderate" if (distance_m >= 5000.0 or marking is not None) else "easy"
+        if elevation_gain >= 900 or distance_m >= 18000.0:
+            difficulty = "difficult"
+        elif elevation_gain >= 250 or distance_m >= 5000.0 or marking is not None:
+            difficulty = "moderate"
+        else:
+            difficulty = "easy"
 
     category_name = "Biking" if route_type == "mtb" else "Hiking"
-    speed_kmh = 10.0 if route_type == "mtb" else 3.5
-    duration_s = max(60, int(round((distance_m / 1000.0) / speed_kmh * 3600.0)))
+    if route_type == "mtb":
+        hours = (distance_m / 12000.0) + (elevation_gain / 800.0)
+    else:
+        hours = (distance_m / 4000.0) + (elevation_gain / 600.0)
+    duration_s = max(60, int(round(hours * 3600.0)))
 
-    all_pts = [pt for seg in segments for pt in seg]
+    all_pts = [pt for seg in segments_2d for pt in seg]
     lons = [p[0] for p in all_pts]
     lats = [p[1] for p in all_pts]
-    start_lon, start_lat = segments[0][0]
+    start_lon, start_lat = segments_2d[0][0]
 
     location = (
         tags.get("addr:city")
@@ -336,6 +361,13 @@ def build_trail_record(rel: dict, ways: dict[int, list[tuple[float, float]]]) ->
         route_str = f"{from_tag or '?'} → {to_tag or '?'}"
         desc_parts.append(f"<p><strong>Traseu:</strong> {html.escape(route_str)}</p>")
     desc_parts.append(f"<p><strong>Lungime:</strong> {distance_m / 1000.0:.2f} km</p>")
+    if max_ele > 0 or elevation_gain > 0:
+        desc_parts.append(
+            f"<p><strong>Altitudine:</strong> {start_ele} m → {end_ele} m (Vârf: {max_ele} m)</p>"
+        )
+        desc_parts.append(
+            f"<p><strong>Diferență de nivel:</strong> +{elevation_gain} m / -{elevation_loss} m</p>"
+        )
     if operator:
         desc_parts.append(f"<p><strong>Operator / Întreținere:</strong> {html.escape(operator)}</p>")
     if network in NETWORK_LABELS:
@@ -346,7 +378,10 @@ def build_trail_record(rel: dict, ways: dict[int, list[tuple[float, float]]]) ->
     desc_parts.append(f"<p><small>Sursă: OpenStreetMap (osm:relation:{rel_id})</small></p>")
     description_html = "\n".join(desc_parts)
 
-    plain_desc = f"{marking + ' | ' if marking else ''}{distance_m / 1000.0:.2f} km | osm:relation:{rel_id}"
+    plain_desc = (
+        f"{marking + ' | ' if marking else ''}{distance_m / 1000.0:.2f} km | "
+        f"+{elevation_gain}m / -{elevation_loss}m | osm:relation:{rel_id}"
+    )
     gpx_xml = build_gpx_xml(name, plain_desc, segments)
 
     record = {
@@ -355,6 +390,10 @@ def build_trail_record(rel: dict, ways: dict[int, list[tuple[float, float]]]) ->
         "description": description_html,
         "location": location,
         "distance": round(distance_m, 2),
+        "elevation_gain": elevation_gain,
+        "elevation_loss": elevation_loss,
+        "min_ele": min_ele,
+        "max_ele": max_ele,
         "duration": duration_s,
         "difficulty": difficulty,
         "category": category_name,
@@ -374,11 +413,13 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Extract Romanian hiking/MTB trails from OSM PBF.")
     parser.add_argument("--pbf", required=True, help="Path to romania-latest.osm.pbf")
     parser.add_argument("--out-dir", required=True, help="Output directory for GPX + manifest")
+    parser.add_argument("--dem-dir", required=False, help="Cache directory for SRTM .hgt DEM tiles")
     parser.add_argument("--tarball", required=False, help="Optional .tar.gz output path")
     args = parser.parse_args()
 
     pbf_path = Path(args.pbf).resolve()
     out_dir = Path(args.out_dir).resolve()
+    dem_dir = Path(args.dem_dir).resolve() if args.dem_dir else (out_dir.parent / "dem")
     gpx_dir = out_dir / "gpx"
     gpx_dir.mkdir(parents=True, exist_ok=True)
 
@@ -392,13 +433,20 @@ def main() -> None:
     way_collector.apply_file(str(pbf_path), locations=True, idx="flex_mem")
     print(f"[Pass 2] Resolved geometries for {len(way_collector.ways)} ways.")
 
+    tiles_needed: set[tuple[int, int]] = set()
+    for pts in way_collector.ways.values():
+        for lon, lat in pts:
+            tiles_needed.add((int(math.floor(lat)), int(math.floor(lon))))
+    dem = DemTileCache(dem_dir)
+    dem.ensure_tiles(tiles_needed)
+
     manifest_path = out_dir / "manifest.jsonl"
     exported = 0
     skipped = 0
 
     with manifest_path.open("w", encoding="utf-8") as mf:
         for rel in rel_collector.relations:
-            res = build_trail_record(rel, way_collector.ways)
+            res = build_trail_record(rel, way_collector.ways, dem)
             if res is None:
                 skipped += 1
                 continue

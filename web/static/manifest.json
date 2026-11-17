@@ -1,8 +1,9 @@
 {
   "name": "wanderer",
   "short_name": "wanderer",
-  "description": "A self-hosted trail database",
-  "start_url": "/",
+  "lang": "ro",
+  "description": "Catalog interactiv de trasee montane și rute GPS",
+  "start_url": "/map",
   "display": "standalone",
   "background_color": "#ffffff",
   "theme_color": "#1e2327",

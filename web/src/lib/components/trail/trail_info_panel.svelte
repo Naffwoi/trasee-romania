@@ -851,9 +851,9 @@
                         </div>
                     </div>
                 {:else if trail.description?.length}
-                    <article class="text-justify whitespace-pre-line text-sm">
+                    <article class="text-justify text-sm">
                         {#if descriptionPreview.truncated && !fullDescription}
-                            <div>{descriptionPreview.text}</div>
+                            <div class="whitespace-pre-line">{descriptionPreview.text}</div>
                             <button
                                 onclick={(e) => {
                                     e.stopPropagation();
@@ -866,7 +866,7 @@
                                 ></button
                             >
                         {:else}
-                            <div class="prose dark:prose-invert">
+                            <div class="prose dark:prose-invert prose-p:my-1.5 max-w-none">
                                 {@html sanitizeHTML(trail.description)}
                             </div>
                         {/if}

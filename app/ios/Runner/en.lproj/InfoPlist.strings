@@ -1,0 +1,5 @@
+"NSCameraUsageDescription" = "Wanderer needs camera access so you can take a new profile photo.";
+"NSLocationAlwaysAndWhenInUseUsageDescription" = "Wanderer needs your location at all times to continue navigation when the screen locks.";
+"NSLocationWhenInUseUsageDescription" = "Your location is shown on the map to help you navigate trails.";
+"NSMotionUsageDescription" = "Wanderer uses motion and barometer sensors to show which way you are facing, keep your recorded track accurate between GPS fixes, and measure elevation gain.";
+"NSPhotoLibraryUsageDescription" = "Wanderer needs access to your photo library so you can choose a profile avatar.";

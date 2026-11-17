@@ -94,13 +94,15 @@
       "label": "Start date",
       "labels": {
         "de": "Startdatum",
-        "en": "Start date"
+        "en": "Start date",
+        "ro": "Data de început"
       },
       "description": "Ignore routes and activities before this date.",
       "descriptions": {
         "de": "Wenn dein Konto viele Routen und Aktivitäten enthält, können zahlreiche API-Anfragen dazu führen, dass Hammerhead den Zugriff vorübergehend einschränkt. Lege ein Startdatum fest, um die Importmenge zu reduzieren; dann werden nur Inhalte nach diesem Datum synchronisiert.",
         "en": "If your account contains many routes and activities, a large number of API requests may cause Hammerhead to temporarily restrict access. Set a start date to reduce the import volume so that only content after that date is synchronized.",
-        "no": "Hvis kontoen din inneholder mange ruter og aktiviteter, kan et stort antall API-forespørsler føre til at Hammerhead midlertidig begrenser tilgangen. Angi en startdato for å redusere importmengden, slik at bare innhold etter denne datoen synkroniseres."
+        "no": "Hvis kontoen din inneholder mange ruter og aktiviteter, kan et stort antall API-forespørsler føre til at Hammerhead midlertidig begrenser tilgangen. Angi en startdato for å redusere importmengden, slik at bare innhold etter denne datoen synkroniseres.",
+        "ro": "Setează o dată de început pentru a evita activitățile duplicate atunci când contul tău Hammerhead este deja sincronizat cu alte servicii, precum komoot sau Strava. Vor fi sincronizate doar rutele și activitățile de după această dată."
       }
     }
   ],
@@ -113,11 +115,13 @@
     "descriptions": {
       "de": "Importiert Hammerhead-Routen und Aktivitäten und kann wanderer-Routen an Hammerhead senden.",
       "en": "Imports Hammerhead routes and activities, and can send wanderer routes to Hammerhead.",
-      "no": "Synkroniserer Hammerhead-turene dine med Wanderer med jevne mellomrom."
+      "no": "Synkroniserer Hammerhead-turene dine med Wanderer med jevne mellomrom.",
+      "ro": "Importă rute și activități din Hammerhead și poate trimite rute wanderer către Hammerhead."
     },
     "information": {
       "de": "Dieses Plugin verbindet wanderer mit deinem Hammerhead-Konto. Es importiert geplante Routen und abgeschlossene Aktivitäten und kann in wanderer erstellte Routen an Hammerhead senden. Neue und aktualisierte Inhalte werden bei den regelmäßig ausgeführten Synchronisierungsläufen importiert. Ein Startdatum begrenzt die Importmenge und reduziert das Risiko, dass Hammerhead den Zugriff wegen zu vieler API-Anfragen vorübergehend einschränkt.",
-      "en": "This plugin connects wanderer with your Hammerhead account. It imports planned routes and completed activities, and can send routes created in wanderer to Hammerhead. New and updated content is imported during the regularly scheduled synchronization runs. A start date limits the import volume and reduces the risk of Hammerhead temporarily restricting access because of too many API requests."
+      "en": "This plugin connects wanderer with your Hammerhead account. It imports planned routes and completed activities, and can send routes created in wanderer to Hammerhead. New and updated content is imported during the regularly scheduled synchronization runs. A start date limits the import volume and reduces the risk of Hammerhead temporarily restricting access because of too many API requests.",
+      "ro": "Acest plugin conectează wanderer la contul tău Hammerhead. Importă rutele și activitățile salvate și îți permite să trimiți trasee din wanderer direct către Hammerhead. Poți seta o dată de început pentru a sincroniza doar activitățile recente."
     },
     "homepageUrl": "https://dashboard.hammerhead.io/",
     "icons": {
@@ -128,7 +132,8 @@
       "biking": {
         "labels": {
           "de": "Radfahren",
-          "en": "Biking"
+          "en": "Biking",
+          "ro": "Ciclism"
         }
       }
     }

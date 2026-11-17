@@ -80,6 +80,12 @@ export async function fetchNominatim(event: RequestEvent, path: string, params: 
         url.search = query;
     }
 
+    const userLang = event.locals?.settings?.language;
+    const headerLang = event.request?.headers?.get("accept-language");
+    const acceptLanguage = userLang
+        ? `${userLang},en;q=0.8`
+        : headerLang || undefined;
+
     return withNominatimQueue(baseUrl, async () => {
         let attempt = 0;
 
@@ -89,11 +95,15 @@ export async function fetchNominatim(event: RequestEvent, path: string, params: 
             const controller = new AbortController();
             const timeout = setTimeout(() => controller.abort(), NOMINATIM_TIMEOUT_MS);
             try {
+                const headers: Record<string, string> = {
+                    "User-Agent": `wanderer/${version}`,
+                };
+                if (acceptLanguage) {
+                    headers["Accept-Language"] = acceptLanguage;
+                }
                 const response = await event.fetch(url.toString(), {
                     method: "GET",
-                    headers: {
-                        "User-Agent": `wanderer/${version}`,
-                    },
+                    headers,
                     signal: controller.signal,
                 });
 

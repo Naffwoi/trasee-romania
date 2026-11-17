@@ -9,7 +9,7 @@ import { sequence, type Handle } from '@sveltejs/kit/hooks'
 import { Meilisearch } from 'meilisearch'
 import { locale } from 'svelte-i18n'
 import type { Actor } from '#lib/models/activitypub/actor.ts'
-import { normalizeLocale } from '#lib/i18n/locales.ts'
+import { normalizeLocale, resolveAcceptLanguage } from '#lib/i18n/locales.ts'
 import { handleError } from '#lib/util/api_util.ts'
 import { apiErrorsAsJson, isApiRequest } from '#lib/server/api_errors.ts'
 import { clientAddress, settleOnAbort } from '#lib/server/http.ts'
@@ -243,18 +243,20 @@ const auth: Handle = async ({ event, resolve }) => {
   }
   event.locals.settings = settings
 
-  const langHeader = event.request.headers.get('accept-language')?.split(',')[0]
-  const lang = settings?.language ?? langHeader
+  const acceptLang = event.request.headers.get('accept-language');
+  const resolvedLocale = settings?.language
+    ? normalizeLocale(settings.language)
+    : resolveAcceptLanguage(acceptLang);
 
-  if (lang) {
-    const normalizedLocale = normalizeLocale(lang)
-    locale.set(normalizedLocale)
-    if (pb.authStore.record) {
-      pb.authStore.record!.language = normalizedLocale;
-    }
+  locale.set(resolvedLocale);
+  if (pb.authStore.record) {
+    pb.authStore.record!.language = resolvedLocale;
   }
 
-  const response = await resolve(event)
+  const response = await resolve(event, {
+    transformPageChunk: ({ html }) =>
+      html.replace('<html lang="en">', `<html lang="${resolvedLocale}">`),
+  })
 
   // send back the default 'pb_auth' cookie to the client with the latest store state
   const pbCookie = pb.authStore.exportToCookie({ httpOnly: false, secure: secure, sameSite: "Lax" });

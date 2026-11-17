@@ -53,8 +53,8 @@ import 'package:wanderer/util/map/sheet_metrics.dart';
 /// location).
 const double _kPointZoom = 13.0;
 
-/// World-view zoom for the (0,0) fallback when no other location is known.
-const double _kWorldZoom = 3.0;
+/// Default Romania-centered fallback zoom when no other location is known.
+const double _kDefaultCountryZoom = 6.5;
 
 class MapScreen extends ConsumerStatefulWidget {
   final ml.Geographic? initialCenter;
@@ -417,12 +417,12 @@ class _MapScreenState extends ConsumerState<MapScreen>
 
     sheetMinSize = (shellBottom + 80) / MediaQuery.of(context).size.height;
 
-    // Initial-focus fallback chain, lowest priority first: (0,0) world view,
+    // Initial-focus fallback chain, lowest priority first: Romania overview,
     // then the user's saved home location, then a resolved GPS fix. Each of
     // these only matters when there's neither an explicit route-provided
     // center nor a previously saved camera position (both handled below).
-    ml.Geographic fallbackCenter = const ml.Geographic(lat: 0, lon: 0);
-    double fallbackZoom = _kWorldZoom;
+    ml.Geographic fallbackCenter = const ml.Geographic(lat: 45.9, lon: 25.0);
+    double fallbackZoom = _kDefaultCountryZoom;
     final settingsLocation = ref.watch(settingsProvider)?.location;
     if (settingsLocation != null) {
       fallbackCenter = ml.Geographic(

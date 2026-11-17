@@ -186,6 +186,9 @@
 
     let hideDemoHint = $state(false);
     let showWarning = $state(false);
+    const isFullScreenMapRoute = $derived(
+        page.url.pathname === "/map" || page.url.pathname.startsWith("/map/trail/"),
+    );
 </script>
 
 <svelte:window onpageshow={handlePageShow} />
@@ -232,8 +235,14 @@
     </div>
 {/if}
 
-<NavBar user={data.user}></NavBar>
 <PageLoadingBar class="text-content"></PageLoadingBar>
 <Toast></Toast>
 <UploadDialog></UploadDialog>
-{@render children?.()}
+{#if isFullScreenMapRoute}
+    {@render children?.()}
+{:else}
+    <div class="pb-20">
+        {@render children?.()}
+    </div>
+{/if}
+<NavBar user={data.user}></NavBar>

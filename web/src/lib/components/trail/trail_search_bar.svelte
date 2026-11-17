@@ -42,8 +42,10 @@
         onplaceselect?: (location: LocationSearchResult) => void | Promise<void>;
         trailSuggestions?: boolean;
         onapply: (filter: TrailFilter, resetBounds?: boolean) => void;
+        mobilePill?: boolean;
+        activeFilterCount?: number;
     }
-    let { categories, subcategories, filter = $bindable(), defaults, onapply, inlineControls = false, layout = "overlay", filterPanelTarget, filterSections, onplaceselect, trailSuggestions = false }: Props = $props();
+    let { categories, subcategories, filter = $bindable(), defaults, onapply, inlineControls = false, layout = "overlay", filterPanelTarget, filterSections, onplaceselect, trailSuggestions = false, mobilePill = false, activeFilterCount = $bindable(0) }: Props = $props();
     const id = $props.id();
     let sections = $derived(normalizeTrailSearchFilterSections(filterSections));
     let availableEditors = $derived(trailSearchFilters.filter(editor => !("requiresUser" in editor) || Boolean($currentUser)));
@@ -205,6 +207,13 @@
         resetBounds = false;
         queryCaret = querySelectionEnd = draft.q.length;
         activeCategoryId = next.category[0] ?? null;
+    }
+    $effect(() => {
+        activeFilterCount = appliedChips.length;
+    });
+    export function toggleFilterPanel() {
+        if (expanded) dismiss();
+        else openSearch();
     }
     function focusInput() {
         restoringFocus = true;
@@ -619,11 +628,11 @@
 
 <svelte:window onblur={clearOutsidePress} oncontextmenu={clearOutsidePress} onmousemove={clearLostOutsidePress} onpointerup={handleOutsideRelease} onpointercancel={handleOutsideRelease} onpointerdown={handleOutsidePointer} onkeydown={handleKeydown} onresize={updatePanelHeight} onscroll={updatePanelHeight} />
 
-<div bind:this={searchRoot} class="trail-search-bar" data-search-root class:with-inline-controls={inlineControls} class:in-flow={layout !== "overlay"} class:sidebar={pinned} onfocusout={handleFocusOut}>
+<div bind:this={searchRoot} class="trail-search-bar" data-search-root class:with-inline-controls={inlineControls} class:in-flow={layout !== "overlay"} class:sidebar={pinned} class:mobile-pill={mobilePill} onfocusout={handleFocusOut}>
     <form onsubmit={applySearch} class="search-form" class:expanded={expanded && !pinned} class:suggestions-dismissed={suggestionsDismissed} role="search" aria-label={$_("search-trails")}>
         <div bind:this={searchHeading} class="search-heading">
             <i class="fa fa-magnifying-glass" aria-hidden="true"></i>
-            <input bind:this={searchInput} value={expanded ? draft.q : filter.q} type="search" autocomplete="off" aria-label={$_("search-trails")} placeholder={$_("trail-search-placeholder")}
+            <input bind:this={searchInput} value={expanded ? draft.q : filter.q} type="search" autocomplete="off" aria-label={$_("search-trails")} placeholder={mobilePill ? $_("search") : $_("trail-search-placeholder")}
                 onfocus={() => { if (!restoringFocus) { suggestionsDismissed = false; openSearch(); } }}
                 onclick={(event) => { suggestionsDismissed = false; openSearch(); updateQuerySelection(event); }}
                 onselect={updateQuerySelection} onkeyup={updateQuerySelection} oninput={updateQuery}
@@ -636,7 +645,7 @@
                 <i class="fa fa-filter-circle-xmark" aria-hidden="true"></i>
             </button>
             {/if}
-            {#if !pinned}
+            {#if !pinned && !mobilePill}
                 <button type="button" class="btn-icon icon-button" bind:this={filterButton} aria-label={$_(expanded ? "trail-search-close" : "trail-search-filter-by")} aria-expanded={expanded} aria-controls={`${id}-panel`}
                     onclick={(event) => { if (expanded) dismiss(event.detail === 0); else { openSearch(); if (event.detail === 0) focusInput(); } }}>
                     <i class={`fa ${expanded ? "fa-xmark" : "fa-sliders"}`} aria-hidden="true"></i>
@@ -686,7 +695,7 @@
         </div>
         {/if}
     </form>
-    {#if appliedChips.length}<SearchFilterSummary chips={appliedChips} onremove={removeApplied} />{/if}
+    {#if appliedChips.length && !mobilePill}<SearchFilterSummary chips={appliedChips} onremove={removeApplied} />{/if}
 </div>
 
 <style>
@@ -781,5 +790,35 @@
     @media (max-width: 639px) {
         .with-inline-controls .search-heading { gap: .5rem; padding-left: .65rem; }
         .with-inline-controls .search-heading > i { display: none; }
+    }
+    .mobile-pill .search-form {
+        background: rgba(var(--menu-background));
+        border-radius: 9999px;
+        box-shadow: 0 4px 16px rgb(0 0 0 / 0.16);
+    }
+    .mobile-pill .search-form.expanded {
+        border-radius: 9999px;
+    }
+    .mobile-pill .search-heading {
+        border-color: rgba(var(--input-border), 0.45);
+        border-radius: 9999px;
+        gap: 0.75rem;
+        min-height: 3rem;
+        padding: 0.25rem 1.15rem;
+    }
+    .mobile-pill .search-form.expanded .search-heading {
+        border-bottom-color: rgba(var(--input-border-focus));
+    }
+    .mobile-pill .search-heading > i {
+        color: rgba(var(--content), 0.75);
+        display: inline-block !important;
+        font-size: 1.05rem;
+    }
+    .mobile-pill .search-panel {
+        border: 1px solid rgba(var(--input-border));
+        border-radius: 1rem;
+        box-shadow: 0 14px 32px rgb(0 0 0 / 0.2);
+        top: calc(100% + 0.5rem);
+        z-index: 45;
     }
 </style>

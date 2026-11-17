@@ -3,7 +3,8 @@
     import TextField from "#lib/components/base/text_field.svelte";
     import LogoTextTwoLineDark from "#lib/components/logo/logo_text_two_line_dark.svelte";
     import LogoTextTwoLineLight from "#lib/components/logo/logo_text_two_line_light.svelte";
-    import { Language } from "#lib/models/settings.ts";
+    import type { Language } from "#lib/models/settings.ts";
+    import { resolveNavigatorLocale } from "#lib/i18n/locales.ts";
     import type { User } from "#lib/models/user.ts";
     import { settings_for_user, settings_update } from "#lib/stores/settings_store.ts";
     import { theme } from "#lib/stores/theme_store.ts";
@@ -97,12 +98,10 @@
                 // Auth refreshes may invalidate the layout concurrently. Read
                 // the new user's settings from the authenticated API directly.
                 const settings = await settings_for_user(createdUser.id);
-                const browserLang: Language = window.navigator.language
-                    .toLocaleLowerCase()
-                    .slice(0, 2) as Language;
-                const language = Object.values(Language).includes(browserLang)
-                    ? browserLang
-                    : Language.en;
+                const language = resolveNavigatorLocale(
+                    window.navigator.languages,
+                    window.navigator.language,
+                ) as Language;
                 await settings_update({ id: settings.id, language });
             } catch (e) {
                 // The account is already usable. Carry the notice across the

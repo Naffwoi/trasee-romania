@@ -1,3 +1,5 @@
+import 'dart:ui' show PlatformDispatcher;
+
 import 'package:dio/dio.dart';
 import 'package:dio_cookie_manager/dio_cookie_manager.dart';
 import 'package:riverpod_annotation/riverpod_annotation.dart';
@@ -84,6 +86,10 @@ class Api extends _$Api {
       InterceptorsWrapper(
         onRequest: (options, handler) {
           options.cancelToken ??= _sessionCancelToken;
+          if (isBackendRequest(dio, options.uri)) {
+            options.headers['Accept-Language'] ??=
+                PlatformDispatcher.instance.locale.toLanguageTag();
+          }
           handler.next(options);
         },
       ),

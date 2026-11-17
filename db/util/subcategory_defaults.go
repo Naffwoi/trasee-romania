@@ -22,20 +22,26 @@ var defaultSubcategories = []defaultSubcategorySeed{
 		name:           "MTB",
 		shortName:      "MTB",
 		badgeIcon:      "mountain",
-		settings:       map[string]any{"valhalla_profile": "bicycle_mountain"},
+		translations: map[string]CategoryTranslation{
+			"ro": {Name: "MTB", ShortName: "MTB"},
+		},
+		settings: map[string]any{"valhalla_profile": "bicycle_mountain"},
 	},
 	{
 		parentCategory: "Biking",
 		name:           "Gravel",
 		shortName:      "GRVL",
-		settings:       map[string]any{"valhalla_profile": "bicycle_cross"},
+		translations: map[string]CategoryTranslation{
+			"ro": {Name: "Gravel", ShortName: "GRVL"},
+		},
+		settings: map[string]any{"valhalla_profile": "bicycle_cross"},
 	},
 	{
 		parentCategory: "Biking",
 		name:           "Touring",
 		shortName:      "TOUR",
 		aliases:        []string{"Touring Bike", "City Bike"},
-		translations:   subcategoryTranslations("Touring", "Tourenrad", "TOUR"),
+		translations:   subcategoryTranslationsWithRo("Touring", "Tourenrad", "Cicloturism", "TOUR", "TUR"),
 		settings:       map[string]any{"valhalla_profile": "bicycle_hybrid"},
 	},
 	{
@@ -43,7 +49,7 @@ var defaultSubcategories = []defaultSubcategorySeed{
 		name:           "Road",
 		shortName:      "ROAD",
 		badgeIcon:      "grip-lines-vertical",
-		translations:   subcategoryTranslations("Road", "Rennrad", "ROAD"),
+		translations:   subcategoryTranslationsWithRo("Road", "Rennrad", "Șosea", "ROAD", "ȘOS"),
 		settings:       map[string]any{"valhalla_profile": "bicycle_road"},
 	},
 	{
@@ -51,6 +57,9 @@ var defaultSubcategories = []defaultSubcategorySeed{
 		name:           "E-Bike",
 		shortName:      "EBIKE",
 		badgeIcon:      "bolt",
+		translations: map[string]CategoryTranslation{
+			"ro": {Name: "E-Bike", ShortName: "EBIKE"},
+		},
 		// Valhalla has no dedicated e-bike costing; Hybrid is the closest
 		// general-purpose bike profile.
 		settings: map[string]any{"valhalla_profile": "bicycle_hybrid"},
@@ -64,6 +73,7 @@ var defaultSubcategories = []defaultSubcategorySeed{
 		translations: map[string]CategoryTranslation{
 			"de": {Name: "Winterwandern", ShortName: "WINT"},
 			"en": {Name: "Winter", ShortName: "WINT"},
+			"ro": {Name: "Iarnă", ShortName: "IARN"},
 		},
 	},
 	{
@@ -72,21 +82,21 @@ var defaultSubcategories = []defaultSubcategorySeed{
 		shortName:      "ALP",
 		badgeIcon:      "mountain",
 		aliases:        []string{"Alpine Hiking"},
-		translations:   subcategoryTranslations("Alpine", "Bergwandern", "ALP"),
+		translations:   subcategoryTranslationsWithRo("Alpine", "Bergwandern", "Alpin", "ALP", "ALP"),
 	},
 	{
 		parentCategory: "Hiking",
 		name:           "Long-distance",
 		shortName:      "LONG",
 		aliases:        []string{"Long-distance Hiking"},
-		translations:   subcategoryTranslations("Long-distance", "Fernwandern", "LONG"),
+		translations:   subcategoryTranslationsWithRo("Long-distance", "Fernwandern", "Distanță lungă", "LONG", "LUNG"),
 	},
 	{
 		parentCategory: "Hiking",
 		name:           "Snowshoeing",
 		shortName:      "SNOW",
 		badgeIcon:      "snowflake",
-		translations:   subcategoryTranslations("Snowshoeing", "Schneeschuhwandern", "SNOW"),
+		translations:   subcategoryTranslationsWithRo("Snowshoeing", "Schneeschuhwandern", "Rachete de zăpadă", "SNOW", "ZĂP"),
 	},
 	{
 		parentCategory: "Hiking",
@@ -94,21 +104,21 @@ var defaultSubcategories = []defaultSubcategorySeed{
 		shortName:      "FAM",
 		badgeIcon:      "child",
 		aliases:        []string{"Family Hiking"},
-		translations:   subcategoryTranslations("Family", "Familienwandern", "FAM"),
+		translations:   subcategoryTranslationsWithRo("Family", "Familienwandern", "Familie", "FAM", "FAM"),
 	},
 	{
 		parentCategory: "Hiking",
 		name:           "Pilgrimage",
 		shortName:      "PILG",
 		badgeIcon:      "cross",
-		translations:   subcategoryTranslations("Pilgrimage", "Pilgern", "PILG"),
+		translations:   subcategoryTranslationsWithRo("Pilgrimage", "Pilgern", "Pelerinaj", "PILG", "PEL"),
 	},
 	{
 		parentCategory: "Running",
 		name:           "Trail",
 		shortName:      "TRAIL",
 		aliases:        []string{"Trail Running"},
-		translations:   subcategoryTranslations("Trail", "Trailrunning", "TRAIL"),
+		translations:   subcategoryTranslationsWithRo("Trail", "Trailrunning", "Alergare montană", "TRAIL", "TRAIL"),
 	},
 	{
 		parentCategory: "Running",
@@ -116,34 +126,35 @@ var defaultSubcategories = []defaultSubcategorySeed{
 		shortName:      "ROAD",
 		badgeIcon:      "grip-lines-vertical",
 		aliases:        []string{"Road Running"},
-		translations:   subcategoryTranslations("Road", "Straßenlauf", "ROAD"),
+		translations:   subcategoryTranslationsWithRo("Road", "Straßenlauf", "Alergare pe șosea", "ROAD", "ȘOS"),
 	},
 	{
 		parentCategory: "Skiing",
 		name:           "Cross-country",
 		shortName:      "NORD",
 		aliases:        []string{"Cross-country Skiing"},
-		translations:   subcategoryTranslations("Cross-country", "Langlauf", "NORD"),
+		translations:   subcategoryTranslationsWithRo("Cross-country", "Langlauf", "Schi fond", "NORD", "FOND"),
 	},
 	{
 		parentCategory: "Skiing",
 		name:           "Skating",
 		shortName:      "SKATE",
-		translations:   subcategoryTranslations("Skating", "Skating", "SKATE"),
+		translations:   subcategoryTranslationsWithRo("Skating", "Skating", "Schi skating", "SKATE", "SKATE"),
 	},
 	{
 		parentCategory: "Skiing",
 		name:           "Backcountry",
 		shortName:      "BACK",
 		aliases:        []string{"Backcountry Skiing"},
-		translations:   subcategoryTranslations("Backcountry", "Skitour", "BACK"),
+		translations:   subcategoryTranslationsWithRo("Backcountry", "Skitour", "Schi de tură", "BACK", "TURĂ"),
 	},
 }
 
-func subcategoryTranslations(en string, de string, shortName string) map[string]CategoryTranslation {
+func subcategoryTranslationsWithRo(en string, de string, ro string, shortName string, roShortName string) map[string]CategoryTranslation {
 	return map[string]CategoryTranslation{
 		"de": {Name: de, ShortName: shortName},
 		"en": {Name: en, ShortName: shortName},
+		"ro": {Name: ro, ShortName: roShortName},
 	}
 }
 

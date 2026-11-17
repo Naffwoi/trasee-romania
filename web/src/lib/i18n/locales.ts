@@ -52,3 +52,69 @@ export function normalizeLocale(raw: string | null | undefined): SupportedLocale
 
   return defaultLocale;
 }
+
+function normalizeCandidateBase(raw: string | null | undefined): SupportedLocale | null {
+  if (!raw) return null;
+  const tag = raw.trim().split(";")[0]?.trim();
+  if (!tag || tag === "*") return null;
+  const base = tag.replace("_", "-").split("-")[0]?.toLowerCase();
+  if (base && SUPPORTED_LOCALES.includes(base)) {
+    return base;
+  }
+  return null;
+}
+
+/**
+ * Resolves the best supported locale from an RFC 9110 `Accept-Language` header,
+ * honoring quality (`q=`) weights and preferring earlier entries on ties.
+ */
+export function resolveAcceptLanguage(header: string | null | undefined): SupportedLocale {
+  if (!header) return defaultLocale;
+
+  const parsed = header
+    .split(",")
+    .map((part, index) => {
+      const [rawTag, ...params] = part.split(";");
+      let q = 1;
+      for (const param of params) {
+        const trimmed = param.trim().toLowerCase();
+        if (trimmed.startsWith("q=")) {
+          const parsedQ = Number(trimmed.slice(2));
+          q = Number.isFinite(parsedQ) ? parsedQ : 0;
+        }
+      }
+      return { tag: rawTag?.trim() ?? "", q, index };
+    })
+    .filter((entry) => entry.tag.length > 0 && entry.q > 0)
+    .sort((a, b) => (b.q !== a.q ? b.q - a.q : a.index - b.index));
+
+  for (const entry of parsed) {
+    const match = normalizeCandidateBase(entry.tag);
+    if (match) return match;
+  }
+
+  return defaultLocale;
+}
+
+/**
+ * Resolves the best supported locale from `navigator.languages` and `navigator.language`.
+ */
+export function resolveNavigatorLocale(
+  languages: readonly string[] | undefined,
+  singleLanguage?: string | null,
+): SupportedLocale {
+  const candidates: string[] = [];
+  if (languages && languages.length > 0) {
+    candidates.push(...languages);
+  }
+  if (singleLanguage) {
+    candidates.push(singleLanguage);
+  }
+
+  for (const candidate of candidates) {
+    const match = normalizeCandidateBase(candidate);
+    if (match) return match;
+  }
+
+  return defaultLocale;
+}

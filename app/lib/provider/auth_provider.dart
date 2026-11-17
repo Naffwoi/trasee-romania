@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:ui' show PlatformDispatcher;
 
 import 'package:dio/dio.dart';
 import 'package:flutter_web_auth_2/flutter_web_auth_2.dart';
@@ -8,6 +9,7 @@ import 'package:wanderer/entities/actor_entity.dart';
 import 'package:wanderer/entities/user_entity.dart';
 import 'package:wanderer/models/auth_response.dart';
 import 'package:wanderer/models/oauth_provider.dart';
+import 'package:wanderer/models/settings.dart';
 import 'package:wanderer/models/user.dart';
 import 'package:wanderer/provider/api_provider.dart';
 import 'package:wanderer/provider/cookie_jar_provider.dart';
@@ -237,7 +239,31 @@ class Auth extends _$Auth {
               'passwordConfirm': password,
             },
           );
-      return await _passwordSignIn(username, password);
+      final user = await _passwordSignIn(username, password);
+      if (user != null) {
+        try {
+          final settings = ref.read(settingsProvider);
+          if (settings != null) {
+            final deviceCode = PlatformDispatcher.instance.locale.languageCode
+                .toLowerCase();
+            Language? matchedLang;
+            for (final lang in Language.values) {
+              if (lang.name == deviceCode) {
+                matchedLang = lang;
+                break;
+              }
+            }
+            if (matchedLang != null && matchedLang != settings.language) {
+              await ref
+                  .read(settingsProvider.notifier)
+                  .saveToServer(settings.copyWith(language: matchedLang));
+            }
+          }
+        } catch (_) {
+          // Best-effort: account creation and sign-in already succeeded.
+        }
+      }
+      return user;
     });
     return state.value;
   }

@@ -56,6 +56,9 @@ export type ElevationProfileControlOptions = ElevationProfileOptions & {
      * Called when the profile visibility is toggled through the control.
      */
     onToggle?: (visible: boolean) => void;
+    labels?: ElevationProfileOptions["labels"] & {
+        toggleButton?: string;
+    };
 };
 
 export class ElevationProfileControl implements IControl {
@@ -66,6 +69,7 @@ export class ElevationProfileControl implements IControl {
     private iconSpan?: HTMLSpanElement;
 
     private profileContainer?: HTMLDivElement;
+    private summaryEl?: HTMLDivElement;
     private settings: ElevationProfileControlOptions;
     private data: GeoJsonObject | null = null;
     private elevationProfileChart?: ElevationProfile;
@@ -99,13 +103,17 @@ export class ElevationProfileControl implements IControl {
             "maplibregl-ctrl-group"
         );
         this.toggleButton = document.createElement("button");
+        if (this.settings.labels?.toggleButton) {
+            this.toggleButton.title = this.settings.labels.toggleButton;
+            this.toggleButton.setAttribute("aria-label", this.settings.labels.toggleButton);
+        }
         this.buttonContainer.appendChild(this.toggleButton);
         this.iconSpan = document.createElement("i");
         this.iconSpan.classList.add("fa", "fa-chart-line", "text-black");
         this.toggleButton.appendChild(this.iconSpan);
         this.toggleButton.addEventListener("click", this.toggleProfile.bind(this));
         const mapContainer = map.getContainer();
-        const size = this.settings.size ?? "30%";
+        const size = this.settings.size ?? "195px";
 
         if (this.settings.container) {
             const tmpContainer =
@@ -120,12 +128,14 @@ export class ElevationProfileControl implements IControl {
 
             if (!this.settings.containerClass) {
                 this.profileContainer.classList.add(this.settings.backgroundColor ?? "white")
+                this.profileContainer.classList.add("border-t", "border-input-border", "backdrop-blur-sm", "z-10");
+                this.profileContainer.style.setProperty("box-sizing", "border-box");
 
                 this.profileContainer.style.setProperty("position", "absolute");
 
                 if (this.settings.position === "bottom" || !this.settings.position) {
                     // To prevent clashing with MapTiler logo and attribution control
-                    this.settings.paddingBottom = this.settings.paddingBottom ?? 35;
+                    this.settings.paddingBottom = this.settings.paddingBottom ?? 26;
                     this.profileContainer.style.setProperty("width", "100%");
                     this.profileContainer.style.setProperty("height", size);
                     this.profileContainer.style.setProperty("bottom", "0");
@@ -135,18 +145,22 @@ export class ElevationProfileControl implements IControl {
                     this.profileContainer.style.setProperty("top", "0");
                 } else if (this.settings.position === "left") {
                     // To prevent clashing with MapTiler logo and attribution control
-                    this.settings.paddingBottom = this.settings.paddingBottom ?? 35;
+                    this.settings.paddingBottom = this.settings.paddingBottom ?? 26;
                     this.profileContainer.style.setProperty("width", size);
                     this.profileContainer.style.setProperty("height", "100%");
                     this.profileContainer.style.setProperty("left", "0");
                 } else if (this.settings.position === "right") {
                     // To prevent clashing with MapTiler logo and attribution control
-                    this.settings.paddingBottom = this.settings.paddingBottom ?? 35;
+                    this.settings.paddingBottom = this.settings.paddingBottom ?? 26;
                     this.profileContainer.style.setProperty("width", size);
                     this.profileContainer.style.setProperty("height", "100%");
                     this.profileContainer.style.setProperty("right", "0");
                 }
             }
+
+            this.summaryEl = document.createElement("div");
+            this.summaryEl.className = "flex items-center gap-4 px-4 pt-1.5 text-xs font-medium text-content/80 pointer-events-none";
+            this.profileContainer.appendChild(this.summaryEl);
 
             mapContainer.appendChild(this.profileContainer);
         }
@@ -231,6 +245,15 @@ export class ElevationProfileControl implements IControl {
 
     getDefaultPosition?: (() => ControlPosition) | undefined;
 
+    getSummary() {
+        return {
+            minElevation: this.elevationProfileChart?.minElevation ?? null,
+            maxElevation: this.elevationProfileChart?.maxElevation ?? null,
+            totalAscent: this.elevationProfileChart?.totalAscent ?? 0,
+            unit: this.settings.unit ?? "metric",
+        };
+    }
+
     async setData(data: GeoJsonObject, waypoints?: Waypoint[]) {
         if (!this.map || !this.elevationProfileChart) {
             throw new Error(
@@ -242,6 +265,16 @@ export class ElevationProfileControl implements IControl {
 
         if (!this.data) return;
 
-        this.elevationProfileChart.setData(this.data, waypoints);
+        await this.elevationProfileChart.setData(this.data, waypoints);
+
+        if (this.summaryEl) {
+            const { minElevation, maxElevation, totalAscent, unit } = this.getSummary();
+            const elevUnit = unit === "imperial" ? "ft" : "m";
+            if (minElevation !== null && maxElevation !== null && Number.isFinite(maxElevation)) {
+                this.summaryEl.textContent = `▲ ${Math.round(minElevation)} ${elevUnit} – ${Math.round(maxElevation)} ${elevUnit}   •   ↑ ${Math.round(totalAscent)} ${elevUnit}`;
+            } else {
+                this.summaryEl.textContent = "";
+            }
+        }
     }
 }

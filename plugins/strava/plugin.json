@@ -119,7 +119,8 @@
       "label": "Start date",
       "labels": {
         "de": "Startdatum",
-        "en": "Start date"
+        "en": "Start date",
+        "ro": "Data de început"
       },
       "description": "Ignore routes and activities before this date.",
       "descriptions": {
@@ -135,6 +136,7 @@
         "no": "Hvis kontoen din har en stor mengde aktiviteter kan du støte på Stravas API-hastighetsgrense som hindrer deg i å synkronisere alle aktiviteter samtidig. For å redusere dette problemet kan du sette en \"Etter\" dato nedenfor slik at bare aktiviteter som ble registrert etter denne datoen blir synkronisert.",
         "pl": "If your account has a large amount of acitivities you may run into Strava's API rate limit preventing you from syncing all activities at once. To mitigate this issue you can set an \"After\" date below so that only activities that were recorded after this date are synced.",
         "pt": "If your account has a large amount of acitivities you may run into Strava's API rate limit preventing you from syncing all activities at once. To mitigate this issue you can set an \"After\" date below so that only activities that were recorded after this date are synced.",
+        "ro": "Dacă contul tău are un număr mare de activități, poți atinge limita de cereri a API-ului Strava, împiedicând sincronizarea tuturor activităților simultan. Pentru a evita această problemă, poți seta o dată de început mai jos, astfel încât să fie sincronizate doar activitățile înregistrate după acea dată.",
         "ru": "If your account has a large amount of acitivities you may run into Strava's API rate limit preventing you from syncing all activities at once. To mitigate this issue you can set an \"After\" date below so that only activities that were recorded after this date are synced.",
         "zh": "If your account has a large amount of acitivities you may run into Strava's API rate limit preventing you from syncing all activities at once. To mitigate this issue you can set an \"After\" date below so that only activities that were recorded after this date are synced."
       }
@@ -211,12 +213,14 @@
       "no": "Synkroniserer dine Strava-ruter og aktiviteter med Wanderer med jevne mellomrom.",
       "pl": "Synchronizuje trasy i aktywność z wanderer w równych odstępach.",
       "pt": "Syncs your strava routes & activities with wanderer in regular intervals.",
+      "ro": "Importă rutele, activitățile și fotografiile din Strava în wanderer.",
       "ru": "Синхронизирует ваши данные со Strava.",
       "zh": "定期与strava同步您的wanderer路线和活动。"
     },
     "information": {
       "de": "Dieses Plugin verbindet wanderer über die offizielle API mit deinem Strava-Konto. Es importiert gespeicherte Routen, Aktivitäten und zugehörige Fotos. Für die Verbindung hinterlegst du die Zugangsdaten einer Strava-API-Anwendung und autorisierst den Zugriff. Ein Startdatum hilft dabei, große bestehende Aktivitätssammlungen schrittweise zu synchronisieren und API-Limits einzuhalten.",
-      "en": "This plugin connects wanderer to your Strava account through the official API. It imports saved routes, activities and their photos. To connect, provide credentials for a Strava API application and authorize access. A start date helps synchronize large existing activity collections gradually and stay within API limits."
+      "en": "This plugin connects wanderer to your Strava account through the official API. It imports saved routes, activities and their photos. To connect, provide credentials for a Strava API application and authorize access. A start date helps synchronize large existing activity collections gradually and stay within API limits.",
+      "ro": "Acest plugin conectează wanderer la contul tău Strava prin API-ul oficial. Importă rutele salvate, activitățile și fotografiile acestora. Pentru conectare, introdu datele unei aplicații API Strava și autorizează accesul. O dată de început ajută la sincronizarea treptată a colecțiilor mari de activități și la respectarea limitelor API."
     },
     "homepageUrl": "https://www.strava.com/",
     "icons": {
@@ -226,319 +230,372 @@
       "route:1": {
         "labels": {
           "de": "Strava-Route: Radfahren",
-          "en": "Strava route: cycling"
+          "en": "Strava route: cycling",
+          "ro": "Rută Strava: ciclism"
         }
       },
       "route:2": {
         "labels": {
           "de": "Strava-Route: Laufen",
-          "en": "Strava route: running"
+          "en": "Strava route: running",
+          "ro": "Rută Strava: alergare"
         }
       },
       "AlpineSki": {
         "labels": {
           "de": "Ski alpin",
-          "en": "Alpine ski"
+          "en": "Alpine ski",
+          "ro": "Schi alpin"
         }
       },
       "BackcountrySki": {
         "labels": {
           "de": "Skitour",
-          "en": "Backcountry ski"
+          "en": "Backcountry ski",
+          "ro": "Schi de tură"
         }
       },
       "Badminton": {
         "labels": {
           "de": "Badminton",
-          "en": "Badminton"
+          "en": "Badminton",
+          "ro": "Badminton"
         }
       },
       "Canoeing": {
         "labels": {
           "de": "Kanufahren",
-          "en": "Canoeing"
+          "en": "Canoeing",
+          "ro": "Canoe"
         }
       },
       "Crossfit": {
         "labels": {
           "de": "Crossfit",
-          "en": "Crossfit"
+          "en": "Crossfit",
+          "ro": "CrossFit"
         }
       },
       "EBikeRide": {
         "labels": {
           "de": "E-Bike-Fahrt",
-          "en": "E-bike ride"
+          "en": "E-bike ride",
+          "ro": "Tură cu E-bike"
         }
       },
       "EMountainBikeRide": {
         "labels": {
           "de": "E-Mountainbike-Fahrt",
-          "en": "E-mountain bike ride"
+          "en": "E-mountain bike ride",
+          "ro": "Tură cu E-MTB"
         }
       },
       "Elliptical": {
         "labels": {
           "de": "Crosstrainer",
-          "en": "Elliptical"
+          "en": "Elliptical",
+          "ro": "Bicicletă eliptică"
         }
       },
       "Golf": {
         "labels": {
           "de": "Golf",
-          "en": "Golf"
+          "en": "Golf",
+          "ro": "Golf"
         }
       },
       "GravelRide": {
         "labels": {
           "de": "Gravel-Fahrt",
-          "en": "Gravel ride"
+          "en": "Gravel ride",
+          "ro": "Tură gravel"
         }
       },
       "Handcycle": {
         "labels": {
           "de": "Handbike",
-          "en": "Handcycle"
+          "en": "Handcycle",
+          "ro": "Handbike"
         }
       },
       "HighIntensityIntervalTraining": {
         "labels": {
           "de": "HIIT",
-          "en": "High-intensity interval training"
+          "en": "High-intensity interval training",
+          "ro": "HIIT"
         }
       },
       "Hike": {
         "labels": {
           "de": "Wandern",
-          "en": "Hike"
+          "en": "Hike",
+          "ro": "Drumeție"
         }
       },
       "IceSkate": {
         "labels": {
           "de": "Schlittschuhlaufen",
-          "en": "Ice skate"
+          "en": "Ice skate",
+          "ro": "Patinaj pe gheață"
         }
       },
       "InlineSkate": {
         "labels": {
           "de": "Inlineskaten",
-          "en": "Inline skate"
+          "en": "Inline skate",
+          "ro": "Patinaj cu role"
         }
       },
       "Kayaking": {
         "labels": {
           "de": "Kajakfahren",
-          "en": "Kayaking"
+          "en": "Kayaking",
+          "ro": "Caiac"
         }
       },
       "Kitesurf": {
         "labels": {
           "de": "Kitesurfen",
-          "en": "Kitesurf"
+          "en": "Kitesurf",
+          "ro": "Kitesurfing"
         }
       },
       "MountainBikeRide": {
         "labels": {
           "de": "Mountainbike-Fahrt",
-          "en": "Mountain bike ride"
+          "en": "Mountain bike ride",
+          "ro": "Tură MTB"
         }
       },
       "NordicSki": {
         "labels": {
           "de": "Langlauf",
-          "en": "Nordic ski"
+          "en": "Nordic ski",
+          "ro": "Schi fond"
         }
       },
       "Pickleball": {
         "labels": {
           "de": "Pickleball",
-          "en": "Pickleball"
+          "en": "Pickleball",
+          "ro": "Pickleball"
         }
       },
       "Pilates": {
         "labels": {
           "de": "Pilates",
-          "en": "Pilates"
+          "en": "Pilates",
+          "ro": "Pilates"
         }
       },
       "Racquetball": {
         "labels": {
           "de": "Racquetball",
-          "en": "Racquetball"
+          "en": "Racquetball",
+          "ro": "Racquetball"
         }
       },
       "Ride": {
         "labels": {
           "de": "Radfahren",
-          "en": "Ride"
+          "en": "Ride",
+          "ro": "Ciclism"
         }
       },
       "RockClimbing": {
         "labels": {
           "de": "Felsklettern",
-          "en": "Rock climbing"
+          "en": "Rock climbing",
+          "ro": "Escaladă pe stâncă"
         }
       },
       "RollerSki": {
         "labels": {
           "de": "Rollski",
-          "en": "Roller ski"
+          "en": "Roller ski",
+          "ro": "Schi pe role"
         }
       },
       "Rowing": {
         "labels": {
           "de": "Rudern",
-          "en": "Rowing"
+          "en": "Rowing",
+          "ro": "Canotaj"
         }
       },
       "Run": {
         "labels": {
           "de": "Laufen",
-          "en": "Run"
+          "en": "Run",
+          "ro": "Alergare"
         }
       },
       "Sail": {
         "labels": {
           "de": "Segeln",
-          "en": "Sail"
+          "en": "Sail",
+          "ro": "Navigație"
         }
       },
       "Skateboard": {
         "labels": {
           "de": "Skateboard",
-          "en": "Skateboard"
+          "en": "Skateboard",
+          "ro": "Skateboard"
         }
       },
       "Snowboard": {
         "labels": {
           "de": "Snowboard",
-          "en": "Snowboard"
+          "en": "Snowboard",
+          "ro": "Snowboard"
         }
       },
       "Snowshoe": {
         "labels": {
           "de": "Schneeschuhwandern",
-          "en": "Snowshoe"
+          "en": "Snowshoe",
+          "ro": "Rachete de zăpadă"
         }
       },
       "Soccer": {
         "labels": {
           "de": "Fussball",
-          "en": "Soccer"
+          "en": "Soccer",
+          "ro": "Fotbal"
         }
       },
       "Squash": {
         "labels": {
           "de": "Squash",
-          "en": "Squash"
+          "en": "Squash",
+          "ro": "Squash"
         }
       },
       "StairStepper": {
         "labels": {
           "de": "Stepper",
-          "en": "Stair stepper"
+          "en": "Stair stepper",
+          "ro": "Stepper"
         }
       },
       "StandUpPaddling": {
         "labels": {
           "de": "Stand-up-Paddling",
-          "en": "Stand-up paddling"
+          "en": "Stand-up paddling",
+          "ro": "Stand-up paddle (SUP)"
         }
       },
       "Surfing": {
         "labels": {
           "de": "Surfen",
-          "en": "Surfing"
+          "en": "Surfing",
+          "ro": "Surfing"
         }
       },
       "Swim": {
         "labels": {
           "de": "Schwimmen",
-          "en": "Swim"
+          "en": "Swim",
+          "ro": "Înot"
         }
       },
       "TableTennis": {
         "labels": {
           "de": "Tischtennis",
-          "en": "Table tennis"
+          "en": "Table tennis",
+          "ro": "Tenis de masă"
         }
       },
       "Tennis": {
         "labels": {
           "de": "Tennis",
-          "en": "Tennis"
+          "en": "Tennis",
+          "ro": "Tenis"
         }
       },
       "TrailRun": {
         "labels": {
           "de": "Trailrun",
-          "en": "Trail run"
+          "en": "Trail run",
+          "ro": "Alergare montană"
         }
       },
       "Training": {
         "labels": {
           "de": "Training",
-          "en": "Training"
+          "en": "Training",
+          "ro": "Antrenament"
         }
       },
       "Velomobile": {
         "labels": {
           "de": "Velomobil",
-          "en": "Velomobile"
+          "en": "Velomobile",
+          "ro": "Velomobil"
         }
       },
       "VirtualRide": {
         "labels": {
           "de": "Virtuelle Radfahrt",
-          "en": "Virtual ride"
+          "en": "Virtual ride",
+          "ro": "Tură virtuală de ciclism"
         }
       },
       "VirtualRow": {
         "labels": {
           "de": "Virtuelles Rudern",
-          "en": "Virtual row"
+          "en": "Virtual row",
+          "ro": "Canotaj virtual"
         }
       },
       "VirtualRun": {
         "labels": {
           "de": "Virtueller Lauf",
-          "en": "Virtual run"
+          "en": "Virtual run",
+          "ro": "Alergare virtuală"
         }
       },
       "Walk": {
         "labels": {
           "de": "Gehen",
-          "en": "Walk"
+          "en": "Walk",
+          "ro": "Plimbare"
         }
       },
       "WeightTraining": {
         "labels": {
           "de": "Krafttraining",
-          "en": "Weight training"
+          "en": "Weight training",
+          "ro": "Antrenament cu greutăți"
         }
       },
       "Wheelchair": {
         "labels": {
           "de": "Rollstuhl",
-          "en": "Wheelchair"
+          "en": "Wheelchair",
+          "ro": "Scaun rulant"
         }
       },
       "Windsurf": {
         "labels": {
           "de": "Windsurfen",
-          "en": "Windsurf"
+          "en": "Windsurf",
+          "ro": "Windsurfing"
         }
       },
       "Workout": {
         "labels": {
           "de": "Training",
-          "en": "Workout"
+          "en": "Workout",
+          "ro": "Antrenament"
         }
       },
       "Yoga": {
         "labels": {
           "de": "Yoga",
-          "en": "Yoga"
+          "en": "Yoga",
+          "ro": "Yoga"
         }
       }
     }

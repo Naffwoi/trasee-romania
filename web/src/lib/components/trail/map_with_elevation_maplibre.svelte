@@ -2,6 +2,7 @@
     import { page } from "$app/state";
     import directionCaret from "#lib/assets/svgs/caret-right-solid.svg";
     import GPX from "#lib/models/gpx/gpx.ts";
+    import { haversineDistance } from "#lib/models/gpx/utils.ts";
     import type { Trail } from "#lib/models/trail.ts";
     import type { Waypoint } from "#lib/models/waypoint.ts";
     import { theme } from "#lib/stores/theme_store.ts";
@@ -18,7 +19,7 @@
     import { CaretLayer } from "#lib/vendor/maplibre-layer-manager/caret-layer.ts";
     import { ensureTrailheadImages, withTrailheadIcons } from "#lib/util/trailhead_marker.ts";
     import { ClusterLayer } from "#lib/vendor/maplibre-layer-manager/cluster-layer.ts";
-    import { baseMapStyles } from "#lib/vendor/maplibre-layer-manager/layers.ts";
+    import { baseMapStyles, type BaseLayer } from "#lib/vendor/maplibre-layer-manager/layers.ts";
     import { LayerManager } from "#lib/vendor/maplibre-layer-manager/maplibre-layer-manager.ts";
     import type { OverpassPopupActionFactory } from "#lib/vendor/maplibre-layer-manager/overpass-layer.ts";
     import { PreviewLayer } from "#lib/vendor/maplibre-layer-manager/preview-layer.ts";
@@ -30,6 +31,7 @@
     import * as M from "maplibre-gl";
     import "maplibre-gl/dist/maplibre-gl.css";
     import "#lib/util/maplibre_worker.ts";
+    import { _, locale } from "svelte-i18n";
     import { onDestroy, onMount, untrack } from "svelte";
 
     interface Props {
@@ -80,6 +82,14 @@
         onlocationerror?: (message: string) => void;
         autoGeolocateOnDrawing?: boolean;
         buildPoiAnchorAction?: OverpassPopupActionFactory;
+        selectedPreviewTrail?: Trail | null;
+        onTrailPinSelect?: (trail: Trail) => void;
+        onMapBackgroundClick?: () => void;
+        mobileChrome?: boolean;
+        hideTrailRoute?: boolean;
+        fitPaddingBottom?: number;
+        onElevationMove?: (data: { distance: number; elevation: number; dPlus: number; gradePercent: number } | null) => void;
+        onElevationSummary?: (summary: { minElevation: number | null; maxElevation: number | null; totalAscent: number }) => void;
     }
 
     let {
@@ -118,6 +128,14 @@
         onlocationerror,
         autoGeolocateOnDrawing = false,
         buildPoiAnchorAction = undefined,
+        selectedPreviewTrail = null,
+        onTrailPinSelect = undefined,
+        onMapBackgroundClick = undefined,
+        mobileChrome = false,
+        hideTrailRoute = false,
+        fitPaddingBottom = 16,
+        onElevationMove = undefined,
+        onElevationSummary = undefined,
     }: Props = $props();
 
     let mapContainer: HTMLDivElement;
@@ -387,10 +405,241 @@
         terrainEnabled = isTerrainEnabled;
     }
 
+    $effect(() => {
+        if (!map || !mapLoaded || trails.length !== 1) return;
+        const trailId = trails[0]?.id;
+        if (!trailId) return;
+        untrack(() => {
+            if (hideTrailRoute) {
+                removeCaretLayer();
+                removeTrailLayer(trailId);
+            } else {
+                addTrailLayer(trails[0], trailId, 0, gpxDataMap[trailId]);
+                if (gpxDataMap[trailId]) {
+                    addCaretLayer(gpxDataMap[trailId]);
+                }
+            }
+        });
+    });
+
+    let selectedRouteRequest = 0;
+    const selectedPolylineCache = new Map<string, string>();
+    $effect(() => {
+        const preview = selectedPreviewTrail;
+        const ready = mapLoaded;
+        if (!ready || !map || !layerManager) return;
+        untrack(() => {
+            void syncSelectedPreviewRoute(preview);
+        });
+    });
+
+    async function syncSelectedPreviewRoute(preview: Trail | null) {
+        const request = ++selectedRouteRequest;
+        if (!map || !layerManager) return;
+
+        layerManager.removeLayer("selected-trail-route");
+        if (!preview?.id) return;
+
+        let encoded =
+            preview.hover_polyline ||
+            preview.polyline ||
+            selectedPolylineCache.get(preview.id);
+
+        if (!encoded) {
+            try {
+                const res = await fetch("/api/v1/search/multi", {
+                    method: "POST",
+                    body: JSON.stringify({
+                        queries: [
+                            {
+                                indexUid: "trails",
+                                q: "",
+                                filter: [`id = '${preview.id}'`],
+                                attributesToRetrieve: ["id", "polyline"],
+                                hitsPerPage: 1,
+                            },
+                        ],
+                    }),
+                });
+                if (res.ok) {
+                    const data = await res.json();
+                    encoded = data?.results?.[0]?.hits?.[0]?.polyline;
+                }
+            } catch {
+                // Ignore transient search error on selection preview.
+            }
+        }
+
+        if (
+            request !== selectedRouteRequest ||
+            !map ||
+            !layerManager ||
+            !encoded
+        ) {
+            return;
+        }
+        selectedPolylineCache.set(preview.id, encoded);
+
+        const coords = decodePolyline(encoded, 5);
+        if (coords.length < 2) return;
+
+        const isClosedLoop =
+            coords.length >= 4 &&
+            haversineDistance(
+                coords[0][1],
+                coords[0][0],
+                coords[coords.length - 1][1],
+                coords[coords.length - 1][0],
+            ) <= 180;
+
+        const lineGeoJson: GeoJSON.FeatureCollection = {
+            type: "FeatureCollection",
+            features: [
+                {
+                    type: "Feature",
+                    properties: { trail: preview.id },
+                    geometry: { type: "LineString", coordinates: coords },
+                },
+            ],
+        };
+
+        const sources: Record<string, M.SourceSpecification> = {
+            "selected-trail-route": {
+                type: "geojson",
+                data: lineGeoJson,
+            },
+        };
+        const layers: M.LayerSpecification[] = [];
+
+        if (isClosedLoop) {
+            sources["selected-trail-loop-fill"] = {
+                type: "geojson",
+                data: {
+                    type: "FeatureCollection",
+                    features: [
+                        {
+                            type: "Feature",
+                            properties: { trail: preview.id },
+                            geometry: {
+                                type: "Polygon",
+                                coordinates: [[...coords, coords[0]]],
+                            },
+                        },
+                    ],
+                },
+            };
+            layers.push({
+                id: "selected-trail-loop-fill",
+                type: "fill",
+                source: "selected-trail-loop-fill",
+                paint: {
+                    "fill-color": "#3549bb",
+                    "fill-opacity": 0.22,
+                },
+            });
+        }
+
+        layers.push(
+            {
+                id: "selected-trail-casing",
+                type: "line",
+                source: "selected-trail-route",
+                layout: { "line-cap": "round", "line-join": "round" },
+                paint: { "line-color": "#ffffff", "line-width": 9 },
+            },
+            {
+                id: "selected-trail-route",
+                type: "line",
+                source: "selected-trail-route",
+                layout: { "line-cap": "round", "line-join": "round" },
+                paint: { "line-color": "#3549bb", "line-width": 5 },
+            },
+            {
+                id: "selected-trail-carets",
+                type: "symbol",
+                source: "selected-trail-route",
+                minzoom: 8,
+                layout: {
+                    "symbol-placement": "line",
+                    "symbol-spacing": 140,
+                    "icon-image": "direction-caret",
+                    "icon-size": 0.65,
+                },
+            },
+        );
+
+        const layerSpec: BaseLayer = {
+            spec: {
+                version: 8,
+                name: "selected-trail-route",
+                glyphs: "https://tiles.openfreemap.org/fonts/{fontstack}/{range}.pbf",
+                sources,
+                layers,
+            },
+        };
+        layerManager.addLayer("selected-trail-route", layerSpec);
+
+        let minLon = Infinity,
+            minLat = Infinity,
+            maxLon = -Infinity,
+            maxLat = -Infinity;
+        for (const [lon, lat] of coords) {
+            if (lon < minLon) minLon = lon;
+            if (lon > maxLon) maxLon = lon;
+            if (lat < minLat) minLat = lat;
+            if (lat > maxLat) maxLat = lat;
+        }
+        if (Number.isFinite(minLon) && Number.isFinite(minLat)) {
+            map.fitBounds(
+                [
+                    [minLon, minLat],
+                    [maxLon, maxLat],
+                ],
+                {
+                    padding: { top: 135, left: 40, right: 40, bottom: 265 },
+                    maxZoom: 15,
+                    duration: 650,
+                },
+            );
+        }
+    }
+
+    function hasElevationData(): boolean {
+        const active = activeTrail !== null ? trails[activeTrail] : undefined;
+        if (!active?.id) return false;
+        if ((active.elevation_gain ?? 0) > 0 || (active.elevation_loss ?? 0) > 0) {
+            return true;
+        }
+        const fc = gpxDataMap[active.id];
+        if (!fc?.features?.length) return false;
+        for (const f of fc.features) {
+            const g = f.geometry;
+            if (!g) continue;
+            if (g.type === "LineString") {
+                if (g.coordinates.some((c) => Number.isFinite(c?.[2]) && c[2] !== 0)) {
+                    return true;
+                }
+            } else if (g.type === "MultiLineString") {
+                if (
+                    g.coordinates.some((seg) =>
+                        seg.some((c) => Number.isFinite(c?.[2]) && c[2] !== 0),
+                    )
+                ) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
     export function refreshElevationProfile() {
         const activeId = activeTrail !== null ? trails[activeTrail]?.id : null;
         if (activeId && gpxDataMap[activeId]) {
-            epc?.setData(gpxDataMap[activeId]!, waypoints);
+            void epc?.setData(gpxDataMap[activeId]!, waypoints).then(() => {
+                if (epc) {
+                    onElevationSummary?.(epc.getSummary());
+                }
+            });
         }
     }
 
@@ -399,7 +648,8 @@
             showElevation &&
             Object.keys(gpxDataMap).length &&
             activeTrail !== null &&
-            elevationProfileVisibilityPreference !== false
+            elevationProfileVisibilityPreference !== false &&
+            hasElevationData()
         ) {
             epc?.showProfile();
         } else {
@@ -449,13 +699,13 @@
         map!.fitBounds(boundsToFit, {
             animate: fitBounds == "animate",
             padding: {
-                top: 16,
-                left: 16,
-                right: 16,
+                top: mobileChrome ? 92 : 16,
+                left: 36,
+                right: 36,
                 bottom:
-                    16 +
+                    Math.max(16, fitPaddingBottom) +
                     (epc?.isProfileShown && !elevationProfileContainer
-                        ? map!.getContainer().clientHeight * 0.3
+                        ? 205
                         : 0),
             },
         });
@@ -525,6 +775,7 @@
                     onEnter: (e) => {
                         if (!window.matchMedia("(hover: hover)").matches) return;
                         if (map) map.getCanvas().style.cursor = "pointer";
+                        if (onTrailPinSelect) return;
                         const id = (e as any).features[0].properties.id;
                         const trail = trails.find((t) => t.id === id);
                         if (!hasTrailDetails(trail)) return;
@@ -535,6 +786,8 @@
                         if (!showClusterPopups) unHighlightCluster();
                     },
                 },
+            }, {
+                suppressUnclusteredZoom: Boolean(onTrailPinSelect),
             }),
         );
     }
@@ -922,7 +1175,7 @@
     function toggleEpcTheme() {
         if ($theme == "dark") {
             epc?.toggleTheme({
-                profileBackgroundColor: "#191b24",
+                profileBackgroundColor: "rgba(96, 165, 250, 0.20)",
                 elevationGridColor: "#ddd2",
                 labelColor: "#ddd8",
                 crosshairColor: "#fff5",
@@ -931,7 +1184,7 @@
             });
         } else {
             epc?.toggleTheme({
-                profileBackgroundColor: "#242734",
+                profileBackgroundColor: "rgba(53, 73, 187, 0.16)",
                 elevationGridColor: "#0002",
                 labelColor: "#0009",
                 crosshairColor: "#0005",
@@ -963,11 +1216,26 @@
             baseMapStyles[tileset.name] = tileset.url;
         }
 
+        const mapLocale = $locale?.startsWith("ro")
+            ? {
+                  "AttributionControl.ToggleAttribution": "Comută atribuirea",
+                  "AttributionControl.MapFeedback": "Semnalează o problemă pe hartă",
+                  "FullscreenControl.Enter": "Ecran complet",
+                  "FullscreenControl.Exit": "Ieși din ecran complet",
+                  "GeolocateControl.FindMyLocation": "Găsește locația mea",
+                  "GeolocateControl.LocationNotAvailable": "Locația nu este disponibilă",
+                  "NavigationControl.ResetBearing": "Resetează orientarea spre nord",
+                  "NavigationControl.ZoomIn": "Mărește",
+                  "NavigationControl.ZoomOut": "Micșorează",
+              }
+            : undefined;
+
         const finalMapOptions: M.MapOptions = {
             ...{
                 container: mapContainer,
                 center: [initialState.lng, initialState.lat],
                 zoom: initialState.zoom,
+                ...(mapLocale ? { locale: mapLocale } : {}),
             },
             ...mapOptions,
         };
@@ -1002,7 +1270,11 @@
         });
 
         map.addControl(
-            new M.NavigationControl({ visualizePitch: showTerrain }),
+            new M.NavigationControl({
+                showZoom: !mobileChrome,
+                showCompass: true,
+                visualizePitch: showTerrain,
+            }),
         );
         scale = { control: new M.ScaleControl({ maxWidth: 120, unit: page.data.settings?.unit ?? "metric" }), position: scalePosition };
         map.addControl(scale.control, scalePosition);
@@ -1012,6 +1284,13 @@
                 enableHighAccuracy: true,
                 animate: fitBounds == "animate",
                 onError: onlocationerror,
+                labels: {
+                    locateMe: $_("locate-me"),
+                    followNorthUp: $_("follow-north-up"),
+                    followHeadingUp: $_("follow-heading-up"),
+                    permissionDenied: $_("location-permission-denied"),
+                    insecureContext: $_("location-insecure-context"),
+                },
             });
             map.addControl(geolocateControl);
         }
@@ -1023,22 +1302,36 @@
         if (showElevation) {
             epc = new ElevationProfileControl({
                 visible: false,
+                size: "195px",
+                showButton: !elevationProfileContainer,
+                paddingTop: 28,
+                paddingBottom: 26,
                 profileBackgroundColor:
-                    $theme == "light" ? "#242734" : "#191b24",
-                backgroundColor: "bg-menu-background/90",
+                    $theme == "light"
+                        ? "rgba(53, 73, 187, 0.16)"
+                        : "rgba(96, 165, 250, 0.20)",
+                backgroundColor: "bg-menu-background/95",
                 unit: page.data.settings?.unit ?? "metric",
-                profileLineWidth: 3,
+                profileLineWidth: 2.5,
                 displayDistanceGrid: true,
                 tooltipDisplayDPlus: false,
                 tooltipBackgroundColor: $theme == "light" ? "#fff" : "#242734",
                 tooltipTextColor: $theme == "light" ? "#000" : "#fff",
                 zoom: false,
                 container: elevationProfileContainer,
+                labels: {
+                    after: $_("elevation-tooltip-after"),
+                    elevation: $_("elevation-tooltip-elevation"),
+                    grade: $_("elevation-tooltip-grade"),
+                    speed: $_("elevation-tooltip-speed"),
+                    toggleButton: $_("toggle-elevation-profile"),
+                },
                 onEnter: () => {
                     elevationMarker.setOpacity("1");
                 },
                 onLeave: () => {
                     elevationMarker.setOpacity("0");
+                    onElevationMove?.(null);
                 },
                 onToggle: (visible) => {
                     elevationProfileVisibilityPreference = visible;
@@ -1049,6 +1342,12 @@
                             data.position as M.LngLatLike,
                         );
                     }
+                    onElevationMove?.({
+                        distance: data.distance,
+                        elevation: Number(data.position?.[2] ?? 0),
+                        dPlus: data.dPlus,
+                        gradePercent: data.gradePercent,
+                    });
                 },
             });
             toggleEpcTheme();
@@ -1059,7 +1358,7 @@
             map.addControl(
                 new FullscreenControl(() => {
                     onfullscreen?.();
-                }),
+                }, $_("toggle-fullscreen")),
                 "bottom-right",
             );
         }
@@ -1105,14 +1404,43 @@
         });
 
         map.on("click", (e) => {
+            if (onTrailPinSelect) {
+                const pinLayers = ["unclustered-point"].filter((id) =>
+                    map?.getLayer(id),
+                );
+                const pinHits = pinLayers.length
+                    ? map!.queryRenderedFeatures(e.point, { layers: pinLayers })
+                    : [];
+                if (pinHits.length) {
+                    const id = pinHits[0]?.properties?.id;
+                    const trail = trails.find((t) => t.id === id);
+                    if (trail) {
+                        onTrailPinSelect(trail);
+                    }
+                    return;
+                }
+                const clusterLayers = ["clusters"].filter((id) =>
+                    map?.getLayer(id),
+                );
+                const clusterHits = clusterLayers.length
+                    ? map!.queryRenderedFeatures(e.point, {
+                          layers: clusterLayers,
+                      })
+                    : [];
+                if (clusterHits.length) {
+                    return;
+                }
+                onMapBackgroundClick?.();
+            }
             if (hoveringTrail && drawing) {
                 return;
             }
             onclick?.(e);
         });
 
-        // Touch screens cannot hover, so a tap opens the trail popup without flying in.
+        // Touch screens cannot hover, so a tap opens the trail popup when in popup mode.
         map.on("click", ["unclustered-point", "preview", "preview-start-points"], (e) => {
+            if (onTrailPinSelect) return;
             if (window.matchMedia("(hover: hover)").matches) return;
             const properties = e.features?.[0]?.properties;
             const trail = trails.find((t) => t.id === (properties?.trail ?? properties?.id));
@@ -1144,6 +1472,7 @@
     onDestroy(() => {
         ++clusterLayerRequest;
         ++previewLayerRequest;
+        ++selectedRouteRequest;
         clusterHighlight?.remove();
         map?.remove();
     });

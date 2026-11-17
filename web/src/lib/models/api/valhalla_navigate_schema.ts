@@ -11,6 +11,7 @@ const NavigateRequestSchema = z.object({
     .min(2, "at_least_two_shape_points")
     .max(500),
   costing: z.enum(["pedestrian", "bicycle"]).default("pedestrian"),
+  language: z.string().optional(),
 });
 
 type NavigateRequest = z.infer<typeof NavigateRequestSchema>;

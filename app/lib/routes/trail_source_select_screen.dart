@@ -167,7 +167,7 @@ class _TrailSourceSelectScreenState
     final loc = settings?.location;
     if (loc != null) return Geographic(lat: loc.lat, lon: loc.lon);
 
-    return const Geographic(lat: 0, lon: 0);
+    return const Geographic(lat: 45.9, lon: 25.0);
   }
 
   Future<void> _importGpx(AppLocalizations l10n) async {

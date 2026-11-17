@@ -28,6 +28,8 @@ enum Language {
   pl,
   @JsonValue('pt')
   pt,
+  @JsonValue('ro')
+  ro,
   @JsonValue('ru')
   ru,
   @JsonValue('zh')

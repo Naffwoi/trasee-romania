@@ -38,16 +38,17 @@ type NotificationSettings struct {
 	Email bool `json:"email"`
 }
 
-func getNotificationPermissions(app core.App, user string, notificationType NotificationType) (*NotificationSettings, error) {
+func getNotificationPermissions(app core.App, user string, notificationType NotificationType) (*NotificationSettings, string, error) {
 	settings, err := app.FindFirstRecordByFilter("settings", "user={:user}", dbx.Params{"user": user})
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
+	lang := settings.GetString("language")
 	var notificationPreferences map[NotificationType]NotificationSettings
 
 	err = settings.UnmarshalJSONField("notifications", &notificationPreferences)
 	if err != nil {
-		return nil, err
+		return nil, lang, err
 	}
 
 	settingsForType, exists := notificationPreferences[notificationType]
@@ -55,10 +56,10 @@ func getNotificationPermissions(app core.App, user string, notificationType Noti
 		return &NotificationSettings{
 			Web:   true,
 			Email: true,
-		}, nil
+		}, lang, nil
 	}
 
-	return &settingsForType, nil
+	return &settingsForType, lang, nil
 }
 
 func SendNotification(app core.App, notification Notification, recipient *core.Record) error {
@@ -68,7 +69,7 @@ func SendNotification(app core.App, notification Notification, recipient *core.R
 	if !recipient.GetBool("is_local") {
 		return nil
 	}
-	permissions, err := getNotificationPermissions(app, recipient.GetString("user"), notification.Type)
+	permissions, recipientLang, err := getNotificationPermissions(app, recipient.GetString("user"), notification.Type)
 	if err != nil {
 		return err
 	}
@@ -104,7 +105,7 @@ func SendNotification(app core.App, notification Notification, recipient *core.R
 		if err != nil {
 			return err
 		}
-		html, err := GenerateHTML(app.Settings().Meta.AppURL, recipientActor.GetString("username"), authorActor.GetString("username"), notification.Type, notification.Metadata)
+		html, err := GenerateLocalizedHTML(recipientLang, app.Settings().Meta.AppURL, recipientActor.GetString("username"), authorActor.GetString("username"), notification.Type, notification.Metadata)
 		if err != nil {
 			return err
 		}
@@ -115,7 +116,7 @@ func SendNotification(app core.App, notification Notification, recipient *core.R
 				Name:    app.Settings().Meta.SenderName,
 			},
 			To:      []mail.Address{{Address: recipientUser.Email()}},
-			Subject: "wanderer - New Notification",
+			Subject: NotificationEmailSubject(recipientLang),
 			HTML:    html,
 		}
 

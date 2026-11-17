@@ -5,9 +5,9 @@ import type * as M from "maplibre-gl";
 
 // Matches the app's trailhead markers: a primary-colored circle with a white
 // border and the white category icon.
-const MARKER_SIZE = 28;
-const ICON_SIZE = 13;
-const BORDER_WIDTH = 2;
+const MARKER_SIZE = 34;
+const ICON_SIZE = 15;
+const BORDER_WIDTH = 2.2;
 const MARKER_COLOR = "#242734";
 
 export function trailheadImageName(icon: string): string {

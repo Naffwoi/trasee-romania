@@ -33,6 +33,7 @@
     });
     let mapResults: TrailMapResults | undefined = $state();
     let searchBar: TrailSearchBar | undefined = $state();
+    let activeFilterCount = $state(0);
     let showMap = $state(true);
     let expanded = $state(false);
     let fullscreenOwned = $state(false);
@@ -356,23 +357,43 @@
 
 <main class="map-page" class:show-map={showMap} class:expanded={expandedLayout}>
     <div class="map-search-header">
-        <div class="map-search-toolbar">
-            <TrailSearchBar bind:this={searchBar} categories={page.data.categories} subcategories={page.data.subcategories}
-                bind:filter defaults={page.data.filter} onapply={applySearch} inlineControls
-                onplaceselect={location => mapResults?.focusLocation(location)} trailSuggestions
-                layout={expandedLayout || mobileMap ? "overlay" : $searchLayout.expansion} filterSections={page.data.settings?.behavior?.searchFilterSections} />
-            <TrailResultControls buttonsOnly showResultOptions={!showMap} sort={filter.sort === "relevance" && !filter.q.trim() ? "created" : filter.sort}
-                order={filter.sortOrder} {sortOptions} onsort={(sort, sortOrder) => applySearch({ ...filter, sort: sort as TrailFilter["sort"], sortOrder })}
-                display={resultDisplay} {displayOptions} ondisplay={selectResultDisplay}
-                searchExpansion={$searchLayout.expansion} onsearchexpansion={expansion => updateSearchLayout({ expansion })}>
-                {#snippet afterView()}
-                    <button type="button" class="btn-icon control-button map-view-toggle" onclick={() => showMap = !showMap}
-                        aria-label={$_(showMap ? "trail-map-show-results" : "trail-map-show-map")}
-                        title={$_(showMap ? "trail-map-show-results" : "trail-map-show-map")}>
-                        <i class={`fa ${showMap ? "fa-list-ul" : "fa-map"}`} aria-hidden="true"></i>
-                    </button>
-                {/snippet}
-            </TrailResultControls>
+        <div class="map-search-pill">
+            <TrailSearchBar
+                bind:this={searchBar}
+                mobilePill={true}
+                bind:activeFilterCount
+                categories={page.data.categories}
+                subcategories={page.data.subcategories}
+                bind:filter
+                defaults={page.data.filter}
+                onapply={applySearch}
+                onplaceselect={location => mapResults?.focusLocation(location)}
+                trailSuggestions
+                layout="overlay"
+                filterSections={page.data.settings?.behavior?.searchFilterSections}
+            />
+        </div>
+        <div class="map-chip-row">
+            <button
+                type="button"
+                class="filter-stadium-chip"
+                onclick={() => searchBar?.toggleFilterPanel()}
+                aria-label={$_("filter")}
+            >
+                <i class="fa fa-filter text-xs opacity-75" aria-hidden="true"></i>
+                <span>{$_("filter")}</span>
+                {#if activeFilterCount > 0}
+                    <span class="filter-badge">{activeFilterCount}</span>
+                {/if}
+            </button>
+            <TrailResultControls
+                mobileChip={true}
+                showResultOptions={true}
+                sort={filter.sort === "relevance" && !filter.q.trim() ? "created" : filter.sort}
+                order={filter.sortOrder}
+                {sortOptions}
+                onsort={(sort, sortOrder) => applySearch({ ...filter, sort: sort as TrailFilter["sort"], sortOrder })}
+            />
         </div>
         {#if resultError || markerError}
             <p class="map-error" role="alert">{$_("trail-search-error")} <button type="button" onclick={refresh}>{$_("trail-search-retry")}</button></p>
@@ -402,30 +423,78 @@
 </main>
 
 <style>
-    .map-page { --trail-controls-width: 5.5rem; --trail-controls-inset: .6rem; --trail-controls-top: .3125rem; display: grid; gap: 1rem; margin-inline: auto; min-width: 0; width: calc(100% - 3rem); }
-    :global(body:has(.map-page.expanded) .app-navbar),
-    :global(body:has(.map-page.expanded) .app-footer),
-    :global(body:has(.map-page.expanded) .instance-hint) { display: none; }
-    .map-page.expanded { box-sizing: border-box; grid-template-rows: auto minmax(0, 1fr); height: 100dvh; isolation: isolate; padding: 1rem; position: relative; width: 100%; }
-    .expanded .map-search-header { margin-right: 3.25rem; position: relative; z-index: 5; }
-    .expanded .map-search-toolbar { border-radius: .5rem; box-shadow: 0 3px 16px rgb(0 0 0 / .2); }
-    .expanded .map-error { background: rgba(var(--menu-background)); border-radius: .5rem; margin-top: .5rem; padding: .5rem; }
-    .map-page.expanded .map-content, .map-page.expanded .map-results-container { height: 100%; min-height: 0; position: static; }
-    .map-search-header { min-width: 0; }
-    .map-search-toolbar { min-width: 0; position: relative; }
-    .map-content { align-items: start; display: grid; gap: 1rem; min-width: 0; }
-    .map-results-container { min-width: 0; }
-    .map-results-container[aria-busy="true"] :global(.trail-results) { opacity: .55; }
+    .map-page {
+        position: fixed;
+        inset: 0;
+        width: 100vw;
+        height: 100dvh;
+        overflow: hidden;
+    }
+    .map-content,
+    .map-results-container {
+        width: 100%;
+        height: 100%;
+    }
+    .map-search-header {
+        position: fixed;
+        top: 14px;
+        left: 16px;
+        right: 16px;
+        max-width: 520px;
+        margin-inline: auto;
+        z-index: 38;
+        pointer-events: none;
+    }
+    .map-search-pill {
+        pointer-events: auto;
+    }
+    .map-chip-row {
+        display: inline-flex;
+        align-items: center;
+        gap: 0.5rem;
+        margin-top: 0.5rem;
+        pointer-events: auto;
+    }
+    .filter-stadium-chip {
+        display: inline-flex;
+        align-items: center;
+        gap: 0.45rem;
+        min-height: 2.25rem;
+        padding: 0.4rem 0.95rem;
+        border-radius: 9999px;
+        background: rgba(var(--menu-background));
+        border: 1px solid rgba(var(--input-border), 0.45);
+        box-shadow: 0 3px 10px rgb(0 0 0 / 0.14);
+        color: rgba(var(--content));
+        font-size: 0.85rem;
+        font-weight: 500;
+        cursor: pointer;
+    }
+    .filter-stadium-chip:hover {
+        background: rgba(var(--secondary-hover));
+    }
+    .filter-badge {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        min-width: 1.2rem;
+        height: 1.2rem;
+        padding-inline: 0.3rem;
+        border-radius: 9999px;
+        background: rgba(var(--primary));
+        color: white;
+        font-size: 0.7rem;
+        font-weight: 700;
+    }
+    .map-error {
+        pointer-events: auto;
+        background: rgba(var(--menu-background));
+        border-radius: 0.75rem;
+        margin-top: 0.5rem;
+        padding: 0.5rem 0.75rem;
+        box-shadow: 0 4px 12px rgb(0 0 0 / 0.15);
+    }
     .load-more { display: grid; justify-content: center; padding: .5rem 0; }
     .load-more button { border: 1px solid rgba(var(--input-border)); border-radius: .5rem; cursor: pointer; padding: .7rem 1.3rem; }
     .load-more button:disabled { cursor: wait; opacity: .6; }
-    @media (max-width: 639px) {
-        .map-page { --trail-controls-inset: .4rem; width: calc(100% - 1.5rem); }
-    }
-    .map-search-toolbar .map-view-toggle { display: none; }
-    @media (width < 768px) {
-        .map-search-toolbar .map-view-toggle { display: inline-flex; }
-        .map-page { --trail-controls-width: 8.5rem; }
-        .map-page.show-map { --trail-controls-width: 2.5rem; }
-    }
 </style>

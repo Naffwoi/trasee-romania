@@ -26,6 +26,7 @@ const Map<Language, String> _languageNames = {
   Language.no: 'Norsk',
   Language.pl: 'Polski',
   Language.pt: 'Português',
+  Language.ro: 'Română',
   Language.ru: 'Русский',
   Language.zh: '中文',
 };

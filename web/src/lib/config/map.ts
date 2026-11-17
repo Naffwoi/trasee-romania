@@ -1,3 +1,6 @@
 import { PUBLIC_MAP_MAX_POLYLINES } from "$app/env/public";
 
-export const MAP_MAX_POLYLINES = Number(PUBLIC_MAP_MAX_POLYLINES || 100);
+export const MAP_MAX_POLYLINES =
+    PUBLIC_MAP_MAX_POLYLINES !== undefined && PUBLIC_MAP_MAX_POLYLINES !== ""
+        ? Number(PUBLIC_MAP_MAX_POLYLINES)
+        : 0;

@@ -157,7 +157,7 @@ export async function trails_search_bounds(filter: TrailFilter, f: typeof fetch 
     };
 }
 
-const DETAILED_CACHE_MAX_SIZE = Math.max(200, MAP_MAX_POLYLINES * 10);
+const DETAILED_CACHE_MAX_SIZE = Math.max(500, MAP_MAX_POLYLINES * 10);
 
 const detailedCache = new Map<string, Trail>();
 let detailedCacheKey = "";
@@ -240,9 +240,10 @@ export async function trails_search_map_data(
     const unclusteredFeatures = clusterFeatureCollection.features
         .filter((f: any) => !f.properties.cluster);
 
-    // Extract IDs of visible unclustered points that are large enough to show details for
+    // Fetch full summary + polyline for visible unclustered trailheads so tapping/hovering
+    // any trail pin can immediately draw its route without eagerly drawing 100 polylines.
     const unclusteredIds = unclusteredFeatures
-        .filter((f: any) => f.properties.is_large)
+        .slice(0, 150)
         .map((f: any) => f.properties.id);
 
     // Identify which visible trails are MISSING from the local cache
@@ -291,8 +292,10 @@ export async function trails_search_map_data(
                 lat,
                 lon: lng,
                 bounding_box_diagonal: s.bounding_box_diagonal ?? cached.bounding_box_diagonal,
-                // Strip polyline for small trails so they don't linger as lines when zoomed out
+                // Strip static preview polyline unless explicitly marked `is_large`;
+                // keep `hover_polyline` for tap/hover selection rendering.
                 polyline: s.is_large ? cached.polyline : undefined,
+                hover_polyline: cached.polyline,
             };
         }
 

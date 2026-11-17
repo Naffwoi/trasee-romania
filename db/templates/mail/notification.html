@@ -1,7 +1,8 @@
 <!DOCTYPE html>
-<html>
+<html lang="{{.Lang}}">
 
 <head>
+    <meta charset="utf-8" />
     <style>
         body {
             font-family: Arial, sans-serif;
@@ -95,26 +96,26 @@
         </div>
         <!-- Greeting -->
         <div class="greeting">
-            <p>Hello {{.RecipientName}},</p>
-            <p>You have a new notification:</p>
+            <p>{{.Greeting}}</p>
+            <p>{{.Intro}}</p>
         </div>
         <!-- Dynamic Content -->
         <div class="content">
             {{.Content}}
             <div class="">
                 <a class="button" href="{{.AppUrl}}">
-                    Check it out!
+                    {{.ActionLabel}}
                 </a>
             </div>
         </div>
 
         <div class="goodbye">
-            <p>Kind regards,</p>
-            <p>Your wanderer team</p>
+            <p>{{.SignOff}}</p>
+            <p>{{.TeamLabel}}</p>
         </div>
         <!-- Footer Section -->
         <div class="footer">
-            <p>&copy; 2025 wanderer | <a href="{{.AppUrl}}/settings/notifications">Unsubscribe</a></p>
+            <p>&copy; 2025 wanderer | <a href="{{.AppUrl}}/settings/notifications">{{.UnsubscribeLabel}}</a></p>
         </div>
     </div>
 </body>

@@ -1,0 +1,5 @@
+"NSCameraUsageDescription" = "Wanderer are nevoie de acces la cameră pentru a putea face o fotografie nouă de profil.";
+"NSLocationAlwaysAndWhenInUseUsageDescription" = "Wanderer are nevoie de acces permanent la locație pentru a continua navigarea și înregistrarea traseului când ecranul este blocat.";
+"NSLocationWhenInUseUsageDescription" = "Locația ta este afișată pe hartă pentru a te ajuta să navighezi pe trasee.";
+"NSMotionUsageDescription" = "Wanderer folosește senzorii de mișcare și barometrul pentru a arăta direcția în care privești, a menține traseul înregistrat precis între semnalele GPS și a măsura diferența de nivel.";
+"NSPhotoLibraryUsageDescription" = "Wanderer are nevoie de acces la galeria foto pentru a putea alege o imagine de profil.";

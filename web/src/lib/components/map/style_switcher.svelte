@@ -45,7 +45,7 @@
     bind:this={container}
     class="maplibregl-ctrl maplibregl-ctrl-group relative z-10"
 >
-    <button onclick={toggleSwitcher} aria-label="toggle style switcher">
+    <button onclick={toggleSwitcher} aria-label={$_("toggle-style-switcher")}>
         <i class="fa fa-layer-group text-black"></i>
     </button>
 
@@ -61,7 +61,7 @@
             <button
                 class="fa fa-close !rounded-full"
                 onclick={hideSwitcher}
-                aria-label="close style switcher"
+                aria-label={$_("close-style-switcher")}
             ></button>
         </div>
         <RadioGroup

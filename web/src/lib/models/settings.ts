@@ -14,6 +14,7 @@ export enum Language {
   no = "no",
   pl = "pl",
   pt = "pt",
+  ro = "ro",
   ru = "ru",
   zh = "zh"
 }

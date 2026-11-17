@@ -10,7 +10,7 @@ import 'package:wanderer/routes/settings_language_screen.dart';
 
 void main() {
   testWidgets(
-    'language screen renders a 14-locale select + units switch',
+    'language screen renders a 15-locale select + units switch',
     (tester) async {
       await tester.pumpWidget(
         ProviderScope(
@@ -34,7 +34,7 @@ void main() {
       );
       await tester.pumpAndSettle();
 
-      // One select option per Language enum value (14), preselected from settings.
+      // One select option per Language enum value (15), preselected from settings.
       final select = tester.widget<WandererSelect<Language>>(
         find.byType(WandererSelect<Language>),
       );
@@ -44,7 +44,7 @@ void main() {
       // Native-name labels are used (the single hardcoded-string exception).
       expect(
         select.items.map((item) => item.label),
-        containsAll(<String>['English', '中文']),
+        containsAll(<String>['English', 'Română', '中文']),
       );
 
       // The closed dropdown shows the active language.

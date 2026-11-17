@@ -49,12 +49,13 @@ def json_request(
         raise RuntimeError(f"HTTP {exc.code} {method} {path}: {err_body}") from exc
 
 
-def multipart_post_trail(
+def multipart_save_trail(
     base_url: str,
     token: str,
     fields: list[tuple[str, str]],
     gpx_filename: str,
     gpx_bytes: bytes,
+    record_id: str | None = None,
 ) -> dict:
     boundary = "----WandererBoundary" + uuid.uuid4().hex
     parts: list[bytes] = []
@@ -73,6 +74,7 @@ def multipart_post_trail(
     parts.append(f"--{boundary}--\r\n".encode("utf-8"))
     body = b"".join(parts)
 
+    method = "PATCH" if record_id else "POST"
     parsed = urllib.parse.urlsplit(base_url)
     conn_cls = http.client.HTTPSConnection if parsed.scheme == "https" else http.client.HTTPConnection
     conn = conn_cls(parsed.hostname, parsed.port or (443 if parsed.scheme == "https" else 80), timeout=60)
@@ -84,11 +86,16 @@ def multipart_post_trail(
             "Accept": "application/json",
         }
         prefix = parsed.path.rstrip("/")
-        conn.request("POST", f"{prefix}/api/collections/trails/records", body=body, headers=headers)
+        path = (
+            f"{prefix}/api/collections/trails/records/{record_id}"
+            if record_id
+            else f"{prefix}/api/collections/trails/records"
+        )
+        conn.request(method, path, body=body, headers=headers)
         resp = conn.getresponse()
         raw = resp.read().decode("utf-8", errors="replace")
         if resp.status < 200 or resp.status >= 300:
-            raise RuntimeError(f"HTTP {resp.status} POST /api/collections/trails/records: {raw}")
+            raise RuntimeError(f"HTTP {resp.status} {method} {path}: {raw}")
         return json.loads(raw) if raw else {}
     finally:
         conn.close()
@@ -191,8 +198,8 @@ def ensure_tags(base_url: str, token: str, tag_names: set[str]) -> dict[str, str
     return tag_map
 
 
-def fetch_existing_osm_relations(base_url: str, token: str) -> set[int]:
-    existing: set[int] = set()
+def fetch_existing_osm_relations(base_url: str, token: str) -> dict[int, str]:
+    existing: dict[int, str] = {}
     page = 1
     pattern = re.compile(r"osm:relation:(\d+)")
     while True:
@@ -206,7 +213,7 @@ def fetch_existing_osm_relations(base_url: str, token: str) -> set[int]:
             desc = item.get("description") or ""
             m = pattern.search(desc)
             if m:
-                existing.add(int(m.group(1)))
+                existing[int(m.group(1))] = item["id"]
         if page >= res.get("totalPages", 1):
             break
         page += 1
@@ -223,6 +230,11 @@ def main() -> None:
         help="Path storing curator account password",
     )
     parser.add_argument("--limit", type=int, default=0, help="Optional cap for test imports (0 = all)")
+    parser.add_argument(
+        "--update-existing",
+        action="store_true",
+        help="PATCH already-imported OSM trails in place (updating GPX, elevation gain/loss, duration, description)",
+    )
     args = parser.parse_args()
 
     bundle_dir = Path(args.bundle_dir).resolve()
@@ -248,12 +260,14 @@ def main() -> None:
     print(f"[State] Found {len(existing_rels)} already imported OSM relations; {len(tag_map)} tags ready.")
 
     imported = 0
+    updated = 0
     skipped = 0
     failed = 0
 
     for idx, rec in enumerate(records, 1):
         rel_id = int(rec["rel_id"])
-        if rel_id in existing_rels:
+        existing_record_id = existing_rels.get(rel_id)
+        if existing_record_id and not args.update_existing:
             skipped += 1
             continue
 
@@ -271,9 +285,10 @@ def main() -> None:
             ("public", "true"),
             ("completed", "false"),
             ("distance", str(rec["distance"])),
+            ("elevation_gain", str(rec.get("elevation_gain", 0))),
+            ("elevation_loss", str(rec.get("elevation_loss", 0))),
             ("duration", str(rec["duration"])),
             ("difficulty", rec["difficulty"]),
-            ("author", actor_id),
             ("lat", str(rec["lat"])),
             ("lon", str(rec["lon"])),
             ("min_lat", str(rec["min_lat"])),
@@ -281,6 +296,10 @@ def main() -> None:
             ("min_lon", str(rec["min_lon"])),
             ("max_lon", str(rec["max_lon"])),
         ]
+        # PocketBase trails.updateRule enforces `@request.body.author:changed = false`,
+        # so `author` must only be included when creating a new trail.
+        if not existing_record_id:
+            fields.append(("author", actor_id))
         if cat_id:
             fields.append(("category", cat_id))
         for t in rec.get("tags", []):
@@ -289,28 +308,37 @@ def main() -> None:
                 fields.append(("tags", tid))
 
         try:
-            multipart_post_trail(
+            saved = multipart_save_trail(
                 args.pb_url,
                 token,
                 fields,
                 f"{rel_id}.gpx",
                 gpx_path.read_bytes(),
+                record_id=existing_record_id,
             )
-            imported += 1
-            existing_rels.add(rel_id)
+            if existing_record_id:
+                updated += 1
+            else:
+                imported += 1
+                if saved.get("id"):
+                    existing_rels[rel_id] = saved["id"]
         except Exception as exc:  # noqa: BLE001
             failed += 1
             print(f"[Error] rel={rel_id} ({rec['name']}): {exc}", file=sys.stderr)
-            if failed >= 5 and imported == 0:
+            if failed >= 5 and (imported + updated) == 0:
                 raise RuntimeError("Aborting after 5 consecutive initial failures.") from exc
 
-        if imported % 50 == 0 and imported > 0:
-            print(f"[Progress] Imported {imported} trails (processed {idx}/{len(records)}, skipped={skipped}, failed={failed})")
+        total_ok = imported + updated
+        if total_ok % 50 == 0 and total_ok > 0:
+            print(
+                f"[Progress] Imported={imported}, Updated={updated} "
+                f"(processed {idx}/{len(records)}, skipped={skipped}, failed={failed})"
+            )
         if idx % 20 == 0:
             time.sleep(0.015)
 
-    print(f"[Done] Imported={imported}, Skipped={skipped}, Failed={failed}")
-    if imported == 0 and failed > 0:
+    print(f"[Done] Imported={imported}, Updated={updated}, Skipped={skipped}, Failed={failed}")
+    if (imported + updated) == 0 and failed > 0:
         sys.exit(1)
 
 

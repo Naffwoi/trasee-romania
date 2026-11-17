@@ -245,3 +245,17 @@ export const country_codes = {
     ZM: 'Zambia',
     ZW: 'Zimbabwe'
 }
+
+export function getLocalizedCountryName(code: string, currentLocale?: string | null): string {
+    const upper = code.toUpperCase();
+    try {
+        const displayNames = new Intl.DisplayNames([currentLocale || "en"], { type: "region" });
+        const localized = displayNames.of(upper);
+        if (localized && localized !== upper) {
+            return localized;
+        }
+    } catch {
+        // Fall back to static map when Intl.DisplayNames rejects a locale or code.
+    }
+    return country_codes[upper as keyof typeof country_codes] ?? code;
+}

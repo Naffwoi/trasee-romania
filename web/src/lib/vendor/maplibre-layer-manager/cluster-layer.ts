@@ -22,8 +22,16 @@ export class ClusterLayer implements BaseLayer {
         }
     };
 
-    constructor(map: M.Map, geojson: GeoJSON.FeatureCollection, listeners?: Record<string, { onMouseUp?: (e: MapMouseEvent) => void; onMouseDown?: (e: MapMouseEvent) => void; onEnter?: (e: MapMouseEvent) => void; onLeave?: (e: MapMouseEvent) => void; onMouseMove?: (e: MapMouseEvent) => void; }>) {
+    private suppressUnclusteredZoom = false;
+
+    constructor(
+        map: M.Map,
+        geojson: GeoJSON.FeatureCollection,
+        listeners?: Record<string, { onMouseUp?: (e: MapMouseEvent) => void; onMouseDown?: (e: MapMouseEvent) => void; onEnter?: (e: MapMouseEvent) => void; onLeave?: (e: MapMouseEvent) => void; onMouseMove?: (e: MapMouseEvent) => void; }>,
+        options?: { suppressUnclusteredZoom?: boolean },
+    ) {
         this.map = map;
+        this.suppressUnclusteredZoom = options?.suppressUnclusteredZoom ?? false;
         this.listeners = {
             "clusters": { ...this.listeners["clusters"], ...listeners?.["clusters"] },
             "unclustered-point": { ...this.listeners["unclustered-point"], ...listeners?.["unclustered-point"] }
@@ -117,6 +125,7 @@ export class ClusterLayer implements BaseLayer {
     }
 
     private zoomOnUnclusteredPoint(e: MapMouseEvent) {
+        if (this.suppressUnclusteredZoom) return;
         if (!window.matchMedia("(hover: hover)").matches) return;
         const feature = (e as any).features?.[0];
         if (!feature) {
@@ -127,7 +136,7 @@ export class ClusterLayer implements BaseLayer {
 
         this.map.flyTo({
             center: coordinates,
-            zoom: 12,
+            zoom: Math.max(this.map.getZoom(), 12),
             maxDuration: 3000
         });
     }

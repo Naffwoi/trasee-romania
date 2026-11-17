@@ -1,19 +1,11 @@
 <script lang="ts">
     import { goto } from "$app/navigation";
     import { page } from "$app/state";
-    import LogoText from "#lib/components/logo/logo_text.svelte";
     import { theme, toggleTheme } from "#lib/stores/theme_store.ts";
     import { currentUser, logout } from "#lib/stores/user_store.ts";
     import { getFileURL } from "#lib/util/file_util.ts";
     import type { AuthRecord } from "pocketbase";
     import { _ } from "svelte-i18n";
-    import { backInOut, cubicOut } from "svelte/easing";
-    import { Tween } from "svelte/motion";
-    import CreateMenu from "./create_menu.svelte";
-    import Drawer from "./base/drawer.svelte";
-    import Dropdown from "./base/dropdown.svelte";
-    import LogoTextLight from "./logo/logo_text_light.svelte";
-    import NotificationDropdown from "./notification/notification_dropdown.svelte";
     import UrlImportModal from "./settings/url_import_modal.svelte";
 
     interface Props {
@@ -21,231 +13,276 @@
     }
 
     let { user }: Props = $props();
-    // `currentUser` is undefined until the client auth store has been
-    // initialised. An explicit null means that the user logged out and must
-    // not fall back to the (now stale) server-rendered prop.
-    const navUser = $derived(
-        $currentUser === undefined ? user : $currentUser,
-    );
+    // `currentUser` is undefined until the client auth store has been initialised.
+    const navUser = $derived($currentUser === undefined ? user : $currentUser);
 
-    let navBarItems = [
-        { text: $_("map"), value: "/map" },
-        { text: $_("trail", { values: { n: 2 } }), value: "/trails" },
-        { text: $_("list", { values: { n: 2 } }), value: "/lists" },
-    ];
-
-    const dropdownItems = [
-        { text: $_("profile"), value: "profile", icon: "user" },
-        { text: $_("my-trails"), value: "trails", icon: "route" },
-
-        { text: $_("settings"), value: "settings", icon: "cog" },
-        { text: $_("logout"), value: "logout", icon: "right-from-bracket" },
-    ];
-
-    const indicatorPosition = new Tween(0, {
-        duration: 300,
-        easing: cubicOut,
-    });
-
-    const indicatorWidth = new Tween(0, {
-        duration: 300,
-        easing: cubicOut,
-    });
-
-    const indicatorScale = new Tween(0, {
-        duration: 600,
-        easing: backInOut,
-    });
-
-    let drawerOpen: boolean = $state(false);
-
+    let createMenuOpen = $state(false);
+    let profileMenuOpen = $state(false);
+    let navElement = $state<HTMLElement>();
     let urlImportModal: UrlImportModal;
 
-    let navBarLinks = $state<HTMLElement>();
-    const activePath = $derived(page.route.id === "/lists/[[handle]]/[[id]]" ? "/lists" : page.url.pathname);
-
-    function updateIndicator() {
-        const index = navBarItems.findIndex(item => item.value === activePath);
-        const element = navBarLinks?.children[index + 1] as HTMLElement | undefined;
-        if (index < 0 || !element) {
-            indicatorScale.set(0);
-            return;
+    const pathname = $derived(page.url.pathname);
+    const activeTab = $derived.by(() => {
+        if (pathname === "/map" || pathname.startsWith("/map/trail")) return "trails";
+        if (pathname.startsWith("/lists")) return "lists";
+        if (pathname.startsWith("/trails")) return "library";
+        if (
+            pathname.startsWith("/profile") ||
+            pathname.startsWith("/settings") ||
+            pathname.startsWith("/login") ||
+            pathname.startsWith("/register")
+        ) {
+            return "profile";
         }
-        indicatorScale.set(1);
-        indicatorWidth.set(element.getBoundingClientRect().width + 16);
-        indicatorPosition.set(element.offsetLeft - 8);
-    }
-
-    $effect(() => {
-        activePath;
-        navBarLinks;
-        updateIndicator();
-        if (!navBarLinks) return;
-        const observer = new ResizeObserver(updateIndicator);
-        for (const link of navBarLinks.querySelectorAll("a")) observer.observe(link);
-        return () => observer.disconnect();
+        return "";
     });
 
+    function closeMenus() {
+        createMenuOpen = false;
+        profileMenuOpen = false;
+    }
+
+    function handleOutsidePointer(event: PointerEvent) {
+        if (!createMenuOpen && !profileMenuOpen) return;
+        if (event.target instanceof Node && !navElement?.contains(event.target)) {
+            closeMenus();
+        }
+    }
+
+    function handleKeydown(event: KeyboardEvent) {
+        if (event.key === "Escape" && (createMenuOpen || profileMenuOpen)) {
+            event.preventDefault();
+            closeMenus();
+        }
+    }
+
     function handleLogout() {
-        drawerOpen = false;
+        closeMenus();
         void logout();
         window.location.assign("/map");
     }
-
-    function handleDropdownClick(item: { text: string; value: any }) {
-        if (item.value == "profile") {
-            goto(`/profile/@${$currentUser?.username?.toLowerCase()}`);
-        } else if (item.value == "trails") {
-            goto(`/profile/@${$currentUser?.username?.toLowerCase()}/trails`);
-        } else if (item.value == "logout") {
-            handleLogout();
-        } else if (item.value == "settings") {
-            goto("/settings/profile");
-        }
-    }
-
-
 </script>
 
-<svelte:window onresize={updateIndicator} />
-
-<Drawer bind:open={drawerOpen}>
-    <div class="flex gap-4 items-center m-4">
-        <div class="basis-full"></div>
-        <button
-            aria-label="Toggle theme"
-            class="btn-icon fa-regular fa-{$theme === 'light' ? 'sun' : 'moon'}"
-            onclick={() => toggleTheme()}
-        ></button>
-        <button
-            aria-label="Toggle drawer"
-            class="btn-icon block fa fa-close float-right"
-            onclick={() => (drawerOpen = false)}
-        ></button>
-    </div>
-    <div class="flex flex-col px-12 gap-8">
-        {#each navBarItems as item}
-            <a class="font-semibold text-xl" href={item.value}>{item.text}</a>
-        {/each}
-    </div>
-    <hr class="my-6 border-input-border" />
-    <div class="flex flex-col basis-full">
-        {#if navUser}
-            <CreateMenu inline onselect={() => drawerOpen = false} onurlimport={() => urlImportModal.openModal()} />
-            <div class="basis-full"></div>
-            <hr class="border-input-border" />
-            <div class="flex gap-4 items-center justify-between m-4">
-                <a
-                    class="shrink-0"
-                    href="/profile/@{navUser.username.toLowerCase()}"
-                >
-                    <img
-                        class="rounded-full w-10 aspect-square"
-                        src={getFileURL(navUser, navUser.avatar, "100x100") ||
-                            `https://api.dicebear.com/7.x/initials/svg?seed=${navUser.username.toLowerCase()}&backgroundType=gradientLinear`}
-                        alt="avatar"
-                    />
-                </a>
-                <a
-                    href="/profile/@{navUser.username.toLowerCase()}"
-                    style="width: calc(100% - 104px)"
-                >
-                    <p class="text-sm overflow-hidden text-ellipsis">
-                        {navUser.username}
-                    </p>
-                    <p
-                        class="text-sm text-gray-500 overflow-hidden text-ellipsis"
-                    >
-                        {navUser.email}
-                    </p>
-                </a>
-                <button
-                    aria-label="Logout"
-                    onclick={handleLogout}
-                    class="btn-icon"
-                    ><i class="fa-solid fa-arrow-right-from-bracket"
-                    ></i></button
-                >
-            </div>
-        {:else}
-            <a class="btn-primary btn-large text-center mx-4" href="/login"
-                >{$_("login")}</a
-            >
-        {/if}
-    </div>
-</Drawer>
+<svelte:window onpointerdown={handleOutsidePointer} onkeydown={handleKeydown} />
 
 <nav
-    class="app-navbar flex justify-between items-center px-4 py-2.5 border-b border-input-border/40"
+    bind:this={navElement}
+    aria-label="Primary navigation"
+    class="app-navbar fixed bottom-0 inset-x-0 z-45 h-16 bg-menu-background/98 backdrop-blur-md border-t border-input-border/50 shadow-[0_-2px_16px_rgba(0,0,0,0.08)] select-none"
 >
-    <a href="/map">
-        {#if $theme == "light"}
-            <LogoText></LogoText>
-        {:else}
-            <LogoTextLight></LogoTextLight>
-        {/if}
-    </a>
-    <menu bind:this={navBarLinks} id="nav-bar-links" class="hidden lg:flex gap-8 relative py-1 px-2">
-        <div
-            class="absolute h-full w-16 bg-menu-item-background-hover rounded-xl top-0 z-0"
-            style="width: {indicatorWidth.current}px; left: {indicatorPosition.current}px; scale: {indicatorScale.current}"
-        ></div>
-        {#each navBarItems as item}
-            <a class="font-semibold z-10" href={item.value}>{item.text}</a>
-        {/each}
-    </menu>
-    {#if navUser}
-        <div class="hidden lg:flex gap-6 items-center">
+    <div class="max-w-3xl mx-auto h-full flex items-center justify-around px-2 relative">
+        <!-- 1. Trails (/map) -->
+        <a
+            href="/map"
+            onclick={closeMenus}
+            aria-current={activeTab === "trails" ? "page" : undefined}
+            class="flex flex-col items-center justify-center gap-0.5 px-3 py-1 rounded-2xl transition-colors {activeTab === 'trails'
+                ? 'text-primary'
+                : 'text-content/55 hover:text-content/85'}"
+        >
+            <i class="fa-solid fa-map-location-dot text-[20px] leading-none" aria-hidden="true"></i>
+            <span class="text-[11px] font-medium leading-tight">
+                {$_("trail", { values: { n: 2 } })}
+            </span>
+        </a>
+
+        <!-- 2. Lists (/lists) -->
+        <a
+            href="/lists"
+            onclick={closeMenus}
+            aria-current={activeTab === "lists" ? "page" : undefined}
+            class="flex flex-col items-center justify-center gap-0.5 px-3 py-1 rounded-2xl transition-colors {activeTab === 'lists'
+                ? 'text-primary'
+                : 'text-content/55 hover:text-content/85'}"
+        >
+            <i class="fa-solid fa-list text-[20px] leading-none" aria-hidden="true"></i>
+            <span class="text-[11px] font-medium leading-tight">
+                {$_("list", { values: { n: 2 } })}
+            </span>
+        </a>
+
+        <!-- 3. Center Docked '+' FAB -->
+        <div class="relative flex items-center justify-center w-14">
             <button
-                aria-label="Toggle theme"
-                class="btn-icon fa-regular fa-{$theme === 'light'
-                    ? 'sun'
-                    : 'moon'}"
-                onclick={() => toggleTheme()}
-            ></button>
-            <CreateMenu onurlimport={() => urlImportModal.openModal()} />
-            {#if page.data.notifications}
-                <NotificationDropdown></NotificationDropdown>
-            {/if}
-            <Dropdown
-                items={dropdownItems}
-                onchange={(item) => handleDropdownClick(item)}
+                type="button"
+                aria-label={$_("create")}
+                aria-expanded={createMenuOpen}
+                onclick={() => {
+                    profileMenuOpen = false;
+                    createMenuOpen = !createMenuOpen;
+                }}
+                class="-mt-7 w-14 h-14 rounded-full bg-menu-background text-content border border-input-border/60 shadow-[0_4px_14px_rgba(0,0,0,0.20)] flex items-center justify-center cursor-pointer hover:scale-105 active:scale-95 transition-transform"
             >
-                {#snippet children({ toggleMenu: openDropdown })}
-                    <div class="flex items-center">
-                        <button
-                            aria-label="Open user menu"
-                            class="rounded-full bg-white text-black hover:bg-gray-200 focus:ring-4 ring-gray-100/50 transition-colors h-10 aspect-square"
-                            onclick={openDropdown}
+                <i class="fa-solid fa-plus text-lg" aria-hidden="true"></i>
+            </button>
+
+            {#if createMenuOpen}
+                <div
+                    role="menu"
+                    class="absolute bottom-14 left-1/2 -translate-x-1/2 w-52 rounded-2xl bg-menu-background text-content border border-input-border/70 shadow-[0_10px_30px_rgba(0,0,0,0.18)] p-1.5 z-60"
+                >
+                    <a
+                        href="/trail/edit/new"
+                        data-sveltekit-reload
+                        onclick={closeMenus}
+                        class="flex items-center gap-3 px-3 py-2.5 rounded-xl text-sm font-medium hover:bg-secondary-hover"
+                    >
+                        <i class="fa-solid fa-route w-4 text-center text-content/70" aria-hidden="true"></i>
+                        <span>{$_("new-trail")}</span>
+                    </a>
+                    <a
+                        href="/lists/edit/new"
+                        onclick={closeMenus}
+                        class="flex items-center gap-3 px-3 py-2.5 rounded-xl text-sm font-medium hover:bg-secondary-hover"
+                    >
+                        <i class="fa-solid fa-list-ul w-4 text-center text-content/70" aria-hidden="true"></i>
+                        <span>{$_("new-list")}</span>
+                    </a>
+                    {#if navUser}
+                        <div class="border-t border-input-border/50 my-1"></div>
+                        <a
+                            href="/settings/export"
+                            onclick={closeMenus}
+                            class="flex items-center gap-3 px-3 py-2.5 rounded-xl text-sm font-medium hover:bg-secondary-hover"
                         >
-                            <img
-                                class="rounded-full w-full h-full"
-                                src={getFileURL(navUser, navUser.avatar, "100x100") ||
-                                    `https://api.dicebear.com/7.x/initials/svg?seed=${navUser.username.toLowerCase()}&backgroundType=gradientLinear`}
-                                alt="avatar"
-                            />
+                            <i class="fa-solid fa-file-import w-4 text-center text-content/70" aria-hidden="true"></i>
+                            <span>{$_("from-file")}</span>
+                        </a>
+                        <button
+                            type="button"
+                            onclick={() => {
+                                closeMenus();
+                                urlImportModal.openModal();
+                            }}
+                            class="w-full flex items-center gap-3 px-3 py-2.5 rounded-xl text-sm font-medium text-left hover:bg-secondary-hover cursor-pointer"
+                        >
+                            <i class="fa-solid fa-link w-4 text-center text-content/70" aria-hidden="true"></i>
+                            <span>{$_("from-url")}</span>
                         </button>
-                    </div>
-                {/snippet}
-            </Dropdown>
+                    {/if}
+                </div>
+            {/if}
         </div>
-    {:else}
-        <div class="hidden md:flex items-center gap-8">
+
+        <!-- 4. Library (/trails) -->
+        <a
+            href="/trails"
+            onclick={closeMenus}
+            aria-current={activeTab === "library" ? "page" : undefined}
+            class="flex flex-col items-center justify-center gap-0.5 px-3 py-1 rounded-2xl transition-colors {activeTab === 'library'
+                ? 'text-primary'
+                : 'text-content/55 hover:text-content/85'}"
+        >
+            <i class="fa-solid fa-book-atlas text-[20px] leading-none" aria-hidden="true"></i>
+            <span class="text-[11px] font-medium leading-tight">
+                {$_("library", { default: "Library" })}
+            </span>
+        </a>
+
+        <!-- 5. Profile / Theme / Auth -->
+        <div class="relative flex items-center justify-center">
             <button
-                aria-label="Toggle theme"
-                class="btn-icon fa-regular fa-{$theme === 'light'
-                    ? 'sun'
-                    : 'moon'}"
-                onclick={() => toggleTheme()}
-            ></button>
-            <a class="btn-primary btn-large" href="/login">{$_("login")}</a>
+                type="button"
+                aria-label={navUser ? "Open user menu" : $_("profile")}
+                aria-expanded={profileMenuOpen}
+                onclick={() => {
+                    createMenuOpen = false;
+                    profileMenuOpen = !profileMenuOpen;
+                }}
+                class="flex flex-col items-center justify-center gap-0.5 px-3 py-1 rounded-2xl cursor-pointer transition-colors {activeTab === 'profile'
+                    ? 'text-primary'
+                    : 'text-content/55 hover:text-content/85'}"
+            >
+                {#if navUser}
+                    <img
+                        class="rounded-full w-6 h-6 object-cover border border-input-border/60"
+                        src={getFileURL(navUser, navUser.avatar, "100x100") ||
+                            `https://api.dicebear.com/7.x/initials/svg?seed=${navUser.username.toLowerCase()}&backgroundType=gradientLinear`}
+                        alt=""
+                    />
+                {:else}
+                    <i class="fa-solid fa-circle-user text-[21px] leading-none" aria-hidden="true"></i>
+                {/if}
+                <span class="text-[11px] font-medium leading-tight">
+                    {$_("profile")}
+                </span>
+            </button>
+
+            {#if profileMenuOpen}
+                <div
+                    role="menu"
+                    class="absolute bottom-14 right-0 w-52 rounded-2xl bg-menu-background text-content border border-input-border/70 shadow-[0_10px_30px_rgba(0,0,0,0.18)] p-1.5 z-60"
+                >
+                    {#if navUser}
+                        <a
+                            href="/profile/@{navUser.username.toLowerCase()}"
+                            onclick={closeMenus}
+                            class="flex items-center gap-3 px-3 py-2.5 rounded-xl text-sm font-medium hover:bg-secondary-hover"
+                        >
+                            <i class="fa-solid fa-user w-4 text-center text-content/70" aria-hidden="true"></i>
+                            <span>{$_("profile")}</span>
+                        </a>
+                        <a
+                            href="/profile/@{navUser.username.toLowerCase()}/trails"
+                            onclick={closeMenus}
+                            class="flex items-center gap-3 px-3 py-2.5 rounded-xl text-sm font-medium hover:bg-secondary-hover"
+                        >
+                            <i class="fa-solid fa-route w-4 text-center text-content/70" aria-hidden="true"></i>
+                            <span>{$_("my-trails")}</span>
+                        </a>
+                        <a
+                            href="/settings/profile"
+                            onclick={closeMenus}
+                            class="flex items-center gap-3 px-3 py-2.5 rounded-xl text-sm font-medium hover:bg-secondary-hover"
+                        >
+                            <i class="fa-solid fa-cog w-4 text-center text-content/70" aria-hidden="true"></i>
+                            <span>{$_("settings")}</span>
+                        </a>
+                    {:else}
+                        <button
+                            type="button"
+                            onclick={() => {
+                                closeMenus();
+                                void goto("/login");
+                            }}
+                            class="w-full flex items-center gap-3 px-3 py-2.5 rounded-xl text-sm font-medium text-left hover:bg-secondary-hover cursor-pointer"
+                        >
+                            <i class="fa-solid fa-right-to-bracket w-4 text-center text-content/70" aria-hidden="true"></i>
+                            <span>{$_("login")}</span>
+                        </button>
+                    {/if}
+                    <div class="border-t border-input-border/50 my-1"></div>
+                    <button
+                        type="button"
+                        onclick={() => {
+                            toggleTheme();
+                        }}
+                        class="w-full flex items-center gap-3 px-3 py-2.5 rounded-xl text-sm font-medium text-left hover:bg-secondary-hover cursor-pointer"
+                    >
+                        <i
+                            class="fa-regular fa-{$theme === 'light' ? 'moon' : 'sun'} w-4 text-center text-content/70"
+                            aria-hidden="true"
+                        ></i>
+                        <span>
+                            {$theme === "light"
+                                ? $_("dark-mode", { default: "Dark mode" })
+                                : $_("light-mode", { default: "Light mode" })}
+                        </span>
+                    </button>
+                    {#if navUser}
+                        <button
+                            type="button"
+                            onclick={handleLogout}
+                            class="w-full flex items-center gap-3 px-3 py-2.5 rounded-xl text-sm font-medium text-left text-red-500 hover:bg-secondary-hover cursor-pointer"
+                        >
+                            <i class="fa-solid fa-right-from-bracket w-4 text-center" aria-hidden="true"></i>
+                            <span>{$_("logout")}</span>
+                        </button>
+                    {/if}
+                </div>
+            {/if}
         </div>
-    {/if}
-    <button
-        aria-label="Toggle drawer"
-        class="btn-icon fa fa-bars lg:hidden"
-        onclick={() => (drawerOpen = !drawerOpen)}
-    ></button>
+    </div>
 </nav>
 
 <UrlImportModal bind:this={urlImportModal}></UrlImportModal>

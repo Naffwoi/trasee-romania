@@ -103,6 +103,7 @@ const _$LanguageEnumMap = {
   Language.no: 'no',
   Language.pl: 'pl',
   Language.pt: 'pt',
+  Language.ro: 'ro',
   Language.ru: 'ru',
   Language.zh: 'zh',
 };

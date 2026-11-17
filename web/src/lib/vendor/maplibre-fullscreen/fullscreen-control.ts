@@ -7,10 +7,11 @@ export class FullscreenControl implements IControl {
     private iconSpan?: HTMLSpanElement;
 
     private callback: (e: MouseEvent) => void;
+    private label?: string;
 
-    constructor(callback: (e: MouseEvent) => void) {
+    constructor(callback: (e: MouseEvent) => void, label?: string) {
         this.callback = callback;
-
+        this.label = label;
     }
 
 
@@ -22,6 +23,10 @@ export class FullscreenControl implements IControl {
             "maplibregl-ctrl-group"
         );
         this.fullscreenButton = document.createElement("button");
+        if (this.label) {
+            this.fullscreenButton.title = this.label;
+            this.fullscreenButton.setAttribute("aria-label", this.label);
+        }
         this.buttonContainer.appendChild(this.fullscreenButton);
         this.iconSpan = document.createElement("i");
         this.iconSpan.classList.add("fa", "fa-maximize", "text-black");

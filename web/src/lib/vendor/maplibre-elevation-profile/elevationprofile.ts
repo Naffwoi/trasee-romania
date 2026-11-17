@@ -337,6 +337,13 @@ export type ElevationProfileOptions = {
 
     onLeave?: (() => void) | null;
 
+    labels?: {
+        after?: string;
+        elevation?: string;
+        grade?: string;
+        speed?: string;
+    };
+
 };
 
 const elevationProfileDefaultOptions: ElevationProfileOptions = {
@@ -372,7 +379,13 @@ const elevationProfileDefaultOptions: ElevationProfileOptions = {
     paddingRight: 10,
     onClick: null,
     onMove: null,
-    zoom: true
+    zoom: true,
+    labels: {
+        after: "After",
+        elevation: "Elevation",
+        grade: "Grade",
+        speed: "Speed",
+    },
 };
 
 /**
@@ -413,6 +426,9 @@ export class ElevationProfile {
     private width?: number
     private height?: number
     private gradient?: CanvasGradient;
+    public minElevation: number | null = null;
+    public maxElevation: number | null = null;
+    public totalAscent = 0;
 
 
     constructor(
@@ -556,8 +572,10 @@ export class ElevationProfile {
                         max: 0,
                         type: "linear",
                         afterTickToLabelConversion: (scaleInstance) => {
-                            scaleInstance.ticks.pop();
-                            scaleInstance.ticks.shift();
+                            if (scaleInstance.ticks.length > 4) {
+                                scaleInstance.ticks.pop();
+                                scaleInstance.ticks.shift();
+                            }
                         },
                         ticks: {
                             mirror: true,
@@ -636,9 +654,10 @@ export class ElevationProfile {
                                     return "";
                                 }
                                 const tooltipInfo = [];
+                                const labels = this.settings.labels ?? {};
                                 if (this.settings.tooltipDisplayDistance) {
                                     tooltipInfo.push(
-                                        `After: ${this.cumulatedDistanceAdjustedUnit[
+                                        `${labels.after ?? "After"}: ${this.cumulatedDistanceAdjustedUnit[
                                             tooltipItem.dataIndex
                                         ].toFixed(2)} ${distanceUnit} ${this.cumulatedTime.length ? '(' + formatTimeHHMM(this.cumulatedTime[tooltipItem.dataIndex]) + ')' : ''}`
                                     );
@@ -646,7 +665,7 @@ export class ElevationProfile {
 
                                 if (this.settings.tooltipDisplayElevation) {
                                     tooltipInfo.push(
-                                        `Elevation: ${this.elevatedPositionsAdjustedUnit[
+                                        `${labels.elevation ?? "Elevation"}: ${this.elevatedPositionsAdjustedUnit[
                                             tooltipItem.dataIndex
                                         ][2].toFixed(2)} ${elevationUnit}`
                                     );
@@ -662,12 +681,12 @@ export class ElevationProfile {
 
                                 if (this.settings.tooltipDisplayGrade) {
                                     tooltipInfo.push(
-                                        `Grade: ${this.grade[tooltipItem.dataIndex].toFixed(1)}%`
+                                        `${labels.grade ?? "Grade"}: ${this.grade[tooltipItem.dataIndex].toFixed(1)}%`
                                     );
                                 }
 
                                 if (this.settings.tooltipDisplaySpeed && this.speed.length) {
-                                    tooltipInfo.push(`Speed: ${this.speed[
+                                    tooltipInfo.push(`${labels.speed ?? "Speed"}: ${this.speed[
                                         tooltipItem.dataIndex
                                     ]?.toFixed(2)} ${distanceUnit}/h`
                                     );
@@ -699,7 +718,8 @@ export class ElevationProfile {
                 {
                     id: "waypointPlugin",
                     afterDraw: (chart, args, options) => {
-                        const waypointContainer = document.getElementById("waypoint-container") as HTMLDivElement;
+                        const waypointContainer = document.getElementById("waypoint-container") as HTMLDivElement | null;
+                        if (!waypointContainer) return;
                         waypointContainer.innerHTML = ""; // Clear previous ticks
 
                         const xScale = chart.scales.x; // Get X-axis scale
@@ -845,8 +865,9 @@ export class ElevationProfile {
                 }
 
 
-                if (color !== prevColor) {
-                    const percentDone = this.cumulatedDistance[i] / this.cumulatedDistance[this.cumulatedDistance.length - 1]
+                const totalDist = this.cumulatedDistance[this.cumulatedDistance.length - 1] ?? 0;
+                if (color !== prevColor && totalDist > 0) {
+                    const percentDone = Math.max(0, Math.min(1, this.cumulatedDistance[i] / totalDist));
                     this.gradient.addColorStop(percentDone, color);
 
                     prevColor = color;
@@ -1045,6 +1066,16 @@ export class ElevationProfile {
         this.cumulatedDPlus.push(cumulatedDPlus);
 
 
+        if (!this.elevatedPositionsAdjustedUnit.length) {
+            this.minElevation = null;
+            this.maxElevation = null;
+            this.totalAscent = 0;
+            this.chart.data.labels = [];
+            this.chart.data.datasets[0].data = [];
+            this.chart.update();
+            return;
+        }
+
         let minElevation = +Infinity;
         let maxElevation = -Infinity;
 
@@ -1058,7 +1089,12 @@ export class ElevationProfile {
             }
         }
 
-        const elevationPadding = (maxElevation - minElevation) * 0.1;
+        this.minElevation = minElevation;
+        this.maxElevation = maxElevation;
+        this.totalAscent = cumulatedDPlus;
+
+        const span = maxElevation - minElevation;
+        const elevationPadding = span > 1 ? span * 0.12 : 10;
         this.chart.data.labels = this.cumulatedDistanceAdjustedUnit;
         this.chart.data.datasets[0].data = this.elevatedPositionsAdjustedUnit.map(
             (pos) => pos[2]

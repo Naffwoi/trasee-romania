@@ -45,6 +45,7 @@ class Trail {
     subcategory?: string;
     tags: string[];
     polyline?: string;
+    hover_polyline?: string;
     domain?: string;
     iri?: string;
     like_count: number;
@@ -401,6 +402,7 @@ export const defaultTrailSearchAttributes = [
     "like_count",
     "shares",
     "iri",
+    "polyline",
     "bounding_box_diagonal",
     "_geo",]
 

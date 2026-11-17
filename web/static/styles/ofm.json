@@ -14,6 +14,12 @@
       "type": "vector",
       "url": "https://tiles.openfreemap.org/planet"
     },
+    "hillshadeSource": {
+      "type": "raster-dem",
+      "url": "https://tiles.mapterhorn.com/tilejson.json",
+      "minzoom": 7,
+      "maxzoom": 12
+    },
     "attribution": {
       "attribution": "<a href=\"https://www.openmaptiles.org/\" target=\"_blank\">&copy; OpenMapTiles</a> <a href=\"https://www.openstreetmap.org/copyright\" target=\"_blank\">&copy; OpenStreetMap contributors</a>",
       "type": "vector"
@@ -29,7 +35,7 @@
         "visibility": "visible"
       },
       "paint": {
-        "background-color": "#f2efe9"
+        "background-color": "#f1f3f0"
       }
     },
     {
@@ -211,17 +217,17 @@
             "class"
           ],
           "farmland",
-          "#eef0d5",
+          "#dcecca",
           "wood",
-          "#add19e",
+          "#bfdcaa",
           "rock",
-          "#eee5dc",
+          "#ece5d3",
           "grass",
-          "#cdebb0",
+          "#d5ecc4",
           "sand",
-          "#f5e9c6",
+          "#e6e2d3",
           "wetland",
-          "#add19e",
+          "#bfdcaa",
           "#000"
         ],
         "fill-opacity": {
@@ -284,7 +290,7 @@
         "visibility": "visible"
       },
       "paint": {
-        "fill-color": "#c8facc",
+        "fill-color": "#c5e0b0",
         "fill-antialias": true
       },
       "filter": [
@@ -663,6 +669,27 @@
           "ice"
         ]
       ]
+    },
+    {
+      "id": "hillshade",
+      "type": "hillshade",
+      "source": "hillshadeSource",
+      "minzoom": 7,
+      "paint": {
+        "hillshade-exaggeration": [
+          "interpolate",
+          [
+            "linear"
+          ],
+          [
+            "zoom"
+          ],
+          7.5,
+          0,
+          9.5,
+          0.5
+        ]
+      }
     },
     {
       "id": "waterway_tunnel",

@@ -4,6 +4,29 @@ import { NavigateRequestSchema } from '#lib/models/api/valhalla_navigate_schema.
 import { error, json, type RequestEvent } from '@sveltejs/kit';
 import type { NavigateManeuver } from '#lib/models/api/valhalla_navigate_schema.ts';
 import { getValhallaUrl } from '#lib/server/valhalla.ts';
+import { resolveAcceptLanguage } from '#lib/i18n/locales.ts';
+
+const VALHALLA_LANGUAGE_TAGS: Record<string, string> = {
+  cs: 'cs-CZ',
+  de: 'de-DE',
+  en: 'en-US',
+  es: 'es-ES',
+  fr: 'fr-FR',
+  hu: 'hu-HU',
+  it: 'it-IT',
+  nl: 'nl-NL',
+  no: 'nb-NO',
+  pl: 'pl-PL',
+  pt: 'pt-PT',
+  ro: 'ro-RO',
+  ru: 'ru-RU',
+  zh: 'zh-CN',
+};
+
+function toValhallaLanguageTag(locale: string | null | undefined): string {
+  const base = locale?.trim().replace('_', '-').split('-')[0]?.toLowerCase() ?? '';
+  return VALHALLA_LANGUAGE_TAGS[base] ?? 'en-US';
+}
 
 /**
  * @swagger
@@ -92,10 +115,18 @@ export async function POST(event: RequestEvent) {
 
     const body = NavigateRequestSchema.parse(await event.request.json());
 
+    const rawLocale =
+      body.language ||
+      event.locals.settings?.language ||
+      resolveAcceptLanguage(event.request.headers.get('accept-language'));
+
     const valhallaReq = {
       shape: body.shape,
       costing: body.costing,
       directions_type: "instructions",
+      directions_options: {
+        language: toValhallaLanguageTag(rawLocale),
+      },
       shape_match: "map_snap",
     };
 

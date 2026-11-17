@@ -79,6 +79,7 @@
     });
 
     const detailHref = $derived(`/map/trail/${trailHandle}/${trail.id}`);
+    const navigateHref = $derived(`/map/trail/${trailHandle}/${trail.id}/navigate`);
 
     function openDetail() {
         void goto(detailHref);
@@ -193,6 +194,18 @@
             <StatChip icon="fa-clock" label={formatTimeHHMM(trailDisplayDuration(trail))} />
             <StatChip icon="fa-arrow-trend-up" label={formatElevation(trail.elevation_gain)} />
             <StatChip icon="fa-arrow-trend-down" label={formatElevation(trail.elevation_loss)} />
+        </div>
+
+        <div class="mt-2.5 flex items-center justify-end">
+            <a
+                href={navigateHref}
+                onclick={(e) => e.stopPropagation()}
+                onkeydown={(e) => e.stopPropagation()}
+                class="inline-flex items-center gap-1.5 rounded-full bg-emerald-700 hover:bg-emerald-800 text-white px-3.5 py-1.5 text-xs font-semibold whitespace-nowrap shadow-sm transition-colors"
+            >
+                <i class="fa-solid fa-location-arrow text-[11px]" aria-hidden="true"></i>
+                <span>{$_("start-trail", { default: "Start" })}</span>
+            </a>
         </div>
     </div>
 </div>

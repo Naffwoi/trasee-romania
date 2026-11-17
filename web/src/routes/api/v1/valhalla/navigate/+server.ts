@@ -5,6 +5,7 @@ import { error, json, type RequestEvent } from '@sveltejs/kit';
 import type { NavigateManeuver } from '#lib/models/api/valhalla_navigate_schema.ts';
 import { getValhallaUrl } from '#lib/server/valhalla.ts';
 import { resolveAcceptLanguage } from '#lib/i18n/locales.ts';
+import { synthesizeTrailManeuvers } from '#lib/navigation/trail_maneuver_synthesizer.ts';
 
 const VALHALLA_LANGUAGE_TAGS: Record<string, string> = {
   cs: 'cs-CZ',
@@ -105,14 +106,6 @@ export async function POST(event: RequestEvent) {
   }
 
   try {
-    // Check the base before appending the path: null + '/trace_route' would be the
-    // truthy string "null/trace_route".
-    const valhallaUrl = getValhallaUrl();
-    const navigateUrl = valhallaUrl + '/trace_route';
-    if (!valhallaUrl) {
-      return json({ message: "VALHALLA_URL not set" }, { status: 400 });
-    }
-
     const body = NavigateRequestSchema.parse(await event.request.json());
 
     const rawLocale =
@@ -120,6 +113,14 @@ export async function POST(event: RequestEvent) {
       event.locals.settings?.language ||
       resolveAcceptLanguage(event.request.headers.get('accept-language'));
 
+    // Check the base before appending the path: null + '/trace_route' would be the
+    // truthy string "null/trace_route".
+    const valhallaUrl = getValhallaUrl();
+    if (!valhallaUrl) {
+      return json(synthesizeTrailManeuvers(body.shape, { locale: rawLocale }));
+    }
+
+    const navigateUrl = valhallaUrl + '/trace_route';
     const valhallaReq = {
       shape: body.shape,
       costing: body.costing,
@@ -130,45 +131,52 @@ export async function POST(event: RequestEvent) {
       shape_match: "map_snap",
     };
 
-    const res = await event.fetch(navigateUrl, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(valhallaReq),
-    });
+    try {
+      const res = await event.fetch(navigateUrl, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(valhallaReq),
+      });
 
-    if (!res.ok) {
-      const detail = await res.text();
-      return json({ message: "valhalla_error", detail }, { status: 502 });
-    }
-
-    const data = await res.json();
-    const trip = data?.trip;
-    if (!trip?.legs) {
-      return json({ message: "valhalla_error", detail: "unexpected response shape" }, { status: 502 });
-    }
-
-    const shape: [number, number][] = [];
-    const maneuvers: NavigateManeuver[] = [];
-
-    for (const leg of trip.legs) {
-      const offset = shape.length;
-
-      for (const [lng, lat] of decodePolyline(leg.shape)) {
-        shape.push([lat, lng]);
+      if (!res.ok) {
+        return json(synthesizeTrailManeuvers(body.shape, { locale: rawLocale }));
       }
 
-      for (const m of leg.maneuvers ?? []) {
-        maneuvers.push({
-          instruction: m.instruction,
-          length: m.length,
-          begin_shape_index: offset + m.begin_shape_index,
-          bearing: m.bearing_after ?? m.bearing_before ?? 0,
-          type: m.type ?? 0,
-        });
+      const data = await res.json();
+      const trip = data?.trip;
+      if (!trip?.legs) {
+        return json(synthesizeTrailManeuvers(body.shape, { locale: rawLocale }));
       }
-    }
 
-    return json({ maneuvers, shape });
+      const shape: [number, number][] = [];
+      const maneuvers: NavigateManeuver[] = [];
+
+      for (const leg of trip.legs) {
+        const offset = shape.length;
+
+        for (const [lng, lat] of decodePolyline(leg.shape)) {
+          shape.push([lat, lng]);
+        }
+
+        for (const m of leg.maneuvers ?? []) {
+          maneuvers.push({
+            instruction: m.instruction,
+            length: m.length,
+            begin_shape_index: offset + m.begin_shape_index,
+            bearing: m.bearing_after ?? m.bearing_before ?? 0,
+            type: m.type ?? 0,
+          });
+        }
+      }
+
+      if (maneuvers.length === 0 || shape.length === 0) {
+        return json(synthesizeTrailManeuvers(body.shape, { locale: rawLocale }));
+      }
+
+      return json({ maneuvers, shape });
+    } catch {
+      return json(synthesizeTrailManeuvers(body.shape, { locale: rawLocale }));
+    }
   } catch (e: any) {
     return handleError(e);
   }

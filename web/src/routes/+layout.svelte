@@ -189,6 +189,7 @@
     const isFullScreenMapRoute = $derived(
         page.url.pathname === "/map" || page.url.pathname.startsWith("/map/trail/"),
     );
+    const isNavigateRoute = $derived(page.url.pathname.endsWith("/navigate"));
 </script>
 
 <svelte:window onpageshow={handlePageShow} />
@@ -245,4 +246,6 @@
         {@render children?.()}
     </div>
 {/if}
-<NavBar user={data.user}></NavBar>
+{#if !isNavigateRoute}
+    <NavBar user={data.user}></NavBar>
+{/if}

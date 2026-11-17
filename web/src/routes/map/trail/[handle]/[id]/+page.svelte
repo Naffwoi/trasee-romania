@@ -52,6 +52,12 @@
                 trail.public,
         ),
     );
+
+    const navigateHref = $derived.by(() => {
+        const share = page.url.searchParams.get("share");
+        const base = `/map/trail/${page.params.handle}/${trail.id ?? page.params.id}/navigate`;
+        return share ? `${base}?share=${encodeURIComponent(share)}` : base;
+    });
 </script>
 
 <MetaTags
@@ -111,7 +117,7 @@
                 <i class="fa fa-arrow-left" aria-hidden="true"></i>
             </button>
             <div
-                class="pointer-events-auto bg-menu-background/95 backdrop-blur px-3.5 py-1.5 rounded-full shadow-md border border-input-border/50 text-sm font-semibold text-content truncate max-w-[min(58vw,420px)]"
+                class="pointer-events-auto bg-menu-background/95 backdrop-blur px-3.5 py-1.5 rounded-full shadow-md border border-input-border/50 text-sm font-semibold text-content truncate max-w-[min(46vw,420px)]"
                 title={trail.name}
             >
                 {trail.name}
@@ -121,6 +127,13 @@
         <div
             class="pointer-events-auto flex items-center gap-1.5 bg-menu-background/95 backdrop-blur px-2 py-1 rounded-full shadow-md border border-input-border/50 shrink-0"
         >
+            <a
+                href={navigateHref}
+                class="inline-flex items-center gap-1.5 rounded-full bg-emerald-700 hover:bg-emerald-800 text-white px-3 py-1.5 text-xs font-semibold whitespace-nowrap shadow-sm transition-colors"
+            >
+                <i class="fa-solid fa-location-arrow text-[11px]" aria-hidden="true"></i>
+                <span>{$_("start-trail", { default: "Start" })}</span>
+            </a>
             {#if canLikeTrail}
                 <LikeButton {trail} />
             {/if}

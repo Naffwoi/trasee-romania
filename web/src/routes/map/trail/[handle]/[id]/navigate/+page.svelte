@@ -5,6 +5,35 @@
     import MetaTags from "#lib/components/base/meta_tags.svelte";
     import LiveElevationSheet from "#lib/components/navigation/live_elevation_sheet.svelte";
     import NavigationTopBanner from "#lib/components/navigation/navigation_top_banner.svelte";
+    import SosModalAndBanner from "#lib/components/navigation/sos_modal_and_banner.svelte";
+    import WazeNearbyPrompt from "#lib/components/navigation/waze_nearby_prompt.svelte";
+    import WazeReportSheet from "#lib/components/navigation/waze_report_sheet.svelte";
+    import {
+        connectLiveStream,
+        createReport,
+        fetchTrailLiveSummary,
+        getVotedReportsMap,
+        isReportVisibleOnMap,
+        mergeReportIntoList,
+        mergeSosIntoList,
+        playSosTone,
+        respondToSos,
+        sendHeartbeat,
+        subscribeWebPushIfSupported,
+        triggerSos,
+        updateSos,
+        voteReport,
+        type LiveStreamHandle,
+        type ReportVoteType,
+        type SosAlertDto,
+        type SosReason,
+        type TrailReportCategory,
+        type TrailReportDto,
+    } from "#lib/live/live_client.ts";
+    import {
+        syncReportMapMarkers,
+        syncSosMapMarkers,
+    } from "#lib/live/report_markers.ts";
     import GPX from "#lib/models/gpx/gpx.ts";
     import type { Trail } from "#lib/models/trail.ts";
     import {
@@ -24,6 +53,10 @@
         type OffTrailMode,
         type OffTrailRerouteResult,
     } from "#lib/navigation/index.ts";
+    import {
+        computeDirectRescueRoute,
+        type DirectRescueRouteResult,
+    } from "#lib/navigation/off_trail_router.ts";
     import { decodePolyline } from "#lib/util/polyline_util.ts";
     import { AccuracyLayer } from "#lib/vendor/maplibre-user-location/accuracy-layer.ts";
     import { CompassSensor } from "#lib/vendor/maplibre-user-location/compass-sensor.ts";
@@ -32,7 +65,7 @@
     import type { FeatureCollection } from "geojson";
     import * as M from "maplibre-gl";
     import "maplibre-gl/dist/maplibre-gl.css";
-    import { onDestroy, onMount } from "svelte";
+    import { onDestroy, onMount, untrack } from "svelte";
     import { _, locale } from "svelte-i18n";
 
     interface Props {
@@ -67,6 +100,7 @@
     const SRC_BREADCRUMB = "nav-breadcrumb";
     const SRC_OFFTRAIL = "nav-offtrail";
     const SRC_REJOIN = "nav-rejoin-point";
+    const SRC_RESCUE = "nav-sos-rescue";
 
     const LAYER_WALKED = "nav-trail-walked";
     const LAYER_UPCOMING_CASING = "nav-trail-upcoming-casing";
@@ -75,6 +109,8 @@
     const LAYER_OFFTRAIL_CASING = "nav-offtrail-casing";
     const LAYER_OFFTRAIL_LINE = "nav-offtrail-line";
     const LAYER_REJOIN_POINT = "nav-rejoin-point";
+    const LAYER_RESCUE_CASING = "nav-sos-rescue-casing";
+    const LAYER_RESCUE_LINE = "nav-sos-rescue-line";
 
     let { data }: Props = $props();
     const trail = $derived(data.trail);
@@ -138,6 +174,47 @@
     let is3D = $state(true);
     let sheetExpanded = $state(true);
 
+    // Live Community (Waze Reports, 30m Presence & 5 km SOS Rescue) reactive state
+    let activeHikersCount = $state<number | null>(null);
+    let liveReports = $state<TrailReportDto[]>([]);
+    let liveSosAlerts = $state<SosAlertDto[]>([]);
+    let liveUserPos = $state<{ lat: number; lon: number } | null>(null);
+    let reportSheetOpen = $state(false);
+    let sosModalOpen = $state(false);
+    let liveBusy = $state(false);
+    let votedReportMap = $state<Record<string, ReportVoteType>>({});
+    let snoozedReportIds = $state<Record<string, boolean>>({});
+    let activeRescueSosId = $state<string | null>(null);
+    let activeRescueRoute = $state<DirectRescueRouteResult | null>(null);
+    let pushSubscribed = $state(false);
+    let pushSupported = $state(false);
+    let bottomSheetWrapEl = $state<HTMLDivElement | null>(null);
+    let bottomBarHeight = $state(0);
+
+    const floatingBottomPx = $derived(
+        (bottomBarHeight > 0 ? bottomBarHeight : sheetExpanded ? 290 : 96) + 12,
+    );
+
+    $effect(() => {
+        const el = bottomSheetWrapEl;
+        sheetExpanded;
+        activeHikersCount;
+        etaSnapshot;
+        if (!el) return;
+        const measure = () => {
+            const h = Math.round(el.getBoundingClientRect().height);
+            if (h > 0 && h !== bottomBarHeight) {
+                bottomBarHeight = h;
+            }
+        };
+        measure();
+        if (typeof ResizeObserver !== "undefined") {
+            const obs = new ResizeObserver(measure);
+            obs.observe(el);
+            return () => obs.disconnect();
+        }
+    });
+
     // Non-reactive runtime handles owned by onMount / onDestroy
     let map: M.Map | null = null;
     let compassSensor: CompassSensor | null = null;
@@ -150,6 +227,17 @@
     let wakeLock: WakeLockSentinel | null = null;
     let watchId: number | null = null;
     let rejoinTimer: ReturnType<typeof setTimeout> | null = null;
+    let heartbeatTimer: ReturnType<typeof setInterval> | null = null;
+    let streamHandle: LiveStreamHandle | null = null;
+    let reportMarkers: M.Marker[] = [];
+    let sosMarkers: M.Marker[] = [];
+    const alertedSosIds = new Set<string>();
+    let lastHeartbeatSentAt = 0;
+    let lastMySosPatchAt = 0;
+    let lastMySosPos: { lat: number; lon: number } | null = null;
+    let lastResponderUpdateAt = 0;
+    let lastResponderPos: { lat: number; lon: number } | null = null;
+    let lastRescueCalcPos: { lat: number; lon: number } | null = null;
     let breadcrumbCoords: [number, number][] = [];
     let latestFix: {
         lat: number;
@@ -215,6 +303,58 @@
             next: null,
             distanceM: Math.max(0, totalDist - alongTrackMeters),
         };
+    });
+
+    const myActiveSos = $derived(
+        liveSosAlerts.find((s) => s.isMine && s.status === "active") ?? null,
+    );
+
+    const nearbySos = $derived.by(() => {
+        const urlSosId = page.url.searchParams.get("sos");
+        const candidates = liveSosAlerts.filter((s) => !s.isMine && s.status === "active");
+        if (candidates.length === 0) return null;
+
+        const filtered = candidates.filter((s) => {
+            if (urlSosId && s.id === urlSosId) return true;
+            if (s.amResponding || activeRescueSosId === s.id) return true;
+            if (liveUserPos) {
+                return haversineMeters(liveUserPos.lat, liveUserPos.lon, s.lat, s.lon) <= 5000;
+            }
+            return Boolean(trail.id && s.trailId === trail.id);
+        });
+        if (filtered.length === 0) return null;
+
+        filtered.sort((a, b) => {
+            if (activeRescueSosId) {
+                if (a.id === activeRescueSosId) return -1;
+                if (b.id === activeRescueSosId) return 1;
+            }
+            if (urlSosId) {
+                if (a.id === urlSosId) return -1;
+                if (b.id === urlSosId) return 1;
+            }
+            if (!liveUserPos) return 0;
+            const da = haversineMeters(liveUserPos.lat, liveUserPos.lon, a.lat, a.lon);
+            const db = haversineMeters(liveUserPos.lat, liveUserPos.lon, b.lat, b.lon);
+            return da - db;
+        });
+
+        return filtered[0];
+    });
+
+    const nearbyPromptCandidate = $derived.by(() => {
+        if (!liveUserPos) return null;
+        let best: { report: TrailReportDto; distanceM: number } | null = null;
+        const nowMs = Date.now();
+        for (const r of liveReports) {
+            if (!isReportVisibleOnMap(r, nowMs)) continue;
+            if (votedReportMap[r.id] || snoozedReportIds[r.id]) continue;
+            const distM = haversineMeters(liveUserPos.lat, liveUserPos.lon, r.lat, r.lon);
+            if (distM < 150 && (!best || distM < best.distanceM)) {
+                best = { report: r, distanceM: distM };
+            }
+        }
+        return best;
     });
 
     function persistSession() {
@@ -489,6 +629,7 @@
                 SRC_BREADCRUMB,
                 SRC_OFFTRAIL,
                 SRC_REJOIN,
+                SRC_RESCUE,
             ]) {
                 if (!map.getSource(srcId)) {
                     map.addSource(srcId, { type: "geojson", data: EMPTY_FC });
@@ -622,6 +763,60 @@
         }
     }
 
+    function syncRescueLayers(rescue: DirectRescueRouteResult | null) {
+        if (!map || !isStyleReady()) return;
+        try {
+            const rescueSrc = map.getSource(SRC_RESCUE) as M.GeoJSONSource | undefined;
+            if (rescue && rescue.points.length >= 2) {
+                rescueSrc?.setData({
+                    type: "FeatureCollection",
+                    features: [
+                        {
+                            type: "Feature",
+                            properties: { mode: rescue.mode },
+                            geometry: {
+                                type: "LineString",
+                                coordinates: rescue.points.map((p) => [p.lon, p.lat]),
+                            },
+                        },
+                    ],
+                });
+
+                if (!map.getLayer(LAYER_RESCUE_CASING)) {
+                    map.addLayer({
+                        id: LAYER_RESCUE_CASING,
+                        type: "line",
+                        source: SRC_RESCUE,
+                        layout: { "line-cap": "round", "line-join": "round" },
+                        paint: { "line-color": "#ffffff", "line-width": 9.5 },
+                    });
+                }
+                if (!map.getLayer(LAYER_RESCUE_LINE)) {
+                    map.addLayer({
+                        id: LAYER_RESCUE_LINE,
+                        type: "line",
+                        source: SRC_RESCUE,
+                        layout: { "line-cap": "round", "line-join": "round" },
+                        paint: {
+                            "line-color": "#e11d48",
+                            "line-width": 5.5,
+                            "line-dasharray": [2.2, 1.3],
+                        },
+                    });
+                }
+            } else {
+                for (const id of [LAYER_RESCUE_LINE, LAYER_RESCUE_CASING]) {
+                    if (map.getLayer(id)) {
+                        map.removeLayer(id);
+                    }
+                }
+                rescueSrc?.setData(EMPTY_FC);
+            }
+        } catch {
+            // Ignore during style teardown
+        }
+    }
+
     function syncNavGeoJson() {
         if (!map || !isStyleReady()) return;
         ensureBaseNavSourcesAndLayers();
@@ -651,6 +846,7 @@
             );
 
             syncOffTrailLayers(reroute);
+            syncRescueLayers(activeRescueRoute);
         } catch {
             // Ignore transient map teardown
         }
@@ -712,8 +908,270 @@
         return computed;
     }
 
+    function syncLiveMapOverlays() {
+        if (!map) return;
+        reportMarkers = syncReportMapMarkers(map, reportMarkers, liveReports, {
+            onVote: (id, v) => void handleVoteReport(id, v),
+        });
+        sosMarkers = syncSosMapMarkers(map, sosMarkers, liveSosAlerts, {
+            onRespond: (sos) => void handleRespondSos(sos),
+        });
+    }
+
+    $effect(() => {
+        liveReports;
+        liveSosAlerts;
+        untrack(() => {
+            syncLiveMapOverlays();
+        });
+    });
+
+    function getEffectiveResponderOrigin(): {
+        lat: number;
+        lon: number;
+        ele: number;
+    } | null {
+        if (latestFix) {
+            return {
+                lat: latestFix.lat,
+                lon: latestFix.lon,
+                ele:
+                    userEle ??
+                    latestFix.altitude ??
+                    activeSampler(latestFix.lat, latestFix.lon) ??
+                    0,
+            };
+        }
+        if (activePoints.length > 0) {
+            const p = activePoints[0];
+            return { lat: p.lat, lon: p.lon, ele: p.ele };
+        }
+        if (trail.lat !== undefined && trail.lon !== undefined) {
+            return { lat: trail.lat, lon: trail.lon, ele: 0 };
+        }
+        return null;
+    }
+
+    function computeRescueRouteToSos(sos: SosAlertDto): DirectRescueRouteResult | null {
+        const origin = getEffectiveResponderOrigin();
+        if (!origin) return null;
+        lastRescueCalcPos = { lat: origin.lat, lon: origin.lon };
+        return computeDirectRescueRoute({
+            fromLat: origin.lat,
+            fromLon: origin.lon,
+            fromEle: origin.ele,
+            targetLat: sos.lat,
+            targetLon: sos.lon,
+            targetEle: sos.ele,
+            trailPoints: activePoints,
+            sampler: activeSampler,
+            mode: offTrailMode,
+            locale: activeLocaleCode(),
+        });
+    }
+
+    function ingestSosListWithTone(incomingList: SosAlertDto[]) {
+        for (const s of incomingList) {
+            if (!s.isMine && s.status === "active" && !alertedSosIds.has(s.id)) {
+                alertedSosIds.add(s.id);
+                playSosTone();
+            }
+        }
+        liveSosAlerts = incomingList;
+    }
+
+    async function triggerHeartbeatNow(force = false) {
+        if (!latestFix) return;
+        const now = Date.now();
+        if (!force && now - lastHeartbeatSentAt < 18_000) return;
+        lastHeartbeatSentAt = now;
+        const res = await sendHeartbeat({
+            trailId: trail.id,
+            lat: latestFix.lat,
+            lon: latestFix.lon,
+            ele: userEle ?? latestFix.altitude,
+            inNavigation: true,
+        });
+        if (res) {
+            activeHikersCount = res.activeHikers30m;
+            liveReports = res.reports;
+            ingestSosListWithTone(res.sosAlerts);
+        }
+    }
+
+    async function handleSubmitReport(payload: {
+        category: TrailReportCategory;
+        note: string;
+    }) {
+        const origin = getEffectiveResponderOrigin();
+        if (!origin) return;
+        liveBusy = true;
+        try {
+            const totalDist =
+                activePoints.length > 0 ? activePoints[activePoints.length - 1].distanceM : 0;
+            const forwardAlongM = reversed
+                ? Math.max(0, totalDist - alongTrackMeters)
+                : alongTrackMeters;
+            const created = await createReport({
+                trailId: trail.id,
+                category: payload.category,
+                note: payload.note,
+                lat: origin.lat,
+                lon: origin.lon,
+                ele: origin.ele,
+                alongTrackM: forwardAlongM,
+            });
+            if (created) {
+                votedReportMap = { ...votedReportMap, [created.id]: "confirm" };
+                liveReports = mergeReportIntoList(liveReports, created);
+            }
+        } finally {
+            liveBusy = false;
+        }
+    }
+
+    async function handleVoteReport(reportId: string, vote: ReportVoteType) {
+        votedReportMap = { ...votedReportMap, [reportId]: vote };
+        const updated = await voteReport(reportId, vote);
+        if (updated) {
+            liveReports = mergeReportIntoList(liveReports, updated);
+        } else if (vote === "dismiss" || vote === "spam") {
+            snoozedReportIds = { ...snoozedReportIds, [reportId]: true };
+        }
+    }
+
+    function handleSnoozeReport(reportId: string) {
+        snoozedReportIds = { ...snoozedReportIds, [reportId]: true };
+    }
+
+    async function handleTriggerSos(payload: {
+        reason: SosReason;
+        message: string;
+        requesterName: string;
+    }) {
+        const origin = getEffectiveResponderOrigin();
+        if (!origin) return;
+        liveBusy = true;
+        try {
+            const created = await triggerSos({
+                trailId: trail.id,
+                reason: payload.reason,
+                message: payload.message,
+                requesterName: payload.requesterName,
+                lat: origin.lat,
+                lon: origin.lon,
+                ele: origin.ele,
+            });
+            if (created) {
+                lastMySosPatchAt = Date.now();
+                lastMySosPos = { lat: origin.lat, lon: origin.lon };
+                liveSosAlerts = mergeSosIntoList(liveSosAlerts, created);
+            }
+        } finally {
+            liveBusy = false;
+        }
+    }
+
+    async function handleResolveMySos() {
+        const mine = myActiveSos;
+        if (!mine) return;
+        liveBusy = true;
+        try {
+            await updateSos(mine.id, { status: "resolved" });
+            liveSosAlerts = liveSosAlerts.filter((s) => s.id !== mine.id);
+        } finally {
+            liveBusy = false;
+        }
+    }
+
+    async function handleRespondSos(sos: SosAlertDto) {
+        const origin = getEffectiveResponderOrigin();
+        if (!origin) return;
+        liveBusy = true;
+        try {
+            activeRescueSosId = sos.id;
+            const initialRoute = computeRescueRouteToSos(sos);
+            activeRescueRoute = initialRoute;
+            syncNavGeoJson();
+
+            // Prefetch DEM tiles covering responder -> SOS corridor to refine elevation profile
+            void demGrid
+                ?.prefetchCorridor(
+                    [
+                        { lat: origin.lat, lon: origin.lon },
+                        { lat: sos.lat, lon: sos.lon },
+                    ],
+                    350,
+                )
+                .then(() => {
+                    if (activeRescueSosId === sos.id) {
+                        activeRescueRoute = computeRescueRouteToSos(sos);
+                        syncNavGeoJson();
+                    }
+                });
+
+            lastResponderUpdateAt = Date.now();
+            lastResponderPos = { lat: origin.lat, lon: origin.lon };
+            const updated = await respondToSos(sos.id, {
+                status: "coming",
+                lat: origin.lat,
+                lon: origin.lon,
+                ele: origin.ele,
+                distanceM: initialRoute?.distanceM ?? haversineMeters(origin.lat, origin.lon, sos.lat, sos.lon),
+                etaSec: initialRoute?.estimatedSeconds ?? 0,
+            });
+            if (updated) {
+                liveSosAlerts = mergeSosIntoList(liveSosAlerts, updated);
+            } else {
+                liveSosAlerts = liveSosAlerts.map((item) =>
+                    item.id === sos.id ? { ...item, amResponding: true } : item,
+                );
+            }
+        } finally {
+            liveBusy = false;
+        }
+    }
+
+    async function handleCancelRespondSos(sos: SosAlertDto) {
+        const origin = getEffectiveResponderOrigin();
+        activeRescueSosId = null;
+        activeRescueRoute = null;
+        lastRescueCalcPos = null;
+        syncNavGeoJson();
+        if (!origin) return;
+        const updated = await respondToSos(sos.id, {
+            status: "cancelled",
+            lat: origin.lat,
+            lon: origin.lon,
+            ele: origin.ele,
+            distanceM: 0,
+            etaSec: 0,
+        });
+        if (updated) {
+            liveSosAlerts = mergeSosIntoList(liveSosAlerts, updated);
+        } else {
+            liveSosAlerts = liveSosAlerts.map((item) =>
+                item.id === sos.id ? { ...item, amResponding: false } : item,
+            );
+        }
+    }
+
+    async function handleEnableWebPush() {
+        const origin = getEffectiveResponderOrigin();
+        const status = await subscribeWebPushIfSupported(
+            origin?.lat ?? null,
+            origin?.lon ?? null,
+            trail.id,
+            { requestPermission: true },
+        );
+        if (status === "subscribed") {
+            pushSubscribed = true;
+        }
+    }
+
     function handleGpsFix(raw: NavFixInput) {
         if (!Number.isFinite(raw.lat) || !Number.isFinite(raw.lon)) return;
+        const wasFirstFix = !hasFix;
         const accuracy =
             raw.accuracy !== undefined && raw.accuracy !== null && Number.isFinite(raw.accuracy)
                 ? raw.accuracy
@@ -748,6 +1206,7 @@
 
         hasFix = true;
         latestFix = { lat: raw.lat, lon: raw.lon, accuracy, altitude, heading, speed };
+        liveUserPos = { lat: raw.lat, lon: raw.lon };
 
         locationPuck?.setPosition(raw.lon, raw.lat);
         accuracyLayer?.update(raw.lon, raw.lat, accuracy);
@@ -812,6 +1271,77 @@
             etaSnapshot = etaCalc.compute(matched.alongTrackMeters, nowMs, offTrailExtra);
         }
 
+        // Update live SSE geo subscription & fire immediate heartbeat on first GPS fix
+        streamHandle?.updateCoords(raw.lat, raw.lon);
+        if (wasFirstFix) {
+            void triggerHeartbeatNow(true);
+        }
+
+        // Keep requester's active SOS coordinates live as GPS moves
+        const mine = myActiveSos;
+        if (mine) {
+            const movedMine =
+                !lastMySosPos ||
+                haversineMeters(lastMySosPos.lat, lastMySosPos.lon, raw.lat, raw.lon) >= 25;
+            if (movedMine && Date.now() - lastMySosPatchAt >= 15_000) {
+                lastMySosPatchAt = Date.now();
+                lastMySosPos = { lat: raw.lat, lon: raw.lon };
+                void updateSos(mine.id, {
+                    lat: raw.lat,
+                    lon: raw.lon,
+                    ele: userEle ?? altitude,
+                }).then((updated) => {
+                    if (updated) liveSosAlerts = mergeSosIntoList(liveSosAlerts, updated);
+                });
+            }
+        }
+
+        // Recompute DEM rescue route & responder ETA as responder moves toward SOS victim
+        if (activeRescueSosId) {
+            const targetSos = liveSosAlerts.find(
+                (s) => s.id === activeRescueSosId && s.status === "active",
+            );
+            if (targetSos) {
+                const movedForRoute =
+                    !lastRescueCalcPos ||
+                    haversineMeters(
+                        lastRescueCalcPos.lat,
+                        lastRescueCalcPos.lon,
+                        raw.lat,
+                        raw.lon,
+                    ) >= 15;
+                if (movedForRoute) {
+                    activeRescueRoute = computeRescueRouteToSos(targetSos);
+                }
+                const movedForApi =
+                    !lastResponderPos ||
+                    haversineMeters(
+                        lastResponderPos.lat,
+                        lastResponderPos.lon,
+                        raw.lat,
+                        raw.lon,
+                    ) >= 30;
+                if (
+                    activeRescueRoute &&
+                    movedForApi &&
+                    Date.now() - lastResponderUpdateAt >= 18_000
+                ) {
+                    lastResponderUpdateAt = Date.now();
+                    lastResponderPos = { lat: raw.lat, lon: raw.lon };
+                    void respondToSos(targetSos.id, {
+                        status: "coming",
+                        lat: raw.lat,
+                        lon: raw.lon,
+                        ele: userEle ?? altitude,
+                        distanceM: activeRescueRoute.distanceM,
+                        etaSec: activeRescueRoute.estimatedSeconds,
+                    }).then((updated) => {
+                        if (updated) liveSosAlerts = mergeSosIntoList(liveSosAlerts, updated);
+                    });
+                }
+            }
+        }
+
         syncNavGeoJson();
 
         if (isFollowing) {
@@ -852,8 +1382,14 @@
                     : null;
                 etaSnapshot = etaCalc.compute(matchResult.alongTrackMeters, Date.now(), offTrailExtra);
             }
-            syncNavGeoJson();
         }
+        if (activeRescueSosId) {
+            const targetSos = liveSosAlerts.find((s) => s.id === activeRescueSosId);
+            if (targetSos) {
+                activeRescueRoute = computeRescueRouteToSos(targetSos);
+            }
+        }
+        syncNavGeoJson();
     }
 
     function handleReverseDirection() {
@@ -981,6 +1517,7 @@
                 ensureBaseNavSourcesAndLayers();
                 syncNavGeoJson();
                 syncStartEndMarkers();
+                syncLiveMapOverlays();
             };
 
             map.on("style.load", onStyleReady);
@@ -1067,11 +1604,80 @@
         const handleVisibilityChange = () => {
             if (typeof document !== "undefined" && document.visibilityState === "visible") {
                 void acquireWakeLock();
+                void triggerHeartbeatNow(false);
             }
         };
         if (typeof document !== "undefined") {
             document.addEventListener("visibilitychange", handleVisibilityChange);
         }
+
+        // Initialize Live Community state (votes, initial trail summary, 60s heartbeat, SSE & Web Push)
+        votedReportMap = getVotedReportsMap();
+        if (
+            typeof window !== "undefined" &&
+            typeof navigator !== "undefined" &&
+            "serviceWorker" in navigator &&
+            "PushManager" in window &&
+            "Notification" in window
+        ) {
+            pushSupported = true;
+            if (Notification.permission === "granted") {
+                void subscribeWebPushIfSupported(
+                    trail.lat ?? null,
+                    trail.lon ?? null,
+                    trail.id,
+                    { requestPermission: false },
+                ).then((res) => {
+                    if (res === "subscribed") pushSubscribed = true;
+                });
+            }
+        }
+
+        if (trail.id) {
+            void fetchTrailLiveSummary(trail.id).then((sum) => {
+                if (!sum) return;
+                if (activeHikersCount === null) {
+                    activeHikersCount = sum.activeHikers30m;
+                }
+                if (liveReports.length === 0) {
+                    liveReports = sum.reports;
+                }
+                if (liveSosAlerts.length === 0) {
+                    ingestSosListWithTone(sum.sosAlerts);
+                }
+            });
+        }
+
+        heartbeatTimer = setInterval(() => {
+            void triggerHeartbeatNow(false);
+        }, 60_000);
+
+        streamHandle = connectLiveStream({
+            trailId: trail.id,
+            lat: trail.lat ?? null,
+            lon: trail.lon ?? null,
+            callbacks: {
+                onReportUpdate: (rep) => {
+                    liveReports = mergeReportIntoList(liveReports, rep);
+                },
+                onSosUpdate: (sos) => {
+                    if (!sos.isMine && sos.status === "active" && !alertedSosIds.has(sos.id)) {
+                        alertedSosIds.add(sos.id);
+                        playSosTone();
+                    }
+                    liveSosAlerts = mergeSosIntoList(liveSosAlerts, sos);
+                    if (activeRescueSosId === sos.id) {
+                        if (sos.status === "active") {
+                            activeRescueRoute = computeRescueRouteToSos(sos);
+                        } else {
+                            activeRescueSosId = null;
+                            activeRescueRoute = null;
+                        }
+                        syncNavGeoJson();
+                    }
+                },
+            },
+        });
 
         // Expose deterministic E2E test hook
         if (typeof window !== "undefined") {
@@ -1100,7 +1706,28 @@
                                 offTrailExtra,
                             );
                         }
-                        syncNavGeoJson();
+                    }
+                    if (activeRescueSosId) {
+                        const targetSos = liveSosAlerts.find((s) => s.id === activeRescueSosId);
+                        if (targetSos) {
+                            activeRescueRoute = computeRescueRouteToSos(targetSos);
+                        }
+                    }
+                    syncNavGeoJson();
+                },
+                injectLiveState: (payload: {
+                    activeHikers30m?: number;
+                    reports?: TrailReportDto[];
+                    sosAlerts?: SosAlertDto[];
+                }) => {
+                    if (payload.activeHikers30m !== undefined) {
+                        activeHikersCount = payload.activeHikers30m;
+                    }
+                    if (payload.reports) {
+                        liveReports = payload.reports;
+                    }
+                    if (payload.sosAlerts) {
+                        ingestSosListWithTone(payload.sosAlerts);
                     }
                 },
             };
@@ -1119,6 +1746,12 @@
             navigator.geolocation.clearWatch(watchId);
             watchId = null;
         }
+        if (heartbeatTimer) {
+            clearInterval(heartbeatTimer);
+            heartbeatTimer = null;
+        }
+        streamHandle?.close();
+        streamHandle = null;
         compassSensor?.stop();
         locationPuck?.remove();
         accuracyLayer?.detach();
@@ -1126,6 +1759,10 @@
         endMarker?.remove();
         for (const m of waypointMarkers) m.remove();
         waypointMarkers = [];
+        for (const m of reportMarkers) m.remove();
+        reportMarkers = [];
+        for (const m of sosMarkers) m.remove();
+        sosMarkers = [];
         if (rejoinTimer) {
             clearTimeout(rejoinTimer);
             rejoinTimer = null;
@@ -1145,10 +1782,10 @@
 <main class="fixed inset-0 w-screen h-dvh overflow-hidden bg-background">
     <div bind:this={mapContainer} data-testid="nav-map" class="w-full h-full"></div>
 
-    <!-- Top Navigation Banner -->
+    <!-- Top Navigation Banner + SOS Rescue Banner + Nearby Waze Prompt -->
     <div
         style="top: calc(0.75rem + env(safe-area-inset-top, 0px));"
-        class="fixed inset-x-3 z-30 max-w-xl mx-auto pointer-events-none"
+        class={`fixed inset-x-3 ${sosModalOpen ? "z-50" : "z-35"} max-w-xl mx-auto pointer-events-none space-y-2`}
     >
         {#if activePoints.length === 0}
             <div
@@ -1179,13 +1816,87 @@
                 trailName={trail.name}
             />
         {/if}
+
+        <SosModalAndBanner
+            bind:modalOpen={sosModalOpen}
+            {myActiveSos}
+            {nearbySos}
+            userLat={liveUserPos?.lat ?? null}
+            userLon={liveUserPos?.lon ?? null}
+            {userEle}
+            {activeRescueRoute}
+            {activeRescueSosId}
+            submitting={liveBusy}
+            onTriggerSos={handleTriggerSos}
+            onResolveMySos={handleResolveMySos}
+            onRespondSos={handleRespondSos}
+            onCancelRespondSos={handleCancelRespondSos}
+        />
+
+        {#if nearbyPromptCandidate}
+            <WazeNearbyPrompt
+                report={nearbyPromptCandidate.report}
+                distanceM={nearbyPromptCandidate.distanceM}
+                voting={liveBusy}
+                onVote={handleVoteReport}
+                onSnooze={handleSnoozeReport}
+            />
+        {/if}
     </div>
 
-    <!-- Floating Right Controls: 3D/2D Pitch Toggle & Recenter Pill -->
+    <!-- Floating Left Controls: SOS Emergency Button & Push Bell -->
     <div
-        class="fixed right-3 z-30 flex flex-col items-end gap-2 pointer-events-none transition-all duration-200"
-        style="bottom: calc({sheetExpanded ? '248px' : '92px'} + env(safe-area-inset-bottom, 0px));"
+        class="fixed left-3 z-40 flex flex-col items-start gap-2 pointer-events-none transition-all duration-200"
+        style="bottom: calc({floatingBottomPx}px + env(safe-area-inset-bottom, 0px));"
     >
+        {#if pushSupported && !pushSubscribed}
+            <button
+                type="button"
+                data-testid="nav-push-bell-btn"
+                onclick={handleEnableWebPush}
+                title="Activează notificările SOS pe o rază de 5 km"
+                aria-label="Activează notificările SOS"
+                class="pointer-events-auto h-10 w-10 rounded-full bg-menu-background/95 backdrop-blur text-content border border-input-border/60 shadow-lg text-sm flex items-center justify-center hover:bg-secondary-hover cursor-pointer"
+            >
+                <i class="fa-solid fa-bell text-amber-500" aria-hidden="true"></i>
+            </button>
+        {/if}
+
+        <button
+            type="button"
+            data-testid="nav-sos-btn"
+            onclick={() => {
+                void handleEnableWebPush();
+                sosModalOpen = true;
+            }}
+            class={`pointer-events-auto h-10 px-3.5 rounded-full shadow-lg text-xs font-extrabold flex items-center gap-1.5 cursor-pointer transition-colors border ${
+                myActiveSos
+                    ? "bg-red-700 text-white border-white/50 animate-pulse"
+                    : "bg-red-600 hover:bg-red-700 text-white border-red-400/50"
+            }`}
+        >
+            <span aria-hidden="true">🆘</span>
+            <span>Ajutor</span>
+        </button>
+    </div>
+
+    <!-- Floating Right Controls: Waze Report, 3D/2D Pitch Toggle & Recenter Pill -->
+    <div
+        class="fixed right-3 z-40 flex flex-col items-end gap-2 pointer-events-none transition-all duration-200"
+        style="bottom: calc({floatingBottomPx}px + env(safe-area-inset-bottom, 0px));"
+    >
+        <button
+            type="button"
+            data-testid="nav-waze-report-btn"
+            onclick={() => (reportSheetOpen = true)}
+            aria-label="Raportează pe potecă"
+            title="Raportează atenționare sau reper pe potecă"
+            class="pointer-events-auto h-10 px-3.5 rounded-full bg-orange-600 hover:bg-orange-700 text-white border border-orange-400/50 shadow-lg text-xs font-extrabold flex items-center gap-1.5 cursor-pointer transition-colors"
+        >
+            <i class="fa-solid fa-triangle-exclamation text-[11px]" aria-hidden="true"></i>
+            <span>Raportează</span>
+        </button>
+
         <button
             type="button"
             data-testid="nav-pitch-toggle"
@@ -1213,13 +1924,25 @@
         {/if}
     </div>
 
+    <WazeReportSheet
+        bind:open={reportSheetOpen}
+        submitting={liveBusy}
+        onSubmit={handleSubmitReport}
+    />
+
     <!-- Bottom Trip Bar & Live Elevation Sheet -->
-    <div class="fixed bottom-0 inset-x-0 z-30 max-w-2xl mx-auto pointer-events-none">
+    <div
+        bind:this={bottomSheetWrapEl}
+        class="fixed bottom-0 inset-x-0 z-30 max-w-2xl mx-auto pointer-events-none"
+    >
         <LiveElevationSheet
             points={activePoints}
             {alongTrackMeters}
             eta={etaSnapshot}
             {reroute}
+            rescueRoute={activeRescueRoute}
+            reports={liveReports}
+            {activeHikersCount}
             {userEle}
             {paused}
             {reversed}

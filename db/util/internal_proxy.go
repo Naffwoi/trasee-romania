@@ -28,3 +28,9 @@ func RequireInternalProxy(r *http.Request) error {
 	}
 	return nil
 }
+
+// VerifyInternalProxySecret checks that the request carries a valid
+// X-Internal-Secret header matching POCKETBASE_PROXY_SECRET.
+func VerifyInternalProxySecret(r *http.Request) error {
+	return RequireInternalProxy(r)
+}

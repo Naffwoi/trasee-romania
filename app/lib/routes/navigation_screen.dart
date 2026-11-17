@@ -5,6 +5,7 @@ import 'dart:math' show exp, max, min, pi;
 import 'dart:ui' show lerpDouble;
 
 import 'package:collection/collection.dart';
+import 'package:dio/dio.dart' show CancelToken;
 import 'package:fl_chart/fl_chart.dart' show FlSpot;
 import 'package:flutter/material.dart';
 import 'package:flutter/scheduler.dart' show Ticker;
@@ -20,10 +21,15 @@ import 'package:objectbox/objectbox.dart';
 import 'package:wanderer/components/base/wanderer_attribution.dart';
 import 'package:wanderer/components/map/location_marker_layer.dart';
 import 'package:wanderer/components/map/trail_layer.dart';
+import 'package:wanderer/components/navigation/sos_banner_and_dialog.dart';
+import 'package:wanderer/components/navigation/waze_nearby_prompt.dart';
+import 'package:wanderer/components/navigation/waze_report_sheet.dart';
+import 'package:wanderer/components/trail/active_hikers_badge.dart';
 import 'package:wanderer/components/trail/elevation_profile.dart';
 import 'package:wanderer/components/trail/waypoint_sheet.dart';
 import 'package:wanderer/entities/active_navigation_entity.dart';
 import 'package:wanderer/i18n/app_localizations.dart';
+import 'package:wanderer/models/live/trail_live_models.dart';
 import 'package:wanderer/models/navigate_response.dart';
 import 'package:wanderer/models/trail.dart';
 import 'package:wanderer/models/trail_sync_state.dart';
@@ -53,7 +59,8 @@ import 'package:wanderer/util/gpx/conversion.dart' show serializeGpxToXml;
 import 'package:wanderer/util/gpx/gpx.dart';
 import 'package:wanderer/util/region/proxy_style_rewriter.dart';
 import 'package:wanderer/util/geo/polyline.dart';
-import 'package:wanderer/util/map/heading_math.dart' show shortestAngleDelta;
+import 'package:wanderer/util/map/heading_math.dart'
+    show normalizeHeading, shortestAngleDelta;
 import 'package:wanderer/util/navigation/dem_tile_grid.dart';
 import 'package:wanderer/util/navigation/eta_calculator.dart';
 import 'package:wanderer/util/navigation/off_trail_router.dart';
@@ -61,6 +68,7 @@ import 'package:wanderer/util/route/planner_handoff.dart';
 import 'package:wanderer/util/route/track_position_matcher.dart';
 import 'package:wanderer/models/route_travel_bucket.dart';
 import 'package:wanderer/services/tracelet_position_source.dart';
+import 'package:wanderer/services/trail_live_service.dart';
 import 'package:wanderer/actions/import_trail_file.dart';
 import 'package:wanderer/util/route/valhalla.dart';
 
@@ -283,6 +291,35 @@ class _NavigationScreenState extends ConsumerState<NavigationScreen>
   bool _demFallbackPrefetchStarted = false;
   String _localeCode = 'ro';
 
+  // Live Waze reports, permanent landmarks, 30-min presence, and 5 km SOS state.
+  TrailLiveService? _liveService;
+  final ValueNotifier<int?> _activeHikers30m = ValueNotifier<int?>(null);
+  final ValueNotifier<List<TrailReportModel>> _liveReports =
+      ValueNotifier<List<TrailReportModel>>(const []);
+  final ValueNotifier<({TrailReportModel report, double? distanceM})?>
+  _nearbyPromptReport = ValueNotifier(null);
+  final ValueNotifier<SosAlertModel?> _myActiveSos = ValueNotifier(null);
+  final ValueNotifier<List<SosAlertModel>> _nearbySosAlerts =
+      ValueNotifier<List<SosAlertModel>>(const []);
+  final ValueNotifier<OffTrailRerouteResult?> _rescueRouteNotifier =
+      ValueNotifier(null);
+  final ValueNotifier<bool> _liveActionBusy = ValueNotifier<bool>(false);
+  final Set<String> _snoozedOrVotedReportIds = <String>{};
+  String? _pinnedPromptReportId;
+  Timer? _liveHeartbeatTimer;
+  StreamSubscription<TrailLiveSseEvent>? _liveSseSub;
+  CancelToken? _liveSseCancelToken;
+  Timer? _liveSseReconnectTimer;
+  bool _firstHeartbeatSent = false;
+  ml.Geographic? _lastSosBroadcastPos;
+  DateTime? _lastSosBroadcastAt;
+  ml.Geographic? _lastRescueCalcPos;
+  DateTime? _lastRescueCalcAt;
+  DateTime? _lastResponderSyncAt;
+  bool _rescueDemPrefetchStarted = false;
+
+  bool get _isRo => _localeCode.toLowerCase().startsWith('ro');
+
   /// Short per-fix position tween smoothing the marker/camera between raw GPS
   /// fixes — mirrors the 200ms `fastOutSlowIn` `flutter_map_location_marker`'s
   /// `CurrentLocationLayer` used pre-MapLibre-migration, which this screen lost
@@ -502,6 +539,9 @@ class _NavigationScreenState extends ConsumerState<NavigationScreen>
     ref.listenManual(_statsProviderInstance, fireImmediately: true, (_, next) {
       _frozen = next.isPaused || next.isStationary;
     });
+    ref.listenManual(trailLiveServiceProvider, fireImmediately: true, (_, next) {
+      _liveService = next;
+    });
 
     if (resumeSession == null) {
       // Fresh session: clear any stale prior-trail row, then write an
@@ -512,6 +552,10 @@ class _NavigationScreenState extends ConsumerState<NavigationScreen>
     _persistTimer = Timer.periodic(
       const Duration(seconds: 10),
       (_) => _persistNow(),
+    );
+    _liveHeartbeatTimer = Timer.periodic(
+      const Duration(seconds: 30),
+      (_) => _sendLiveHeartbeatTick(),
     );
 
     _positionSource = TraceletPositionSource();
@@ -558,6 +602,7 @@ class _NavigationScreenState extends ConsumerState<NavigationScreen>
       // further to watch. A no-op notification rewrite in the common case
       // where the name was already known at `start()`.
       if (widget.isRecording) return;
+      _fetchInitialTrailLiveSummary();
       // Failure (offline with nothing cached) leaves the generic wording
       // rather than naming a trail we don't have, and the chart marker off.
       final trail = await ref
@@ -616,6 +661,7 @@ class _NavigationScreenState extends ConsumerState<NavigationScreen>
         if (!widget.isRecording && matcher != null) {
           _handleNavMatchFix(pos, fix, matcher);
         }
+        _onLiveCommunityFix(fix, usableAlt);
         if (advanced) {
           _persistNow();
         }
@@ -830,6 +876,636 @@ class _NavigationScreenState extends ConsumerState<NavigationScreen>
     }
   }
 
+  // ---------------------------------------------------------------------------
+  // Live Community: Waze Reports, Permanent Landmarks, 30m Presence & 5km SOS
+  // ---------------------------------------------------------------------------
+
+  ml.Geographic? _currentGeoFix() {
+    final lat = _animTargetLat ?? _lastLat;
+    final lon = _animTargetLon ?? _lastLon;
+    if (lat != null && lon != null) {
+      return ml.Geographic(lat: lat, lon: lon);
+    }
+    final seed = widget.initialPosition;
+    if (seed != null) {
+      return ml.Geographic(lat: seed.latitude, lon: seed.longitude);
+    }
+    return null;
+  }
+
+  void _fetchInitialTrailLiveSummary() {
+    final service = _liveService;
+    if (service == null || !service.isConfigured || widget.id.isEmpty) return;
+    unawaited(
+      service.fetchTrailSummary(widget.id).then((summary) {
+        if (!mounted || summary == null) return;
+        _applyLiveSummary(summary);
+      }).catchError((Object _) {}),
+    );
+  }
+
+  void _onLiveCommunityFix(ml.Geographic fix, double? usableAlt) {
+    if (!_firstHeartbeatSent) {
+      _firstHeartbeatSent = true;
+      _sendLiveHeartbeatTick(explicitPos: fix, explicitAlt: usableAlt);
+      if (_uiVisible) {
+        _connectLiveSse(fix);
+      }
+    }
+
+    _refreshNearbyWazePrompt(fix);
+
+    final now = DateTime.now();
+    final mySos = _myActiveSos.value;
+    if (mySos != null) {
+      final movedM = _lastSosBroadcastPos == null
+          ? double.infinity
+          : ml.SphericalGreatCircle(_lastSosBroadcastPos!).distanceTo(fix);
+      final elapsedSec = _lastSosBroadcastAt == null
+          ? 999
+          : now.difference(_lastSosBroadcastAt!).inSeconds;
+      if (movedM >= 25.0 && elapsedSec >= 12) {
+        _lastSosBroadcastPos = fix;
+        _lastSosBroadcastAt = now;
+        final service = _liveService;
+        if (service != null && service.isConfigured) {
+          unawaited(
+            service
+                .updateSos(
+                  sosId: mySos.id,
+                  lat: fix.lat,
+                  lon: fix.lon,
+                  ele: usableAlt ?? _lastKnownAltitudeM,
+                )
+                .then((updated) {
+                  if (!mounted) return;
+                  if (updated.isActiveAt(DateTime.now())) {
+                    _myActiveSos.value = updated.copyWith(isMine: true);
+                  }
+                })
+                .catchError((Object _) {}),
+          );
+        }
+      }
+    }
+
+    final respondingSos = _activeRespondingSos();
+    if (respondingSos != null) {
+      final movedM = _lastRescueCalcPos == null
+          ? double.infinity
+          : ml.SphericalGreatCircle(_lastRescueCalcPos!).distanceTo(fix);
+      final elapsedSec = _lastRescueCalcAt == null
+          ? 999
+          : now.difference(_lastRescueCalcAt!).inSeconds;
+      if (_rescueRouteNotifier.value == null ||
+          movedM >= 20.0 ||
+          elapsedSec >= 12) {
+        _recomputeRescueRoute(fix, respondingSos, syncWithServer: true);
+      }
+    } else if (_rescueRouteNotifier.value != null) {
+      _rescueRouteNotifier.value = null;
+      _pushRescueSource(null);
+    }
+  }
+
+  SosAlertModel? _activeRespondingSos() {
+    for (final s in _nearbySosAlerts.value) {
+      if (s.amResponding && s.status == 'active') return s;
+    }
+    return null;
+  }
+
+  void _sendLiveHeartbeatTick({
+    ml.Geographic? explicitPos,
+    double? explicitAlt,
+  }) {
+    final service = _liveService;
+    if (service == null || !service.isConfigured) return;
+    final pos = explicitPos ?? _currentGeoFix();
+    if (pos == null) return;
+    unawaited(
+      service
+          .sendHeartbeat(
+            trailId: widget.isRecording || widget.id.isEmpty ? null : widget.id,
+            lat: pos.lat,
+            lon: pos.lon,
+            ele: explicitAlt ?? _lastKnownAltitudeM,
+            inNavigation: true,
+            isRo: _isRo,
+          )
+          .then((summary) {
+            if (!mounted || summary == null) return;
+            _applyLiveSummary(summary);
+          })
+          .catchError((Object _) {}),
+    );
+  }
+
+  void _connectLiveSse(ml.Geographic pos) {
+    final service = _liveService;
+    if (service == null || !service.isConfigured || !_uiVisible) return;
+    _disconnectLiveSse();
+    final cancelToken = CancelToken();
+    _liveSseCancelToken = cancelToken;
+    _liveSseSub = service
+        .connectStream(
+          lat: pos.lat,
+          lon: pos.lon,
+          trailId: widget.isRecording || widget.id.isEmpty ? null : widget.id,
+          cancelToken: cancelToken,
+          isRo: _isRo,
+        )
+        .listen(
+          _handleLiveSseEvent,
+          onError: (Object _) => _scheduleLiveSseReconnect(),
+          onDone: _scheduleLiveSseReconnect,
+        );
+  }
+
+  void _disconnectLiveSse() {
+    _liveSseReconnectTimer?.cancel();
+    _liveSseReconnectTimer = null;
+    final token = _liveSseCancelToken;
+    _liveSseCancelToken = null;
+    if (token != null && !token.isCancelled) {
+      token.cancel('disconnect');
+    }
+    _liveSseSub?.cancel();
+    _liveSseSub = null;
+  }
+
+  void _scheduleLiveSseReconnect() {
+    if (!mounted || !_uiVisible) return;
+    if (_liveSseReconnectTimer?.isActive ?? false) return;
+    _liveSseReconnectTimer = Timer(const Duration(seconds: 10), () {
+      if (!mounted || !_uiVisible) return;
+      final pos = _currentGeoFix();
+      if (pos != null) {
+        _connectLiveSse(pos);
+      }
+    });
+  }
+
+  void _applyLiveSummary(TrailLiveSummary summary) {
+    final now = DateTime.now();
+    _activeHikers30m.value = summary.activeHikers30m;
+    _liveReports.value = summary.visibleReports(now: now);
+
+    final serverMine = summary.myActiveSos(now: now);
+    if (serverMine != null) {
+      _myActiveSos.value = serverMine;
+    } else if (_myActiveSos.value != null &&
+        !_myActiveSos.value!.isActiveAt(now)) {
+      _myActiveSos.value = null;
+    }
+
+    final prevRespondingIds = <String>{
+      for (final s in _nearbySosAlerts.value)
+        if (s.amResponding) s.id,
+    };
+    final nextNearby = summary
+        .nearbyActiveSos(now: now)
+        .map(
+          (s) => prevRespondingIds.contains(s.id) && !s.amResponding
+              ? s.copyWith(amResponding: true)
+              : s,
+        )
+        .toList(growable: false);
+    _nearbySosAlerts.value = nextNearby;
+
+    final fix = _currentGeoFix();
+    if (fix != null) {
+      _refreshNearbyWazePrompt(fix);
+      final responding = _activeRespondingSos();
+      if (responding != null) {
+        _recomputeRescueRoute(fix, responding, syncWithServer: false);
+      } else if (_rescueRouteNotifier.value != null) {
+        _rescueRouteNotifier.value = null;
+        _pushRescueSource(null);
+      }
+    }
+  }
+
+  void _handleLiveSseEvent(TrailLiveSseEvent event) {
+    if (!mounted) return;
+    final now = DateTime.now();
+    if (event.report != null) {
+      final incoming = event.report!;
+      final next = List<TrailReportModel>.of(_liveReports.value);
+      final idx = next.indexWhere((r) => r.id == incoming.id);
+      if (!incoming.isVisibleAt(now)) {
+        if (idx >= 0) next.removeAt(idx);
+      } else if (idx >= 0) {
+        next[idx] = incoming;
+      } else {
+        next.insert(0, incoming);
+      }
+      _liveReports.value = next;
+      final fix = _currentGeoFix();
+      if (fix != null) _refreshNearbyWazePrompt(fix);
+    }
+
+    if (event.sos != null) {
+      final incoming = event.sos!;
+      final currentMine = _myActiveSos.value;
+      if (incoming.isMine ||
+          (currentMine != null && currentMine.id == incoming.id)) {
+        _myActiveSos.value = incoming.isActiveAt(now)
+            ? incoming.copyWith(isMine: true)
+            : null;
+        return;
+      }
+
+      final next = List<SosAlertModel>.of(_nearbySosAlerts.value);
+      final idx = next.indexWhere((s) => s.id == incoming.id);
+      if (!incoming.isActiveAt(now)) {
+        if (idx >= 0) next.removeAt(idx);
+      } else if (idx >= 0) {
+        final keepResponding = next[idx].amResponding || incoming.amResponding;
+        next[idx] = incoming.copyWith(amResponding: keepResponding);
+      } else {
+        next.insert(0, incoming);
+      }
+      _nearbySosAlerts.value = next;
+      final fix = _currentGeoFix();
+      final responding = _activeRespondingSos();
+      if (fix != null && responding != null) {
+        _recomputeRescueRoute(fix, responding, syncWithServer: false);
+      } else if (responding == null && _rescueRouteNotifier.value != null) {
+        _rescueRouteNotifier.value = null;
+        _pushRescueSource(null);
+      }
+    }
+  }
+
+  void _refreshNearbyWazePrompt(ml.Geographic fix) {
+    final reports = _liveReports.value;
+    if (reports.isEmpty) {
+      if (_nearbyPromptReport.value != null) {
+        _nearbyPromptReport.value = null;
+        _pinnedPromptReportId = null;
+      }
+      return;
+    }
+
+    if (_pinnedPromptReportId != null) {
+      final pinned = reports.firstWhereOrNull(
+        (r) => r.id == _pinnedPromptReportId,
+      );
+      if (pinned != null) {
+        final d = ml.SphericalGreatCircle(
+          fix,
+        ).distanceTo(ml.Geographic(lat: pinned.lat, lon: pinned.lon));
+        _nearbyPromptReport.value = (report: pinned, distanceM: d);
+        return;
+      }
+      _pinnedPromptReportId = null;
+    }
+
+    TrailReportModel? closest;
+    double closestDist = double.infinity;
+    for (final r in reports) {
+      if (_snoozedOrVotedReportIds.contains(r.id)) continue;
+      final d = ml.SphericalGreatCircle(
+        fix,
+      ).distanceTo(ml.Geographic(lat: r.lat, lon: r.lon));
+      if (d <= 150.0 && d < closestDist) {
+        closest = r;
+        closestDist = d;
+      }
+    }
+
+    if (closest == null) {
+      if (_nearbyPromptReport.value != null) {
+        _nearbyPromptReport.value = null;
+      }
+    } else {
+      final prev = _nearbyPromptReport.value;
+      if (prev == null ||
+          prev.report.id != closest.id ||
+          ((prev.distanceM ?? 0) - closestDist).abs() >= 5.0) {
+        _nearbyPromptReport.value = (report: closest, distanceM: closestDist);
+      }
+    }
+  }
+
+  void _onReportMarkerTapped(TrailReportModel report) {
+    _pinnedPromptReportId = report.id;
+    final fix = _currentGeoFix();
+    final d = fix == null
+        ? null
+        : ml.SphericalGreatCircle(
+            fix,
+          ).distanceTo(ml.Geographic(lat: report.lat, lon: report.lon));
+    _nearbyPromptReport.value = (report: report, distanceM: d);
+  }
+
+  void _onSosMarkerTapped(SosAlertModel sos) {
+    _controller?.animateCamera(
+      center: ml.Geographic(lat: sos.lat, lon: sos.lon),
+      nativeDuration: const Duration(milliseconds: 300),
+    );
+  }
+
+  Future<void> _openWazeReportSheet(BuildContext context) async {
+    final pos = _currentGeoFix();
+    if (pos == null) return;
+    final submission = await showWazeReportSheet(context, isRo: _isRo);
+    if (submission == null || !mounted) return;
+
+    final service = _liveService;
+    if (service == null || !service.isConfigured) return;
+
+    _liveActionBusy.value = true;
+    try {
+      final created = await service.createReport(
+        trailId: widget.isRecording || widget.id.isEmpty ? null : widget.id,
+        category: submission.category,
+        note: submission.note,
+        lat: pos.lat,
+        lon: pos.lon,
+        ele: _lastKnownAltitudeM,
+        alongTrackM: _lastMatchedAlongTrackM,
+      );
+      if (!mounted) return;
+      _snoozedOrVotedReportIds.add(created.id);
+      final next = <TrailReportModel>[
+        created,
+        for (final r in _liveReports.value)
+          if (r.id != created.id) r,
+      ];
+      _liveReports.value = next;
+    } catch (e) {
+      debugPrint('NavigationScreen: createReport failed — $e');
+    } finally {
+      if (mounted) _liveActionBusy.value = false;
+    }
+  }
+
+  Future<void> _handleVoteReport(
+    TrailReportModel report,
+    TrailReportVoteType vote,
+  ) async {
+    _snoozedOrVotedReportIds.add(report.id);
+    if (_pinnedPromptReportId == report.id) {
+      _pinnedPromptReportId = null;
+    }
+
+    // Optimistic local update (extends expiresAt immediately on confirm!).
+    final optimistic = report.applyLocalVote(vote);
+    final now = DateTime.now();
+    final optimisticList = <TrailReportModel>[];
+    for (final r in _liveReports.value) {
+      if (r.id == report.id) {
+        if (optimistic.isVisibleAt(now)) {
+          optimisticList.add(optimistic);
+        }
+      } else {
+        optimisticList.add(r);
+      }
+    }
+    _liveReports.value = optimisticList;
+    _nearbyPromptReport.value = null;
+
+    final service = _liveService;
+    if (service == null || !service.isConfigured) return;
+    _liveActionBusy.value = true;
+    try {
+      final updated = await service.voteReport(
+        reportId: report.id,
+        vote: vote,
+      );
+      if (!mounted) return;
+      final syncNow = DateTime.now();
+      final synced = <TrailReportModel>[];
+      for (final r in _liveReports.value) {
+        if (r.id == updated.id) {
+          if (updated.isVisibleAt(syncNow)) {
+            synced.add(updated);
+          }
+        } else {
+          synced.add(r);
+        }
+      }
+      _liveReports.value = synced;
+    } catch (e) {
+      debugPrint('NavigationScreen: voteReport failed — $e');
+    } finally {
+      if (mounted) _liveActionBusy.value = false;
+    }
+  }
+
+  Future<void> _onSosButtonPressed(BuildContext context) async {
+    final pos = _currentGeoFix();
+    if (pos == null) return;
+    final currentUser = ref.read(authProvider).value;
+    final prefName = currentUser?.preferredUsername.trim() ?? '';
+    final initialName = prefName.isNotEmpty
+        ? prefName
+        : (currentUser?.username.trim() ?? '');
+    final submission = await showSosTriggerDialog(
+      context,
+      initialName: initialName,
+      isRo: _isRo,
+    );
+    if (submission == null || !mounted) return;
+
+    final service = _liveService;
+    if (service == null || !service.isConfigured) return;
+
+    _liveActionBusy.value = true;
+    try {
+      final sos = await service.triggerSos(
+        trailId: widget.isRecording || widget.id.isEmpty ? null : widget.id,
+        reason: submission.reason,
+        message: submission.message,
+        requesterName: submission.requesterName,
+        lat: pos.lat,
+        lon: pos.lon,
+        ele: _lastKnownAltitudeM,
+      );
+      if (!mounted) return;
+      _myActiveSos.value = sos.copyWith(isMine: true);
+      _lastSosBroadcastPos = pos;
+      _lastSosBroadcastAt = DateTime.now();
+    } catch (e) {
+      debugPrint('NavigationScreen: triggerSos failed — $e');
+    } finally {
+      if (mounted) _liveActionBusy.value = false;
+    }
+  }
+
+  Future<void> _handleResolveMySos(SosAlertModel sos) async {
+    final service = _liveService;
+    if (service == null || !service.isConfigured) {
+      _myActiveSos.value = null;
+      return;
+    }
+    _liveActionBusy.value = true;
+    try {
+      await service.updateSos(sosId: sos.id, status: 'resolved');
+      if (!mounted) return;
+      _myActiveSos.value = null;
+    } catch (e) {
+      debugPrint('NavigationScreen: resolve SOS failed — $e');
+    } finally {
+      if (mounted) _liveActionBusy.value = false;
+    }
+  }
+
+  Future<void> _handleRespondComing(SosAlertModel sos) async {
+    final pos = _currentGeoFix();
+    if (pos == null) return;
+    final route = _recomputeRescueRoute(pos, sos, syncWithServer: false);
+
+    final updatedLocal = sos.copyWith(
+      amResponding: true,
+      responderCount: sos.amResponding
+          ? sos.responderCount
+          : sos.responderCount + 1,
+    );
+    _nearbySosAlerts.value = <SosAlertModel>[
+      for (final s in _nearbySosAlerts.value)
+        if (s.id == sos.id) updatedLocal else s.copyWith(amResponding: false),
+    ];
+
+    final service = _liveService;
+    if (service == null || !service.isConfigured) return;
+    _liveActionBusy.value = true;
+    try {
+      final synced = await service.respondToSos(
+        sosId: sos.id,
+        status: 'coming',
+        lat: pos.lat,
+        lon: pos.lon,
+        ele: _lastKnownAltitudeM,
+        distanceM: route?.distanceM,
+        etaSec: route?.estimatedSeconds,
+      );
+      if (!mounted) return;
+      _lastResponderSyncAt = DateTime.now();
+      _nearbySosAlerts.value = <SosAlertModel>[
+        for (final s in _nearbySosAlerts.value)
+          if (s.id == synced.id) synced.copyWith(amResponding: true) else s,
+      ];
+    } catch (e) {
+      debugPrint('NavigationScreen: respondToSos failed — $e');
+    } finally {
+      if (mounted) _liveActionBusy.value = false;
+    }
+  }
+
+  Future<void> _handleCancelRespond(SosAlertModel sos) async {
+    _rescueRouteNotifier.value = null;
+    _pushRescueSource(null);
+    _nearbySosAlerts.value = <SosAlertModel>[
+      for (final s in _nearbySosAlerts.value)
+        if (s.id == sos.id) s.copyWith(amResponding: false) else s,
+    ];
+
+    final pos = _currentGeoFix();
+    final service = _liveService;
+    if (pos == null || service == null || !service.isConfigured) return;
+    _liveActionBusy.value = true;
+    try {
+      final synced = await service.respondToSos(
+        sosId: sos.id,
+        status: 'cancelled',
+        lat: pos.lat,
+        lon: pos.lon,
+        ele: _lastKnownAltitudeM,
+      );
+      if (!mounted) return;
+      _nearbySosAlerts.value = <SosAlertModel>[
+        for (final s in _nearbySosAlerts.value)
+          if (s.id == synced.id) synced.copyWith(amResponding: false) else s,
+      ];
+    } catch (e) {
+      debugPrint('NavigationScreen: cancel respondToSos failed — $e');
+    } finally {
+      if (mounted) _liveActionBusy.value = false;
+    }
+  }
+
+  OffTrailRerouteResult? _recomputeRescueRoute(
+    ml.Geographic userPos,
+    SosAlertModel sos, {
+    required bool syncWithServer,
+  }) {
+    final targetPos = ml.Geographic(lat: sos.lat, lon: sos.lon);
+    if (!_rescueDemPrefetchStarted &&
+        (_demGrid.sampleElevation(userPos.lat, userPos.lon) == null ||
+            _demGrid.sampleElevation(targetPos.lat, targetPos.lon) == null)) {
+      _rescueDemPrefetchStarted = true;
+      unawaited(
+        _demGrid.prefetchCorridor([userPos, targetPos]).then((_) {
+          if (!mounted) return;
+          final active = _activeRespondingSos();
+          final cur = _currentGeoFix();
+          if (active != null && cur != null) {
+            _recomputeRescueRoute(cur, active, syncWithServer: false);
+          }
+        }),
+      );
+    }
+
+    final route = OffTrailRouter.computeDirectRescueRoute(
+      userPos: userPos,
+      userEleM: _lastKnownAltitudeM,
+      targetPos: targetPos,
+      targetEleM: sos.ele > 0 ? sos.ele : null,
+      referencePoints: _navTrackPoints,
+      sampler: _demGrid.sampleElevation,
+      mode: _offTrailMode,
+      localeCode: _localeCode,
+      isCycling: _etaCalculator?.isCycling ?? false,
+    );
+
+    final now = DateTime.now();
+    _lastRescueCalcPos = userPos;
+    _lastRescueCalcAt = now;
+    _rescueRouteNotifier.value = route;
+    _pushRescueSource(route);
+
+    if (syncWithServer && route != null) {
+      final sinceSync = _lastResponderSyncAt == null
+          ? 999
+          : now.difference(_lastResponderSyncAt!).inSeconds;
+      final service = _liveService;
+      if (sinceSync >= 20 && service != null && service.isConfigured) {
+        _lastResponderSyncAt = now;
+        unawaited(
+          service
+              .respondToSos(
+                sosId: sos.id,
+                status: 'coming',
+                lat: userPos.lat,
+                lon: userPos.lon,
+                ele: _lastKnownAltitudeM,
+                distanceM: route.distanceM,
+                etaSec: route.estimatedSeconds,
+              )
+              .catchError((Object _) => sos),
+        );
+      }
+    }
+    return route;
+  }
+
+  void _pushRescueSource(OffTrailRerouteResult? rescueRoute) {
+    if (!_uiVisible) return;
+    final style = _controller?.style ?? _loadedStyle;
+    if (style == null) return;
+    style
+        .updateGeoJsonSource(
+          id: 'sos-rescue-route',
+          data: _offTrailGeoJson(rescueRoute),
+        )
+        .catchError((Object e) {
+          debugPrint('NavigationScreen: failed to update sos-rescue-route — $e');
+        });
+  }
+
   /// Body of the Android foreground-service notification for this session.
   ///
   /// Recording says what it is doing; navigating names the trail being
@@ -861,6 +1537,7 @@ class _NavigationScreenState extends ConsumerState<NavigationScreen>
     // per-frame easing already decouple perceived rotation smoothness from
     // the sensor cadence.
     RotationSensor.samplingPeriod = const Duration(milliseconds: 66);
+    RotationSensor.coordinateSystem = CoordinateSystem.display();
     _headingSub = RotationSensor.orientationStream.listen(
       (event) {
         // azimuth: radians, 0 = north, clockwise — same convention as the
@@ -883,6 +1560,12 @@ class _NavigationScreenState extends ConsumerState<NavigationScreen>
     _animTargetLat = pos.latitude;
     _animTargetLon = pos.longitude;
     _animAccuracy = pos.accuracy;
+    if (_smoothedHeading == null &&
+        pos.heading.isFinite &&
+        pos.heading >= 0 &&
+        pos.speed > 0.5) {
+      _onHeading(pos.heading);
+    }
     _positionAnimController.forward(from: 0);
   }
 
@@ -1057,6 +1740,12 @@ class _NavigationScreenState extends ConsumerState<NavigationScreen>
         if (!widget.isRecording) {
           _pushOffTrailSource(_offTrailNotifier.value);
         }
+        _pushRescueSource(_rescueRouteNotifier.value);
+        _sendLiveHeartbeatTick();
+        final curFix = _currentGeoFix();
+        if (curFix != null && _firstHeartbeatSent) {
+          _connectLiveSse(curFix);
+        }
       case AppLifecycleState.inactive:
         // Transient (notification shade, incoming call, app-switcher peek) —
         // treating it as background used to bounce tracelet through a full
@@ -1072,6 +1761,7 @@ class _NavigationScreenState extends ConsumerState<NavigationScreen>
         _headingSub?.cancel();
         _headingSub = null;
         _syncBearingFollowTicker();
+        _disconnectLiveSse();
     }
   }
 
@@ -1082,6 +1772,8 @@ class _NavigationScreenState extends ConsumerState<NavigationScreen>
     _movingSub?.cancel();
     _headingSub?.cancel();
     _persistTimer?.cancel();
+    _liveHeartbeatTimer?.cancel();
+    _disconnectLiveSse();
     _positionAnimController.dispose();
     _bearingTransitionController.dispose();
     _bearingFollowTicker.dispose();
@@ -1100,6 +1792,13 @@ class _NavigationScreenState extends ConsumerState<NavigationScreen>
     _etaNotifier.dispose();
     _offTrailNotifier.dispose();
     _offTrailChartSpots.dispose();
+    _activeHikers30m.dispose();
+    _liveReports.dispose();
+    _nearbyPromptReport.dispose();
+    _myActiveSos.dispose();
+    _nearbySosAlerts.dispose();
+    _rescueRouteNotifier.dispose();
+    _liveActionBusy.dispose();
     _sheetController.dispose();
     _waypointSheetController.dispose();
     super.dispose();
@@ -1601,6 +2300,42 @@ class _NavigationScreenState extends ConsumerState<NavigationScreen>
           ),
         );
       }
+
+      await style.addSource(
+        ml.GeoJsonSource(
+          id: 'sos-rescue-route',
+          data: _offTrailGeoJson(_rescueRouteNotifier.value),
+        ),
+      );
+      await style.addLayer(
+        const ml.LineStyleLayer(
+          id: 'sos-rescue-route-casing',
+          sourceId: 'sos-rescue-route',
+          layout: <String, Object>{
+            'line-cap': 'round',
+            'line-join': 'round',
+          },
+          paint: <String, Object>{
+            'line-color': '#FFFFFF',
+            'line-width': 8.0,
+          },
+        ),
+      );
+      await style.addLayer(
+        const ml.LineStyleLayer(
+          id: 'sos-rescue-route-line',
+          sourceId: 'sos-rescue-route',
+          layout: <String, Object>{
+            'line-cap': 'round',
+            'line-join': 'round',
+          },
+          paint: <String, Object>{
+            'line-color': '#EF4444',
+            'line-width': 4.5,
+            'line-dasharray': [1.5, 1.2],
+          },
+        ),
+      );
     } catch (e) {
       debugPrint('NavigationScreen: onStyleLoaded failed — $e');
     }
@@ -1776,9 +2511,16 @@ class _NavigationScreenState extends ConsumerState<NavigationScreen>
                             selectedWaypoint: _selectedWaypoint,
                             onWaypointTap: _onWaypointSelected,
                           ),
+                        _LiveCommunityMarkerLayer(
+                          reports: _liveReports,
+                          sosAlerts: _nearbySosAlerts,
+                          onReportTap: _onReportMarkerTapped,
+                          onSosTap: _onSosMarkerTapped,
+                        ),
                         _LocationMarkerLayer(
                           position: _currentPosition,
                           headingUp: _headingUp,
+                          mapBearing: _mapBearing,
                         ),
 
                         Positioned(
@@ -1851,6 +2593,33 @@ class _NavigationScreenState extends ConsumerState<NavigationScreen>
                                     disabledForegroundColor: Colors.grey,
                                   ),
                                 ),
+                                const SizedBox(height: 8),
+                                IconButton(
+                                  key: const ValueKey('nav-waze-report-btn'),
+                                  tooltip: _isRo
+                                      ? 'Raportează pe traseu'
+                                      : 'Report on trail',
+                                  onPressed: () =>
+                                      _openWazeReportSheet(context),
+                                  icon: const Icon(
+                                    Icons.add_alert_rounded,
+                                    color: Colors.white,
+                                  ),
+                                  style: IconButton.styleFrom(
+                                    backgroundColor: const Color(0xFFD97706),
+                                  ),
+                                ),
+                                const SizedBox(height: 8),
+                                ValueListenableBuilder<SosAlertModel?>(
+                                  valueListenable: _myActiveSos,
+                                  builder: (context, mine, _) =>
+                                      SosFloatingButton(
+                                        isActive: mine != null,
+                                        isRo: _isRo,
+                                        onPressed: () =>
+                                            _onSosButtonPressed(context),
+                                      ),
+                                ),
                               ],
                             ),
                           ),
@@ -1859,20 +2628,35 @@ class _NavigationScreenState extends ConsumerState<NavigationScreen>
                     ),
                   ),
 
-                  if (!widget.isRecording)
-                    SafeArea(
-                      child: Padding(
-                        padding: const EdgeInsets.fromLTRB(24, 8, 24, 0),
-                        child: _buildBanner(
-                          context,
-                          localizations,
-                          maneuvers,
-                          currentIndex,
-                          isArrived,
-                          unit,
-                        ),
+                  SafeArea(
+                    child: Padding(
+                      padding: const EdgeInsets.fromLTRB(20, 8, 20, 0),
+                      child: Column(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          if (!widget.isRecording)
+                            _buildBanner(
+                              context,
+                              localizations,
+                              maneuvers,
+                              currentIndex,
+                              isArrived,
+                              unit,
+                            ),
+                          _buildLiveSosOverlays(context),
+                        ],
                       ),
                     ),
+                  ),
+
+                  Positioned(
+                    left: 16,
+                    right: 16,
+                    bottom:
+                        MediaQuery.of(context).size.height * _kSheetMinSize +
+                        10,
+                    child: _buildNearbyWazePromptOverlay(context),
+                  ),
 
                   _buildStatsSheet(context, localizations, trailAsync, unit),
 
@@ -2349,7 +3133,7 @@ class _NavigationScreenState extends ConsumerState<NavigationScreen>
 
         // Always-visible top stats row.
         Padding(
-          padding: const EdgeInsets.fromLTRB(16, 0, 16, 12),
+          padding: const EdgeInsets.fromLTRB(16, 0, 16, 10),
           child: Row(
             children: [
               _buildStatCell(
@@ -2369,6 +3153,23 @@ class _NavigationScreenState extends ConsumerState<NavigationScreen>
               ),
             ],
           ),
+        ),
+
+        ValueListenableBuilder<int?>(
+          valueListenable: _activeHikers30m,
+          builder: (context, activeCount, _) {
+            if (activeCount == null) return const SizedBox.shrink();
+            return Padding(
+              padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
+              child: Align(
+                alignment: Alignment.centerLeft,
+                child: ActiveHikersBadge(
+                  countOverride: activeCount,
+                  compact: true,
+                ),
+              ),
+            );
+          },
         ),
 
         // Additional content fades in as the sheet expands.
@@ -2851,42 +3652,256 @@ class _NavigationScreenState extends ConsumerState<NavigationScreen>
       ),
     );
   }
+
+  Widget _buildLiveSosOverlays(BuildContext context) {
+    return ValueListenableBuilder<bool>(
+      valueListenable: _liveActionBusy,
+      builder: (context, isBusy, _) {
+        return Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            ValueListenableBuilder<SosAlertModel?>(
+              valueListenable: _myActiveSos,
+              builder: (context, mine, _) {
+                if (mine == null) return const SizedBox.shrink();
+                return Padding(
+                  padding: const EdgeInsets.only(top: 6),
+                  child: MyActiveSosBanner(
+                    sos: mine,
+                    isSubmitting: isBusy,
+                    isRo: _isRo,
+                    onResolve: () => _handleResolveMySos(mine),
+                  ),
+                );
+              },
+            ),
+            ValueListenableBuilder<List<SosAlertModel>>(
+              valueListenable: _nearbySosAlerts,
+              builder: (context, alerts, _) {
+                if (alerts.isEmpty) return const SizedBox.shrink();
+                final target =
+                    alerts.firstWhereOrNull((s) => s.amResponding) ??
+                    alerts.first;
+                return ValueListenableBuilder<OffTrailRerouteResult?>(
+                  valueListenable: _rescueRouteNotifier,
+                  builder: (context, rescueRoute, _) {
+                    return ValueListenableBuilder<LocationMarkerPosition?>(
+                      valueListenable: _currentPosition,
+                      builder: (context, markerPos, _) {
+                        double? directDist;
+                        if (markerPos != null) {
+                          directDist = ml.SphericalGreatCircle(
+                            ml.Geographic(
+                              lat: markerPos.latitude,
+                              lon: markerPos.longitude,
+                            ),
+                          ).distanceTo(
+                            ml.Geographic(lat: target.lat, lon: target.lon),
+                          );
+                        }
+                        return Padding(
+                          padding: const EdgeInsets.only(top: 6),
+                          child: NearbySosResponderBanner(
+                            sos: target,
+                            directDistanceMeters: directDist,
+                            rescueRoute: target.amResponding
+                                ? rescueRoute
+                                : null,
+                            userHeadingDeg:
+                                markerPos?.heading ?? _smoothedHeading,
+                            isSubmitting: isBusy,
+                            isRo: _isRo,
+                            onRespondComing: () => _handleRespondComing(target),
+                            onCancelRespond: () => _handleCancelRespond(target),
+                          ),
+                        );
+                      },
+                    );
+                  },
+                );
+              },
+            ),
+          ],
+        );
+      },
+    );
+  }
+
+  Widget _buildNearbyWazePromptOverlay(BuildContext context) {
+    return ValueListenableBuilder<
+      ({TrailReportModel report, double? distanceM})?
+    >(
+      valueListenable: _nearbyPromptReport,
+      builder: (context, entry, _) {
+        if (entry == null) return const SizedBox.shrink();
+        return ValueListenableBuilder<bool>(
+          valueListenable: _liveActionBusy,
+          builder: (context, isBusy, _) {
+            return WazeNearbyPrompt(
+              report: entry.report,
+              distanceMeters: entry.distanceM,
+              isSubmitting: isBusy,
+              isRo: _isRo,
+              onVote: (vote) => _handleVoteReport(entry.report, vote),
+              onClose: () {
+                _snoozedOrVotedReportIds.add(entry.report.id);
+                if (_pinnedPromptReportId == entry.report.id) {
+                  _pinnedPromptReportId = null;
+                }
+                _nearbyPromptReport.value = null;
+              },
+            );
+          },
+        );
+      },
+    );
+  }
 }
 
-/// Custom, appropriately-sized (~22px) location marker replacing the native
-/// MapLibre location puck — which has no supported size control on either
-/// Android or iOS (`maplibre` 0.3.5). Mirrors the `ml.WidgetLayer`/`ml.Marker`
-/// structure shared with `trail_map.dart`/`map_screen.dart` via
-/// [LocationMarkerLayer], but much smaller and heading-aware via
-/// [LocationPuck].
+/// Custom location marker replacing the native MapLibre location puck, sized
+/// at `96x96` (`48px` radius) so `_FlashlightConePainter`'s directional beam
+/// extends cleanly beyond the `20px` blue dot on both light and dark tiles.
 class _LocationMarkerLayer extends StatelessWidget {
-  const _LocationMarkerLayer({required this.position, required this.headingUp});
+  const _LocationMarkerLayer({
+    required this.position,
+    required this.headingUp,
+    this.mapBearing = 0.0,
+  });
 
   /// Latest GPS fix; null until the first fix lands, in which case nothing
   /// renders.
   final ValueNotifier<LocationMarkerPosition?> position;
   final bool headingUp;
+  final double mapBearing;
 
   @override
   Widget build(BuildContext context) {
+    final effectiveBearing =
+        ml.MapCamera.maybeOf(context)?.bearing ?? mapBearing;
     return ValueListenableBuilder<LocationMarkerPosition?>(
       valueListenable: position,
       builder: (context, pos, _) {
         if (pos == null) return const SizedBox.shrink();
+        final double? coneHeading = headingUp
+            ? 0.0
+            : (pos.heading == null
+                  ? null
+                  : normalizeHeading(pos.heading! - effectiveBearing));
         return ml.WidgetLayer(
           markers: [
             ml.Marker(
               point: ml.Geographic(lat: pos.latitude, lon: pos.longitude),
-              size: const Size(44, 44),
+              size: const Size(96, 96),
               child: LocationPuck(
-                size: 44,
+                size: 96,
                 dotSize: 20,
-                heading: headingUp ? 0 : pos.heading,
+                heading: coneHeading,
                 headingAccuracy: pos.headingAccuracy,
                 showHeading: true,
               ),
             ),
           ],
+        );
+      },
+    );
+  }
+}
+
+/// Renders active community Waze reports, permanent landmarks, and nearby SOS
+/// emergency pins on the live navigation map.
+class _LiveCommunityMarkerLayer extends StatelessWidget {
+  const _LiveCommunityMarkerLayer({
+    required this.reports,
+    required this.sosAlerts,
+    required this.onReportTap,
+    required this.onSosTap,
+  });
+
+  final ValueNotifier<List<TrailReportModel>> reports;
+  final ValueNotifier<List<SosAlertModel>> sosAlerts;
+  final ValueChanged<TrailReportModel> onReportTap;
+  final ValueChanged<SosAlertModel> onSosTap;
+
+  @override
+  Widget build(BuildContext context) {
+    return ValueListenableBuilder<List<TrailReportModel>>(
+      valueListenable: reports,
+      builder: (context, reportList, _) {
+        return ValueListenableBuilder<List<SosAlertModel>>(
+          valueListenable: sosAlerts,
+          builder: (context, sosList, _) {
+            if (reportList.isEmpty && sosList.isEmpty) {
+              return const SizedBox.shrink();
+            }
+            return ml.WidgetLayer(
+              markers: [
+                for (final report in reportList)
+                  ml.Marker(
+                    point: ml.Geographic(lat: report.lat, lon: report.lon),
+                    size: const Size(38, 38),
+                    child: GestureDetector(
+                      behavior: HitTestBehavior.opaque,
+                      onTap: () => onReportTap(report),
+                      child: Opacity(
+                        opacity: report.isDryOrClosed ? 0.65 : 1.0,
+                        child: Container(
+                          decoration: BoxDecoration(
+                            color: Colors.white,
+                            shape: BoxShape.circle,
+                            border: Border.all(
+                              color: categoryAccentColor(report.category),
+                              width: 2.5,
+                            ),
+                            boxShadow: [
+                              BoxShadow(
+                                color: Colors.black.withValues(alpha: 0.28),
+                                blurRadius: 4,
+                                offset: const Offset(0, 1),
+                              ),
+                            ],
+                          ),
+                          alignment: Alignment.center,
+                          child: Text(
+                            report.category.emoji,
+                            style: const TextStyle(fontSize: 18),
+                          ),
+                        ),
+                      ),
+                    ),
+                  ),
+                for (final sos in sosList)
+                  ml.Marker(
+                    point: ml.Geographic(lat: sos.lat, lon: sos.lon),
+                    size: const Size(46, 46),
+                    child: GestureDetector(
+                      behavior: HitTestBehavior.opaque,
+                      onTap: () => onSosTap(sos),
+                      child: Container(
+                        decoration: BoxDecoration(
+                          color: const Color(0xFFDC2626),
+                          shape: BoxShape.circle,
+                          border: Border.all(color: Colors.white, width: 3),
+                          boxShadow: [
+                            BoxShadow(
+                              color: const Color(
+                                0xFFDC2626,
+                              ).withValues(alpha: 0.55),
+                              blurRadius: 8,
+                              spreadRadius: 1,
+                            ),
+                          ],
+                        ),
+                        alignment: Alignment.center,
+                        child: const Text(
+                          '🆘',
+                          style: TextStyle(fontSize: 20),
+                        ),
+                      ),
+                    ),
+                  ),
+              ],
+            );
+          },
         );
       },
     );

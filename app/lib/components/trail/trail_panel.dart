@@ -9,6 +9,7 @@ import 'package:intl/intl.dart';
 import 'package:skeletonizer/skeletonizer.dart';
 import 'package:wanderer/components/base/actor_avatar.dart';
 import 'package:wanderer/components/base/trail_map.dart';
+import 'package:wanderer/components/trail/active_hikers_badge.dart';
 import 'package:wanderer/components/trail/comment_list.dart';
 import 'package:wanderer/components/trail/elevation_profile.dart';
 import 'package:wanderer/components/trail/photo_collage.dart';
@@ -409,6 +410,13 @@ class TrailPanel extends ConsumerWidget {
                             )
                             .toList(),
                   ),
+                  if (!isUnsyncedState(trail.syncState) &&
+                      trail.id.isNotEmpty &&
+                      !isSkeleton)
+                    Padding(
+                      padding: const EdgeInsets.only(top: 12),
+                      child: ActiveHikersBadge(trailId: trail.id),
+                    ),
                 ],
               ),
             ),

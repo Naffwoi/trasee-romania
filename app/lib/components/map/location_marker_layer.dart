@@ -99,11 +99,11 @@ class _FlashlightConePainter extends CustomPainter {
     final paint = Paint()
       ..shader = RadialGradient(
         colors: [
-          kGoogleMapsBlue.withValues(alpha: 0.50),
-          kGoogleMapsBlue.withValues(alpha: 0.18),
+          kGoogleMapsBlue.withValues(alpha: 0.72),
+          kGoogleMapsBlue.withValues(alpha: 0.34),
           kGoogleMapsBlue.withValues(alpha: 0.0),
         ],
-        stops: const [0.18, 0.60, 1.0],
+        stops: const [0.18, 0.62, 1.0],
       ).createShader(rect);
 
     final path = Path()

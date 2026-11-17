@@ -840,3 +840,435 @@ export function computeOffTrailReroute(params: {
 		slopeAdvice,
 	};
 }
+
+export interface DirectRescueRouteResult {
+	mode: OffTrailMode;
+	points: OffTrailPoint[];
+	targetLat: number;
+	targetLon: number;
+	targetEleM: number;
+	distanceM: number;
+	estimatedSeconds: number;
+	ascentM: number;
+	descentM: number;
+	maxSlopeDeg: number;
+	avoidedSteepHazard: boolean;
+	initialBearingDeg: number;
+	instruction: string;
+	slopeAdvice: string;
+}
+
+/**
+ * Single-Target 16-neighbor Tobler DEM A* router that computes an optimal
+ * terrain-aware rescue route from a responder's position directly to an SOS
+ * requester's coordinates, avoiding cliffs (>36.9°) and minimizing hazardous climbs.
+ */
+export function computeDirectRescueRoute(params: {
+	fromLat: number;
+	fromLon: number;
+	fromEle?: number | null;
+	targetLat: number;
+	targetLon: number;
+	targetEle?: number | null;
+	trailPoints?: NavTrackPoint[];
+	sampler: (lat: number, lon: number) => number | null;
+	mode?: OffTrailMode;
+	locale?: string;
+}): DirectRescueRouteResult {
+	const mode: OffTrailMode = params.mode ?? "min-climb";
+	const isRo = (params.locale ?? "ro").trim().toLowerCase().startsWith("ro");
+
+	const anchorPoints: NavTrackPoint[] = [...(params.trailPoints ?? [])];
+	if (
+		params.targetEle !== undefined &&
+		params.targetEle !== null &&
+		Number.isFinite(params.targetEle)
+	) {
+		anchorPoints.push({
+			lat: params.targetLat,
+			lon: params.targetLon,
+			ele: params.targetEle,
+			distanceM: 0,
+			gradePct: 0,
+		});
+	}
+
+	const evalEle = createElevationSampler(
+		params.sampler,
+		anchorPoints,
+		params.fromLat,
+		params.fromLon,
+		params.fromEle,
+	);
+
+	const directDist = haversineMeters(
+		params.fromLat,
+		params.fromLon,
+		params.targetLat,
+		params.targetLon,
+	);
+
+	if (!Number.isFinite(directDist) || directDist < 2) {
+		const startEle =
+			params.fromEle !== undefined && params.fromEle !== null && Number.isFinite(params.fromEle)
+				? params.fromEle
+				: evalEle(params.fromLat, params.fromLon);
+		const endEle =
+			params.targetEle !== undefined &&
+			params.targetEle !== null &&
+			Number.isFinite(params.targetEle)
+				? params.targetEle
+				: evalEle(params.targetLat, params.targetLon);
+		return {
+			mode,
+			points: [
+				{
+					lat: params.fromLat,
+					lon: params.fromLon,
+					ele: startEle,
+					distanceM: 0,
+					gradePct: 0,
+				},
+				...(directDist > 0.05
+					? [
+							{
+								lat: params.targetLat,
+								lon: params.targetLon,
+								ele: endEle,
+								distanceM: directDist,
+								gradePct: 0,
+							},
+						]
+					: []),
+			],
+			targetLat: params.targetLat,
+			targetLon: params.targetLon,
+			targetEleM: endEle,
+			distanceM: Number.isFinite(directDist) ? Math.max(0, directDist) : 0,
+			estimatedSeconds: 0,
+			ascentM: 0,
+			descentM: 0,
+			maxSlopeDeg: 0,
+			avoidedSteepHazard: false,
+			initialBearingDeg: 0,
+			instruction: isRo ? "Ai ajuns la persoana în dificultate" : "Arrived at SOS location",
+			slopeAdvice: isRo ? "La destinație" : "At target",
+		};
+	}
+
+	const cosLat = Math.max(0.1, Math.cos(params.fromLat * DEG_TO_RAD));
+	const metersPerDegLon = METERS_PER_DEG_LAT * cosLat;
+	const toLocal = (lat: number, lon: number) => ({
+		x: (lon - params.fromLon) * metersPerDegLon,
+		y: (lat - params.fromLat) * METERS_PER_DEG_LAT,
+	});
+	const toLatLon = (x: number, y: number) => ({
+		lat: params.fromLat + y / METERS_PER_DEG_LAT,
+		lon: params.fromLon + x / metersPerDegLon,
+	});
+
+	const targetLocal = toLocal(params.targetLat, params.targetLon);
+	const baseDist = Math.hypot(targetLocal.x, targetLocal.y);
+	const detourPad = Math.min(600, Math.max(250, 0.4 * baseDist));
+
+	const minX = Math.min(0, targetLocal.x) - detourPad;
+	const maxX = Math.max(0, targetLocal.x) + detourPad;
+	const minY = Math.min(0, targetLocal.y) - detourPad;
+	const maxY = Math.max(0, targetLocal.y) + detourPad;
+
+	const spanX = Math.max(150, maxX - minX);
+	const spanY = Math.max(150, maxY - minY);
+	const maxSpan = Math.max(spanX, spanY);
+
+	let cellSize = Math.min(MAX_CELL_SIZE_M, Math.max(MIN_CELL_SIZE_M, maxSpan / 120));
+	const requiredCellForDim = maxSpan / (MAX_GRID_DIM - 2);
+	if (requiredCellForDim > cellSize) {
+		cellSize = requiredCellForDim;
+	}
+
+	const cols = Math.min(MAX_GRID_DIM, Math.max(3, Math.ceil(spanX / cellSize) + 1));
+	const rows = Math.min(MAX_GRID_DIM, Math.max(3, Math.ceil(spanY / cellSize) + 1));
+
+	const worldToGrid = (x: number, y: number): { gx: number; gy: number } => ({
+		gx: Math.min(cols - 1, Math.max(0, Math.round((x - minX) / cellSize))),
+		gy: Math.min(rows - 1, Math.max(0, Math.round((y - minY) / cellSize))),
+	});
+	const gridToWorld = (gx: number, gy: number): { x: number; y: number } => ({
+		x: minX + gx * cellSize,
+		y: minY + gy * cellSize,
+	});
+
+	const startCell = worldToGrid(0, 0);
+	const goalCell = worldToGrid(targetLocal.x, targetLocal.y);
+	const totalCells = cols * rows;
+	const startIdx = startCell.gy * cols + startCell.gx;
+	const goalIdx = goalCell.gy * cols + goalCell.gx;
+
+	const eleCache = new Float64Array(totalCells);
+	eleCache.fill(NaN);
+	const getCellEle = (gx: number, gy: number): number => {
+		const idx = gy * cols + gx;
+		const cached = eleCache[idx];
+		if (!Number.isNaN(cached)) return cached;
+		const w = gridToWorld(gx, gy);
+		const ll = toLatLon(w.x, w.y);
+		const e = evalEle(ll.lat, ll.lon);
+		eleCache[idx] = e;
+		return e;
+	};
+
+	const minRate = mode === "min-climb" ? 1 / ((0.6 * 7.5) / 3.6) : 1.0;
+	const heuristic = (gx: number, gy: number): number =>
+		minRate * Math.hypot(goalCell.gx - gx, goalCell.gy - gy) * cellSize;
+
+	const gScore = new Float64Array(totalCells);
+	gScore.fill(Infinity);
+	const parent = new Int32Array(totalCells);
+	parent.fill(-1);
+	const closed = new Uint8Array(totalCells);
+
+	const pq = new MinHeap();
+	gScore[startIdx] = 0;
+	pq.push(startIdx, heuristic(startCell.gx, startCell.gy));
+
+	while (pq.size > 0) {
+		const cur = pq.pop()!;
+		const idx = cur.idx;
+		if (closed[idx]) continue;
+		closed[idx] = 1;
+
+		if (idx === goalIdx) {
+			break;
+		}
+
+		const gx = idx % cols;
+		const gy = (idx - gx) / cols;
+		const eleFrom = getCellEle(gx, gy);
+
+		for (const mv of MOVES_16) {
+			const nx = gx + mv.dx;
+			const ny = gy + mv.dy;
+			if (nx < 0 || nx >= cols || ny < 0 || ny >= rows) continue;
+			const nIdx = ny * cols + nx;
+			if (closed[nIdx]) continue;
+
+			const d = mv.steps * cellSize;
+			const eleTo = getCellEle(nx, ny);
+			let eleMid: number | null = null;
+			if (mv.isKnight || (Math.abs(mv.dx) === 1 && Math.abs(mv.dy) === 1)) {
+				const midWorld = gridToWorld(gx + mv.dx * 0.5, gy + mv.dy * 0.5);
+				const midLL = toLatLon(midWorld.x, midWorld.y);
+				eleMid = evalEle(midLL.lat, midLL.lon);
+			}
+
+			const stepCost = evaluateEdgeCost(mode, d, eleFrom, eleTo, eleMid);
+			const tentG = gScore[idx] + stepCost;
+			if (tentG < gScore[nIdx]) {
+				gScore[nIdx] = tentG;
+				parent[nIdx] = idx;
+				pq.push(nIdx, tentG + heuristic(nx, ny));
+			}
+		}
+	}
+
+	const rawCoords: { lat: number; lon: number }[] = [];
+	if (goalIdx === startIdx || parent[goalIdx] === -1) {
+		rawCoords.push({ lat: params.fromLat, lon: params.fromLon });
+		rawCoords.push({ lat: params.targetLat, lon: params.targetLon });
+	} else {
+		const indices: number[] = [];
+		let cur = goalIdx;
+		while (cur !== -1) {
+			indices.push(cur);
+			if (cur === startIdx) break;
+			cur = parent[cur];
+		}
+		indices.reverse();
+
+		for (let i = 0; i < indices.length; i++) {
+			if (i === 0) {
+				rawCoords.push({ lat: params.fromLat, lon: params.fromLon });
+			} else if (i === indices.length - 1) {
+				rawCoords.push({ lat: params.targetLat, lon: params.targetLon });
+			} else {
+				const cellIdx = indices[i];
+				const gx = cellIdx % cols;
+				const gy = (cellIdx - gx) / cols;
+				const w = gridToWorld(gx, gy);
+				rawCoords.push(toLatLon(w.x, w.y));
+			}
+		}
+	}
+
+	let rawMaxAbsSlope = 0;
+	for (let i = 0; i < rawCoords.length - 1; i++) {
+		const seg = segmentMaxSlopeRatio(
+			rawCoords[i].lat,
+			rawCoords[i].lon,
+			rawCoords[i + 1].lat,
+			rawCoords[i + 1].lon,
+			evalEle,
+			12,
+		);
+		if (seg.maxAbsSlope > rawMaxAbsSlope) rawMaxAbsSlope = seg.maxAbsSlope;
+	}
+	const safeSmoothThreshold =
+		rawMaxAbsSlope <= CLIFF_SLOPE_THRESHOLD
+			? Math.min(CLIFF_SLOPE_THRESHOLD, Math.max(0.45, rawMaxAbsSlope + 0.05))
+			: rawMaxAbsSlope + 0.05;
+
+	const smoothedCoords = smoothOffTrailPath(rawCoords, mode, evalEle, safeSmoothThreshold);
+
+	const eles = smoothedCoords.map((c, idx) => {
+		if (
+			idx === 0 &&
+			params.fromEle !== undefined &&
+			params.fromEle !== null &&
+			Number.isFinite(params.fromEle)
+		) {
+			return params.fromEle;
+		}
+		if (
+			idx === smoothedCoords.length - 1 &&
+			params.targetEle !== undefined &&
+			params.targetEle !== null &&
+			Number.isFinite(params.targetEle)
+		) {
+			return params.targetEle;
+		}
+		return evalEle(c.lat, c.lon);
+	});
+
+	const outPoints: OffTrailPoint[] = [];
+	let cumDist = 0;
+	let ascentM = 0;
+	let descentM = 0;
+	let estimatedSeconds = 0;
+	let maxAbsSlope = 0;
+
+	for (let i = 0; i < smoothedCoords.length; i++) {
+		const c = smoothedCoords[i];
+		if (i > 0) {
+			const prev = smoothedCoords[i - 1];
+			const d = haversineMeters(prev.lat, prev.lon, c.lat, c.lon);
+			cumDist += d;
+			const dEle = eles[i] - eles[i - 1];
+			if (dEle > 0) ascentM += dEle;
+			else if (dEle < 0) descentM += -dEle;
+
+			const s = d > 0.1 ? dEle / d : 0;
+			const absS = Math.abs(s);
+			if (absS > maxAbsSlope) maxAbsSlope = absS;
+
+			if (d > 20) {
+				const sub = segmentMaxSlopeRatio(prev.lat, prev.lon, c.lat, c.lon, evalEle, 15);
+				if (sub.maxAbsSlope > maxAbsSlope) maxAbsSlope = sub.maxAbsSlope;
+			}
+
+			const v = toblerHikingSpeedKmh(s, false);
+			estimatedSeconds += d > 0 ? d / ((0.6 * v) / 3.6) : 0;
+		}
+
+		let gradePct = 0;
+		if (smoothedCoords.length >= 2) {
+			if (i === 0) {
+				const d = haversineMeters(c.lat, c.lon, smoothedCoords[1].lat, smoothedCoords[1].lon);
+				gradePct = d > 0.1 ? ((eles[1] - eles[0]) / d) * 100 : 0;
+			} else {
+				const prev = smoothedCoords[i - 1];
+				const d = haversineMeters(prev.lat, prev.lon, c.lat, c.lon);
+				gradePct = d > 0.1 ? ((eles[i] - eles[i - 1]) / d) * 100 : 0;
+			}
+		}
+
+		outPoints.push({
+			lat: c.lat,
+			lon: c.lon,
+			ele: eles[i],
+			distanceM: cumDist,
+			gradePct,
+		});
+	}
+
+	const maxSlopeDeg = Math.atan(maxAbsSlope) * RAD_TO_DEG;
+	const directCheck = segmentMaxSlopeRatio(
+		params.fromLat,
+		params.fromLon,
+		params.targetLat,
+		params.targetLon,
+		evalEle,
+		12,
+	);
+	const avoidedSteepHazard =
+		directCheck.maxAbsSlope > CLIFF_SLOPE_THRESHOLD &&
+		maxAbsSlope <= CLIFF_SLOPE_THRESHOLD;
+
+	let initialBearingDeg = 0;
+	if (outPoints.length >= 2) {
+		const targetDist = Math.min(35, cumDist);
+		let lookLat = outPoints[outPoints.length - 1].lat;
+		let lookLon = outPoints[outPoints.length - 1].lon;
+		for (let i = 1; i < outPoints.length; i++) {
+			if (outPoints[i].distanceM >= targetDist) {
+				const segSpan = outPoints[i].distanceM - outPoints[i - 1].distanceM;
+				const frac =
+					segSpan > 1e-6
+						? Math.min(1, Math.max(0, (targetDist - outPoints[i - 1].distanceM) / segSpan))
+						: 1;
+				lookLat = outPoints[i - 1].lat + frac * (outPoints[i].lat - outPoints[i - 1].lat);
+				lookLon = outPoints[i - 1].lon + frac * (outPoints[i].lon - outPoints[i - 1].lon);
+				break;
+			}
+		}
+		initialBearingDeg = bearingDegrees(params.fromLat, params.fromLon, lookLat, lookLon);
+	}
+
+	const dir = cardinalDirection(initialBearingDeg, isRo ? "ro" : "en");
+	const distRounded = Math.round(cumDist);
+	const climbRounded = Math.round(ascentM);
+	const slopeRounded = Math.round(maxSlopeDeg);
+
+	const instruction = isRo
+		? avoidedSteepHazard
+			? `Ocolește panta abruptă spre ${dir} (${distRounded} m până la SOS)`
+			: `Mergi spre ${dir} (${distRounded} m până la SOS)`
+		: avoidedSteepHazard
+			? `Contour around steep slope heading ${dir} (${distRounded} m to SOS)`
+			: `Head ${dir} (${distRounded} m to SOS)`;
+
+	let slopeAdvice: string;
+	if (isRo) {
+		if (avoidedSteepHazard) {
+			slopeAdvice = `Evită zona abruptă · urcare +${climbRounded} m · pantă max ${slopeRounded}°`;
+		} else if (ascentM > 10) {
+			slopeAdvice = `Urcare +${climbRounded} m · pantă max ${slopeRounded}°`;
+		} else {
+			slopeAdvice = `Pantă ușoară · max ${slopeRounded}°`;
+		}
+	} else {
+		if (avoidedSteepHazard) {
+			slopeAdvice = `Steep hazard avoided · +${climbRounded} m climb · max slope ${slopeRounded}°`;
+		} else if (ascentM > 10) {
+			slopeAdvice = `Climb +${climbRounded} m · max slope ${slopeRounded}°`;
+		} else {
+			slopeAdvice = `Gentle slope · max ${slopeRounded}°`;
+		}
+	}
+
+	return {
+		mode,
+		points: outPoints,
+		targetLat: params.targetLat,
+		targetLon: params.targetLon,
+		targetEleM: eles[eles.length - 1],
+		distanceM: cumDist,
+		estimatedSeconds,
+		ascentM,
+		descentM,
+		maxSlopeDeg,
+		avoidedSteepHazard,
+		initialBearingDeg,
+		instruction,
+		slopeAdvice,
+	};
+}

@@ -3,10 +3,27 @@
     import { page } from "$app/state";
     import MetaTags from "#lib/components/base/meta_tags.svelte";
     import StatChip from "#lib/components/mobile_shell/stat_chip.svelte";
+    import ActiveHikersBadge from "#lib/components/trail/active_hikers_badge.svelte";
     import LikeButton from "#lib/components/trail/like_button.svelte";
     import MapWithElevationMaplibre from "#lib/components/trail/map_with_elevation_maplibre.svelte";
     import TrailDropdown from "#lib/components/trail/trail_dropdown.svelte";
     import TrailInfoPanel from "#lib/components/trail/trail_info_panel.svelte";
+    import {
+        connectLiveStream,
+        fetchTrailLiveSummary,
+        mergeReportIntoList,
+        mergeSosIntoList,
+        subscribeWebPushIfSupported,
+        voteReport,
+        type LiveStreamHandle,
+        type ReportVoteType,
+        type SosAlertDto,
+        type TrailReportDto,
+    } from "#lib/live/live_client.ts";
+    import {
+        syncReportMapMarkers,
+        syncSosMapMarkers,
+    } from "#lib/live/report_markers.ts";
     import { currentUser } from "#lib/stores/user_store.ts";
     import { getFileURL } from "#lib/util/file_util.ts";
     import {
@@ -17,7 +34,7 @@
     } from "#lib/util/format_util.ts";
     import * as M from "maplibre-gl";
     import "photoswipe/style.css";
-    import { untrack } from "svelte";
+    import { onDestroy, onMount, untrack } from "svelte";
     import { _ } from "svelte-i18n";
 
     let { data } = $props();
@@ -25,10 +42,20 @@
     const trail = $state(untrack(() => data.trail));
 
     let markers: M.Marker[] = $state([]);
+    let detailMap: M.Map | null = $state(null);
     let mapRef: MapWithElevationMaplibre | undefined = $state();
     let showRoute = $state(true);
     let sheetOpen = $state(true);
     let activeSheetTab = $state<"elevation" | "details">("elevation");
+    let activeHikers30m = $state<number>(0);
+    let liveReports = $state<TrailReportDto[]>([]);
+    let liveSosAlerts = $state<SosAlertDto[]>([]);
+    let liveLoading = $state(true);
+
+    let reportMarkers: M.Marker[] = [];
+    let sosMarkers: M.Marker[] = [];
+    let streamHandle: LiveStreamHandle | null = null;
+    let summaryPollTimer: ReturnType<typeof setInterval> | null = null;
     let scrubPoint = $state<{
         distance: number;
         elevation: number;
@@ -71,10 +98,101 @@
                     void req.call(DeviceOrientationEvent).catch(() => {});
                 }
             }
+            if (
+                typeof Notification !== "undefined" &&
+                Notification.permission === "granted"
+            ) {
+                void subscribeWebPushIfSupported(
+                    trail.lat ?? null,
+                    trail.lon ?? null,
+                    trail.id,
+                    { requestPermission: false },
+                );
+            }
         } catch {
             // Non-blocking best-effort iOS compass unlock on user tap
         }
     }
+
+    async function handleReportVoteOnDetail(reportId: string, vote: ReportVoteType) {
+        const updated = await voteReport(reportId, vote);
+        if (updated) {
+            liveReports = mergeReportIntoList(liveReports, updated);
+        }
+    }
+
+    async function loadLiveSummary() {
+        if (!trail.id) return;
+        const sum = await fetchTrailLiveSummary(trail.id);
+        if (sum) {
+            activeHikers30m = sum.activeHikers30m;
+            liveReports = sum.reports;
+            liveSosAlerts = sum.sosAlerts;
+        }
+        liveLoading = false;
+    }
+
+    $effect(() => {
+        const m = detailMap;
+        const reps = liveReports;
+        untrack(() => {
+            reportMarkers = syncReportMapMarkers(m, reportMarkers, reps, {
+                onVote: (id, v) => void handleReportVoteOnDetail(id, v),
+            });
+        });
+    });
+
+    $effect(() => {
+        const m = detailMap;
+        const alerts = liveSosAlerts;
+        untrack(() => {
+            sosMarkers = syncSosMapMarkers(m, sosMarkers, alerts, {
+                onRespond: (sos) => {
+                    const targetUrl = `${navigateHref}${navigateHref.includes("?") ? "&" : "?"}sos=${encodeURIComponent(sos.id)}`;
+                    void goto(targetUrl);
+                },
+            });
+        });
+    });
+
+    onMount(() => {
+        void loadLiveSummary();
+
+        summaryPollTimer = setInterval(() => {
+            if (typeof document === "undefined" || document.visibilityState === "visible") {
+                void loadLiveSummary();
+            }
+        }, 60_000);
+
+        if (trail.id) {
+            streamHandle = connectLiveStream({
+                trailId: trail.id,
+                lat: trail.lat ?? null,
+                lon: trail.lon ?? null,
+                callbacks: {
+                    onReportUpdate: (rep) => {
+                        liveReports = mergeReportIntoList(liveReports, rep);
+                    },
+                    onSosUpdate: (sos) => {
+                        liveSosAlerts = mergeSosIntoList(liveSosAlerts, sos);
+                    },
+                },
+            });
+        }
+    });
+
+    onDestroy(() => {
+        if (summaryPollTimer) {
+            clearInterval(summaryPollTimer);
+            summaryPollTimer = null;
+        }
+        streamHandle?.close();
+        streamHandle = null;
+        for (const m of reportMarkers) m.remove();
+        reportMarkers = [];
+        for (const m of sosMarkers) m.remove();
+        sosMarkers = [];
+    });
 </script>
 
 <MetaTags
@@ -105,6 +223,7 @@
     <div id="trail-detail-map" class="w-full h-full">
         <MapWithElevationMaplibre
             bind:this={mapRef}
+            bind:map={detailMap}
             trails={[trail]}
             waypoints={trail.expand?.waypoints_via_trail}
             activeTrail={0}
@@ -203,7 +322,7 @@
     </div>
 
     {#if !sheetOpen}
-        <div class="fixed bottom-20 inset-x-0 z-34 flex justify-center pointer-events-none">
+        <div class="fixed bottom-20 inset-x-0 z-34 flex justify-center items-center gap-2 pointer-events-none px-3">
             <button
                 type="button"
                 class="pointer-events-auto inline-flex items-center gap-2 rounded-full bg-menu-background border border-input-border/60 shadow-lg px-4 py-2 text-xs font-semibold text-content cursor-pointer hover:bg-secondary-hover"
@@ -212,6 +331,9 @@
                 <i class="fa fa-chevron-up" aria-hidden="true"></i>
                 <span>{$_("elevation-profile")} · {$_("details")}</span>
             </button>
+            <div class="pointer-events-auto rounded-full bg-menu-background/95 shadow-lg">
+                <ActiveHikersBadge count={activeHikers30m} loading={liveLoading} compact={true} />
+            </div>
         </div>
     {/if}
 
@@ -223,39 +345,43 @@
     >
         <div class="px-4 pt-2 pb-1.5 flex flex-col gap-1.5">
             <div class="w-8 h-1 rounded-full bg-content/20 mx-auto"></div>
-            <div class="flex items-center justify-between gap-2">
-                <div
-                    class="inline-flex rounded-full bg-content/[0.06] p-1 gap-1"
-                    role="tablist"
-                >
-                    <button
-                        type="button"
-                        role="tab"
-                        aria-selected={activeSheetTab === "elevation"}
-                        class={`px-3 py-1 rounded-full text-xs font-semibold inline-flex items-center gap-1.5 cursor-pointer transition-colors ${
-                            activeSheetTab === "elevation"
-                                ? "bg-menu-background text-primary shadow-sm"
-                                : "text-content/70 hover:text-content"
-                        }`}
-                        onclick={() => (activeSheetTab = "elevation")}
+            <div class="flex flex-wrap items-center justify-between gap-2">
+                <div class="flex flex-wrap items-center gap-2 min-w-0">
+                    <div
+                        class="inline-flex rounded-full bg-content/[0.06] p-1 gap-1"
+                        role="tablist"
                     >
-                        <i class="fa fa-mountain" aria-hidden="true"></i>
-                        <span>{$_("elevation-profile")}</span>
-                    </button>
-                    <button
-                        type="button"
-                        role="tab"
-                        aria-selected={activeSheetTab === "details"}
-                        class={`px-3 py-1 rounded-full text-xs font-semibold inline-flex items-center gap-1.5 cursor-pointer transition-colors ${
-                            activeSheetTab === "details"
-                                ? "bg-menu-background text-primary shadow-sm"
-                                : "text-content/70 hover:text-content"
-                        }`}
-                        onclick={() => (activeSheetTab = "details")}
-                    >
-                        <i class="fa fa-circle-info" aria-hidden="true"></i>
-                        <span>{$_("details")}</span>
-                    </button>
+                        <button
+                            type="button"
+                            role="tab"
+                            aria-selected={activeSheetTab === "elevation"}
+                            class={`px-3 py-1 rounded-full text-xs font-semibold inline-flex items-center gap-1.5 cursor-pointer transition-colors ${
+                                activeSheetTab === "elevation"
+                                    ? "bg-menu-background text-primary shadow-sm"
+                                    : "text-content/70 hover:text-content"
+                            }`}
+                            onclick={() => (activeSheetTab = "elevation")}
+                        >
+                            <i class="fa fa-mountain" aria-hidden="true"></i>
+                            <span>{$_("elevation-profile")}</span>
+                        </button>
+                        <button
+                            type="button"
+                            role="tab"
+                            aria-selected={activeSheetTab === "details"}
+                            class={`px-3 py-1 rounded-full text-xs font-semibold inline-flex items-center gap-1.5 cursor-pointer transition-colors ${
+                                activeSheetTab === "details"
+                                    ? "bg-menu-background text-primary shadow-sm"
+                                    : "text-content/70 hover:text-content"
+                            }`}
+                            onclick={() => (activeSheetTab = "details")}
+                        >
+                            <i class="fa fa-circle-info" aria-hidden="true"></i>
+                            <span>{$_("details")}</span>
+                        </button>
+                    </div>
+
+                    <ActiveHikersBadge count={activeHikers30m} loading={liveLoading} />
                 </div>
 
                 <button

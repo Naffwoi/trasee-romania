@@ -804,4 +804,428 @@ class OffTrailRouter {
 
     return chordAscent <= rawAscent + 2.0;
   }
+
+  /// Computes a terrain-aware 16-neighbor DEM A* rescue route directly from
+  /// [userPos] to an SOS requester's [targetPos] (`(sos.lat, sos.lon, sos.ele)`),
+  /// avoiding `> 36.8°` cliffs and steep hazards.
+  static OffTrailRerouteResult? computeDirectRescueRoute({
+    required Geographic userPos,
+    double? userEleM,
+    required Geographic targetPos,
+    double? targetEleM,
+    List<NavTrackPoint> referencePoints = const [],
+    required ElevationSampler sampler,
+    OffTrailMode mode = OffTrailMode.minClimb,
+    String localeCode = 'ro',
+    bool isCycling = false,
+  }) {
+    if (!userPos.lat.isFinite ||
+        !userPos.lon.isFinite ||
+        !targetPos.lat.isFinite ||
+        !targetPos.lon.isFinite) {
+      return null;
+    }
+
+    const mPerDegLat = 111320.0;
+    final mPerDegLon =
+        111320.0 * math.max(0.1, math.cos(userPos.lat * math.pi / 180.0));
+
+    double toX(double lon) => (lon - userPos.lon) * mPerDegLon;
+    double toY(double lat) => (lat - userPos.lat) * mPerDegLat;
+    double toLat(double y) => userPos.lat + y / mPerDegLat;
+    double toLon(double x) => userPos.lon + x / mPerDegLon;
+
+    final targetX = toX(targetPos.lon);
+    final targetY = toY(targetPos.lat);
+    final directDistM = math.sqrt(targetX * targetX + targetY * targetY);
+
+    // Build IDW fallback references from user, SOS target, and any trail points.
+    final idwRefs = <({double x, double y, double ele})>[];
+    if (userEleM != null && userEleM.isFinite) {
+      idwRefs.add((x: 0.0, y: 0.0, ele: userEleM));
+    }
+    if (targetEleM != null && targetEleM.isFinite) {
+      idwRefs.add((x: targetX, y: targetY, ele: targetEleM));
+    }
+    if (referencePoints.isNotEmpty) {
+      final idwStep = math.max(1, (referencePoints.length / 24).ceil());
+      for (var i = 0; i < referencePoints.length; i += idwStep) {
+        final p = referencePoints[i];
+        idwRefs.add((x: toX(p.lon), y: toY(p.lat), ele: p.ele));
+      }
+    }
+
+    double sampleWithFallback(double lat, double lon) {
+      final dem = sampler(lat, lon);
+      if (dem != null && dem.isFinite) return dem;
+      if (idwRefs.isEmpty) return 0.0;
+      final px = toX(lon);
+      final py = toY(lat);
+      var numSum = 0.0;
+      var denSum = 0.0;
+      for (final ref in idwRefs) {
+        final dx = px - ref.x;
+        final dy = py - ref.y;
+        final dSq = dx * dx + dy * dy;
+        if (dSq < 1.0) return ref.ele;
+        final w = 1.0 / dSq;
+        numSum += w * ref.ele;
+        denSum += w;
+      }
+      return denSum > 0.0 ? numSum / denSum : 0.0;
+    }
+
+    final padM = math.max(180.0, math.min(900.0, 0.35 * directDistM));
+    final minX = math.min(0.0, targetX) - padM;
+    final maxX = math.max(0.0, targetX) + padM;
+    final minY = math.min(0.0, targetY) - padM;
+    final maxY = math.max(0.0, targetY) + padM;
+
+    final spanX = maxX - minX;
+    final spanY = maxY - minY;
+    final maxSpan = math.max(spanX, spanY);
+    var cellSize = (maxSpan / (_maxGridDim - 2)).clamp(15.0, 35.0);
+    if (maxSpan / cellSize > _maxGridDim - 2) {
+      cellSize = maxSpan / (_maxGridDim - 2);
+    }
+
+    final cols = (spanX / cellSize).ceil().clamp(3, _maxGridDim);
+    final rows = (spanY / cellSize).ceil().clamp(3, _maxGridDim);
+    final totalCells = cols * rows;
+
+    int xToCol(double x) => ((x - minX) / cellSize).floor().clamp(0, cols - 1);
+    int yToRow(double y) => ((y - minY) / cellSize).floor().clamp(0, rows - 1);
+    double colToX(int c) => minX + (c + 0.5) * cellSize;
+    double rowToY(int r) => minY + (r + 0.5) * cellSize;
+
+    final startCol = xToCol(0.0);
+    final startRow = yToRow(0.0);
+    final startIdx = startRow * cols + startCol;
+
+    final goalCol = xToCol(targetX);
+    final goalRow = yToRow(targetY);
+    final goalIdx = goalRow * cols + goalCol;
+    final goalCellX = colToX(goalCol);
+    final goalCellY = rowToY(goalRow);
+
+    final eleGrid = Float64List(totalCells);
+    for (var i = 0; i < totalCells; i++) {
+      eleGrid[i] = double.nan;
+    }
+    double cellEle(int col, int row) {
+      final idx = row * cols + col;
+      final cached = eleGrid[idx];
+      if (!cached.isNaN) return cached;
+      final val = sampleWithFallback(toLat(rowToY(row)), toLon(colToX(col)));
+      eleGrid[idx] = val;
+      return val;
+    }
+
+    final maxOffTrailSpeedMs = 0.6 * (isCycling ? 32.0 : 7.5) / 3.6;
+    final minCostPerMeter = mode == OffTrailMode.minClimb
+        ? (1.0 / maxOffTrailSpeedMs)
+        : 1.0;
+
+    double heuristic(int col, int row) {
+      final dx = colToX(col) - goalCellX;
+      final dy = rowToY(row) - goalCellY;
+      return minCostPerMeter * math.sqrt(dx * dx + dy * dy);
+    }
+
+    double edgeCost(int c0, int r0, int c1, int r1, double distM) {
+      final e0 = cellEle(c0, r0);
+      final e1 = cellEle(c1, r1);
+      final dEle = e1 - e0;
+      final s = distM > 0.0 ? dEle / distM : 0.0;
+      final absS = s.abs();
+
+      var hazardMult = absS > cliffSlopeRatioThreshold
+          ? 40.0
+          : (absS > _steepSlopeRatioThreshold && mode == OffTrailMode.minClimb
+                ? 4.0
+                : 1.0);
+
+      final dc = c1 - c0;
+      final dr = r1 - r0;
+      if (dc.abs() + dr.abs() == 3) {
+        final midC1 = c0 + (dc.abs() == 2 ? dc.sign : 0);
+        final midR1 = r0 + (dr.abs() == 2 ? dr.sign : 0);
+        final midC2 = c0 + dc.sign;
+        final midR2 = r0 + dr.sign;
+        final halfDist = distM * 0.5;
+        final sMid1 = ((cellEle(midC1, midR1) - e0) / halfDist).abs();
+        final sMid2 = ((cellEle(midC2, midR2) - e0) / halfDist).abs();
+        if (sMid1 > cliffSlopeRatioThreshold ||
+            sMid2 > cliffSlopeRatioThreshold) {
+          hazardMult = math.max(hazardMult, 40.0);
+        }
+      }
+
+      if (mode == OffTrailMode.minClimb) {
+        final vMs = 0.6 * toblerSpeedKmh(s, isCycling: isCycling) / 3.6;
+        final baseSec = distM / math.max(0.15, vMs);
+        final climbPenalty = 6.5 * math.max(0.0, dEle);
+        final steepDescPenalty = s < -0.20 ? 2.0 * dEle.abs() : 0.0;
+        return (baseSec + climbPenalty + steepDescPenalty) * hazardMult;
+      } else {
+        return (distM + 1.0 * math.max(0.0, dEle)) * hazardMult;
+      }
+    }
+
+    final rawCoords = <({double x, double y})>[];
+    if (directDistM >= 8.0 && startIdx != goalIdx) {
+      final gScore = Float64List(totalCells);
+      final fScore = Float64List(totalCells);
+      final cameFrom = Int32List(totalCells);
+      final closed = Uint8List(totalCells);
+
+      for (var i = 0; i < totalCells; i++) {
+        gScore[i] = double.infinity;
+        fScore[i] = double.infinity;
+        cameFrom[i] = -1;
+      }
+
+      gScore[startIdx] = 0.0;
+      fScore[startIdx] = heuristic(startCol, startRow);
+
+      final openHeap = _IntMinHeap(fScore)..push(startIdx);
+      var reachedGoal = false;
+
+      while (!openHeap.isEmpty) {
+        final curr = openHeap.pop();
+        if (curr == goalIdx) {
+          reachedGoal = true;
+          break;
+        }
+        if (closed[curr] != 0) continue;
+        closed[curr] = 1;
+
+        final cc = curr % cols;
+        final cr = curr ~/ cols;
+        for (final (dc, dr) in _neighbors16) {
+          final nc = cc + dc;
+          final nr = cr + dr;
+          if (nc < 0 || nc >= cols || nr < 0 || nr >= rows) continue;
+          final nIdx = nr * cols + nc;
+          if (closed[nIdx] != 0) continue;
+
+          final stepDist = math.sqrt(dc * dc + dr * dr) * cellSize;
+          final tentativeG = gScore[curr] + edgeCost(cc, cr, nc, nr, stepDist);
+          if (tentativeG < gScore[nIdx]) {
+            cameFrom[nIdx] = curr;
+            gScore[nIdx] = tentativeG;
+            fScore[nIdx] = tentativeG + heuristic(nc, nr);
+            openHeap.push(nIdx);
+          }
+        }
+      }
+
+      if (reachedGoal) {
+        final reversedIdx = <int>[];
+        var cur = goalIdx;
+        while (cur != -1) {
+          reversedIdx.add(cur);
+          if (cur == startIdx) break;
+          cur = cameFrom[cur];
+        }
+        for (var i = reversedIdx.length - 1; i >= 0; i--) {
+          final idx = reversedIdx[i];
+          rawCoords.add((x: colToX(idx % cols), y: rowToY(idx ~/ cols)));
+        }
+      }
+    }
+
+    if (rawCoords.isEmpty) {
+      rawCoords.add((x: 0.0, y: 0.0));
+      rawCoords.add((x: targetX, y: targetY));
+    } else {
+      rawCoords[0] = (x: 0.0, y: 0.0);
+      if (rawCoords.length == 1) {
+        rawCoords.add((x: targetX, y: targetY));
+      } else {
+        rawCoords[rawCoords.length - 1] = (x: targetX, y: targetY);
+      }
+    }
+
+    final smoothedCoords = _smoothPathSafely(
+      rawCoords,
+      cellSize: cellSize,
+      mode: mode,
+      eleAtXY: (x, y) => sampleWithFallback(toLat(y), toLon(x)),
+    );
+
+    final directHitCliff = _lineHitsSteepHazard(
+      x0: 0.0,
+      y0: 0.0,
+      x1: targetX,
+      y1: targetY,
+      stepM: math.max(10.0, cellSize * 0.5),
+      eleAtXY: (x, y) => sampleWithFallback(toLat(y), toLon(x)),
+    );
+
+    final outPoints = <OffTrailPoint>[];
+    var cumDist = 0.0;
+    var ascent = 0.0;
+    var descent = 0.0;
+    var estSec = 0.0;
+    var maxAbsSlopeRatio = 0.0;
+
+    final eles = <double>[
+      for (var i = 0; i < smoothedCoords.length; i++)
+        if (i == 0 &&
+            userEleM != null &&
+            userEleM.isFinite &&
+            sampler(userPos.lat, userPos.lon) == null)
+          userEleM
+        else if (i == smoothedCoords.length - 1 &&
+            targetEleM != null &&
+            targetEleM.isFinite &&
+            sampler(targetPos.lat, targetPos.lon) == null)
+          targetEleM
+        else
+          sampleWithFallback(
+            toLat(smoothedCoords[i].y),
+            toLon(smoothedCoords[i].x),
+          ),
+    ];
+
+    for (var i = 0; i < smoothedCoords.length; i++) {
+      final lat = i == 0
+          ? userPos.lat
+          : (i == smoothedCoords.length - 1
+                ? targetPos.lat
+                : toLat(smoothedCoords[i].y));
+      final lon = i == 0
+          ? userPos.lon
+          : (i == smoothedCoords.length - 1
+                ? targetPos.lon
+                : toLon(smoothedCoords[i].x));
+      final ele = eles[i];
+      var gradePct = 0.0;
+
+      if (i > 0) {
+        final prev = outPoints[i - 1];
+        final d = SphericalGreatCircle(
+          Geographic(lat: prev.lat, lon: prev.lon),
+        ).distanceTo(Geographic(lat: lat, lon: lon));
+        final segDist = d.isFinite ? d : 0.0;
+        cumDist += segDist;
+        final dEle = ele - prev.ele;
+        if (dEle > 0) ascent += dEle;
+        if (dEle < 0) descent += -dEle;
+
+        final slopeRatio = segDist > 0.5 ? dEle / segDist : 0.0;
+        if (slopeRatio.abs() > maxAbsSlopeRatio) {
+          maxAbsSlopeRatio = slopeRatio.abs();
+        }
+        gradePct = slopeRatio * 100.0;
+        final speedMs =
+            0.6 * toblerSpeedKmh(slopeRatio, isCycling: isCycling) / 3.6;
+        if (segDist > 0.0) {
+          estSec += segDist / math.max(0.15, speedMs);
+        }
+      }
+
+      outPoints.add(
+        OffTrailPoint(
+          lat: lat,
+          lon: lon,
+          ele: ele,
+          distanceM: cumDist,
+          gradePct: gradePct,
+        ),
+      );
+    }
+
+    final maxSlopeDeg = math.atan(maxAbsSlopeRatio) * 180.0 / math.pi;
+    final avoidedSteepHazard =
+        directHitCliff && maxAbsSlopeRatio <= cliffSlopeRatioThreshold + 0.05;
+
+    var guideIdx = outPoints.length - 1;
+    for (var i = 1; i < outPoints.length; i++) {
+      if (outPoints[i].distanceM >= 35.0) {
+        guideIdx = i;
+        break;
+      }
+    }
+    final initialBearingDeg = bearingDegrees(
+      outPoints.first.lat,
+      outPoints.first.lon,
+      outPoints[guideIdx].lat,
+      outPoints[guideIdx].lon,
+    );
+
+    final isRo = localeCode.toLowerCase().startsWith('ro');
+    final cardinal = cardinalDirection(
+      initialBearingDeg,
+      localeCode: localeCode,
+    );
+    final distText = cumDist >= 1000.0
+        ? '${(cumDist / 1000.0).toStringAsFixed(2)} km'
+        : '${cumDist.round()} m';
+    final instruction = cumDist < 12.0
+        ? (isRo ? 'Ai ajuns la persoana în dificultate' : 'Reached SOS location')
+        : (isRo
+              ? 'Rută salvare spre $cardinal ($distText până la persoană)'
+              : 'Rescue route $cardinal ($distText to person)');
+
+    final String slopeAdvice;
+    if (avoidedSteepHazard) {
+      slopeAdvice = isRo
+          ? 'Ocolește panta abruptă · +${ascent.round()} m / -${descent.round()} m (max ${maxSlopeDeg.round()}°)'
+          : 'Avoids steep cliff · +${ascent.round()} m / -${descent.round()} m (max ${maxSlopeDeg.round()}°)';
+    } else if (ascent > descent + 10.0) {
+      slopeAdvice = isRo
+          ? 'Urcare +${ascent.round()} m · pantă max ${maxSlopeDeg.round()}°'
+          : 'Climb +${ascent.round()} m · max ${maxSlopeDeg.round()}°';
+    } else if (descent > ascent + 10.0) {
+      slopeAdvice = isRo
+          ? 'Coborâre -${descent.round()} m · pantă max ${maxSlopeDeg.round()}°'
+          : 'Descent -${descent.round()} m · max ${maxSlopeDeg.round()}°';
+    } else {
+      slopeAdvice = isRo
+          ? 'Teren moderat · +${ascent.round()} m / -${descent.round()} m'
+          : 'Moderate terrain · +${ascent.round()} m / -${descent.round()} m';
+    }
+
+    return OffTrailRerouteResult(
+      mode: mode,
+      points: outPoints,
+      rejoinPoint: targetPos,
+      rejoinAlongTrackM: 0.0,
+      rejoinEleM: outPoints.last.ele,
+      distanceM: cumDist,
+      estimatedSeconds: estSec.round(),
+      ascentM: ascent,
+      descentM: descent,
+      maxSlopeDeg: maxSlopeDeg,
+      avoidedSteepHazard: avoidedSteepHazard,
+      initialBearingDeg: initialBearingDeg,
+      instruction: instruction,
+      slopeAdvice: slopeAdvice,
+    );
+  }
 }
+
+/// Top-level convenience wrapper for [OffTrailRouter.computeDirectRescueRoute].
+OffTrailRerouteResult? computeDirectRescueRoute({
+  required Geographic userPos,
+  double? userEleM,
+  required Geographic targetPos,
+  double? targetEleM,
+  List<NavTrackPoint> referencePoints = const [],
+  required ElevationSampler sampler,
+  OffTrailMode mode = OffTrailMode.minClimb,
+  String localeCode = 'ro',
+  bool isCycling = false,
+}) => OffTrailRouter.computeDirectRescueRoute(
+  userPos: userPos,
+  userEleM: userEleM,
+  targetPos: targetPos,
+  targetEleM: targetEleM,
+  referencePoints: referencePoints,
+  sampler: sampler,
+  mode: mode,
+  localeCode: localeCode,
+  isCycling: isCycling,
+);

@@ -1,9 +1,16 @@
 <script lang="ts">
+    import ActiveHikersBadge from "#lib/components/trail/active_hikers_badge.svelte";
+    import {
+        getReportCategoryMeta,
+        isReportVisibleOnMap,
+        type TrailReportDto,
+    } from "#lib/live/live_client.ts";
     import type {
         EtaSnapshot,
         NavTrackPoint,
         OffTrailRerouteResult,
     } from "#lib/navigation/index.ts";
+    import type { DirectRescueRouteResult } from "#lib/navigation/off_trail_router.ts";
     import { theme } from "#lib/stores/theme_store.ts";
     import { formatDistance, formatElevation } from "#lib/util/format_util.ts";
     import { _ } from "svelte-i18n";
@@ -13,6 +20,9 @@
         alongTrackMeters: number;
         eta: EtaSnapshot | null;
         reroute: OffTrailRerouteResult | null;
+        rescueRoute?: DirectRescueRouteResult | null;
+        reports?: TrailReportDto[];
+        activeHikersCount?: number | null;
         userEle?: number | null;
         paused: boolean;
         reversed: boolean;
@@ -27,6 +37,9 @@
         alongTrackMeters,
         eta,
         reroute,
+        rescueRoute = null,
+        reports = [],
+        activeHikersCount = null,
         userEle = null,
         paused,
         reversed,
@@ -42,6 +55,21 @@
     let chartWrapEl = $state<HTMLDivElement | null>(null);
     let canvasSize = $state({ width: 340, height: 120 });
     let markerOverlay = $state<{ x: number; y: number; visible: boolean }>({
+        x: 0,
+        y: 0,
+        visible: false,
+    });
+    let reportPinsOverlay = $state<
+        Array<{
+            id: string;
+            x: number;
+            y: number;
+            emoji: string;
+            label: string;
+            color: string;
+        }>
+    >([]);
+    let rescueTargetOverlay = $state<{ x: number; y: number; visible: boolean }>({
         x: 0,
         y: 0,
         visible: false,
@@ -115,22 +143,76 @@
         return out;
     }
 
+    function resolveReportDistanceAlong(
+        report: TrailReportDto,
+        pts: NavTrackPoint[],
+        isRev: boolean,
+        totalDist: number,
+    ): number | null {
+        if (pts.length >= 2 && Number.isFinite(report.lat) && Number.isFinite(report.lon)) {
+            let bestDistSq = Infinity;
+            let bestIdx = -1;
+            const cosLat = Math.cos((report.lat * Math.PI) / 180);
+            for (let i = 0; i < pts.length; i++) {
+                const dy = (pts[i].lat - report.lat) * 111132;
+                const dx = (pts[i].lon - report.lon) * 111132 * cosLat;
+                const d2 = dx * dx + dy * dy;
+                if (d2 < bestDistSq) {
+                    bestDistSq = d2;
+                    bestIdx = i;
+                }
+            }
+            if (bestIdx >= 0 && bestDistSq <= 300 * 300) {
+                return pts[bestIdx].distanceM;
+            }
+        }
+        if (Number.isFinite(report.alongTrackM) && report.alongTrackM > 0 && totalDist > 0) {
+            const d = isRev ? totalDist - report.alongTrackM : report.alongTrackM;
+            return Math.max(0, Math.min(totalDist, d));
+        }
+        return null;
+    }
+
+    const isRescueMode = $derived(
+        Boolean(rescueRoute && rescueRoute.points.length >= 2),
+    );
+
     const totalDistanceM = $derived(
         points.length > 0 ? points[points.length - 1].distanceM : 0,
     );
 
     const remainingDistanceM = $derived(
-        eta?.remainingDistanceM ?? Math.max(0, totalDistanceM - alongTrackMeters),
+        isRescueMode && rescueRoute
+            ? rescueRoute.distanceM
+            : (eta?.remainingDistanceM ?? Math.max(0, totalDistanceM - alongTrackMeters)),
     );
-    const remainingSeconds = $derived(eta?.remainingSeconds ?? null);
-    const arrivalTime = $derived(eta?.arrivalTimeFormatted ?? "--:--");
-    const remainingAscentM = $derived(eta?.remainingAscentM ?? 0);
+    const remainingSeconds = $derived(
+        isRescueMode && rescueRoute
+            ? rescueRoute.estimatedSeconds
+            : (eta?.remainingSeconds ?? null),
+    );
+    const arrivalTime = $derived.by(() => {
+        if (isRescueMode && rescueRoute) {
+            const d = new Date(Date.now() + rescueRoute.estimatedSeconds * 1000);
+            return `${d.getHours().toString().padStart(2, "0")}:${d.getMinutes().toString().padStart(2, "0")}`;
+        }
+        return eta?.arrivalTimeFormatted ?? "--:--";
+    });
+    const remainingAscentM = $derived(
+        isRescueMode && rescueRoute
+            ? rescueRoute.ascentM
+            : (eta?.remainingAscentM ?? 0),
+    );
     const currentEleM = $derived(
         userEle !== null && Number.isFinite(userEle)
             ? userEle
             : (eta?.currentEleM ?? interpolateElevationAt(points, alongTrackMeters)),
     );
-    const currentGradePct = $derived(eta?.currentGradePct ?? 0);
+    const currentGradePct = $derived(
+        isRescueMode && rescueRoute && rescueRoute.points.length > 0
+            ? rescueRoute.points[0].gradePct
+            : (eta?.currentGradePct ?? 0),
+    );
     const gradeSign = $derived(currentGradePct >= 0.5 ? "+" : "");
 
     $effect(() => {
@@ -155,9 +237,14 @@
     $effect(() => {
         // Track reactive inputs explicitly
         const canvas = canvasEl;
-        const pts = points;
-        const alongM = alongTrackMeters;
-        const activeReroute = reroute;
+        const activeRescue = rescueRoute;
+        const rescueActive = Boolean(activeRescue && activeRescue.points.length >= 2);
+        const pts: NavTrackPoint[] =
+            rescueActive && activeRescue ? activeRescue.points : points;
+        const alongM = rescueActive ? 0 : alongTrackMeters;
+        const activeReroute = rescueActive ? null : reroute;
+        const activeReports = reports;
+        const isRev = reversed;
         const zoom = chartZoom;
         const { width, height } = canvasSize;
         const isDark = $theme === "dark";
@@ -165,6 +252,8 @@
 
         if (!canvas || !expanded) {
             markerOverlay = { x: 0, y: 0, visible: false };
+            reportPinsOverlay = [];
+            rescueTargetOverlay = { x: 0, y: 0, visible: false };
             return;
         }
 
@@ -177,19 +266,22 @@
         ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
         ctx.clearRect(0, 0, width, height);
 
-        if (pts.length < 2 || totalDistanceM <= 0) {
+        const chartTotalDist = pts.length > 0 ? pts[pts.length - 1].distanceM : 0;
+        if (pts.length < 2 || chartTotalDist <= 0) {
             markerOverlay = { x: 0, y: 0, visible: false };
+            reportPinsOverlay = [];
+            rescueTargetOverlay = { x: 0, y: 0, visible: false };
             return;
         }
 
         let minDistM = 0;
-        let maxDistM = totalDistanceM;
-        if (zoom === "2km" && totalDistanceM > 2000) {
-            const anchor = Math.max(0, Math.min(alongM, totalDistanceM));
-            minDistM = Math.max(0, Math.min(anchor - 250, totalDistanceM - 2000));
-            maxDistM = Math.min(totalDistanceM, minDistM + 2000);
+        let maxDistM = chartTotalDist;
+        if (!rescueActive && zoom === "2km" && chartTotalDist > 2000) {
+            const anchor = Math.max(0, Math.min(alongM, chartTotalDist));
+            minDistM = Math.max(0, Math.min(anchor - 250, chartTotalDist - 2000));
+            maxDistM = Math.min(chartTotalDist, minDistM + 2000);
             if (activeReroute && activeReroute.rejoinAlongTrackM > maxDistM - 100) {
-                maxDistM = Math.min(totalDistanceM, activeReroute.rejoinAlongTrackM + 250);
+                maxDistM = Math.min(chartTotalDist, activeReroute.rejoinAlongTrackM + 250);
             }
         }
         const distSpan = Math.max(1, maxDistM - minDistM);
@@ -221,12 +313,12 @@
         }
         const rawSpan = Math.max(20, maxEle - minEle);
         const yMin = minEle - rawSpan * 0.1;
-        const yMax = maxEle + rawSpan * 0.14;
+        const yMax = maxEle + rawSpan * 0.22;
         const ySpan = Math.max(1, yMax - yMin);
 
         const padLeft = 40;
-        const padRight = 10;
-        const padTop = 10;
+        const padRight = 12;
+        const padTop = 12;
         const padBottom = 18;
         const plotW = Math.max(10, width - padLeft - padRight);
         const plotH = Math.max(10, height - padTop - padBottom);
@@ -270,40 +362,41 @@
         }
 
         // 1. Walked segment [0 .. alongTrackMeters] in muted slate (#94a3b8)
-        const walkedEndM = Math.min(maxDistM, Math.max(minDistM, alongM));
-        const walkedSeg = sliceWindow(pts, minDistM, walkedEndM);
-        if (walkedSeg.length >= 2) {
-            ctx.save();
-            ctx.beginPath();
-            ctx.moveTo(toX(walkedSeg[0].distM), padTop + plotH);
-            for (const p of walkedSeg) {
-                ctx.lineTo(toX(p.distM), toY(p.ele));
-            }
-            ctx.lineTo(toX(walkedSeg[walkedSeg.length - 1].distM), padTop + plotH);
-            ctx.closePath();
-            ctx.fillStyle = "rgba(148, 163, 184, 0.18)";
-            ctx.fill();
+        if (!rescueActive) {
+            const walkedEndM = Math.min(maxDistM, Math.max(minDistM, alongM));
+            const walkedSeg = sliceWindow(pts, minDistM, walkedEndM);
+            if (walkedSeg.length >= 2) {
+                ctx.save();
+                ctx.beginPath();
+                ctx.moveTo(toX(walkedSeg[0].distM), padTop + plotH);
+                for (const p of walkedSeg) {
+                    ctx.lineTo(toX(p.distM), toY(p.ele));
+                }
+                ctx.lineTo(toX(walkedSeg[walkedSeg.length - 1].distM), padTop + plotH);
+                ctx.closePath();
+                ctx.fillStyle = "rgba(148, 163, 184, 0.18)";
+                ctx.fill();
 
-            ctx.beginPath();
-            ctx.moveTo(toX(walkedSeg[0].distM), toY(walkedSeg[0].ele));
-            for (let i = 1; i < walkedSeg.length; i++) {
-                ctx.lineTo(toX(walkedSeg[i].distM), toY(walkedSeg[i].ele));
+                ctx.beginPath();
+                ctx.moveTo(toX(walkedSeg[0].distM), toY(walkedSeg[0].ele));
+                for (let i = 1; i < walkedSeg.length; i++) {
+                    ctx.lineTo(toX(walkedSeg[i].distM), toY(walkedSeg[i].ele));
+                }
+                ctx.strokeStyle = "#94a3b8";
+                ctx.lineWidth = 2.5;
+                ctx.lineJoin = "round";
+                ctx.lineCap = "round";
+                ctx.stroke();
+                ctx.restore();
             }
-            ctx.strokeStyle = "#94a3b8";
-            ctx.lineWidth = 2.5;
-            ctx.lineJoin = "round";
-            ctx.lineCap = "round";
-            ctx.stroke();
-            ctx.restore();
         }
 
-        // 2. Upcoming trail segment colored by grade
+        // 2. Upcoming trail segment (or direct SOS rescue segment) colored by grade
         const upcomingStartM = activeReroute
             ? Math.max(minDistM, Math.min(maxDistM, activeReroute.rejoinAlongTrackM))
             : Math.max(minDistM, Math.min(maxDistM, alongM));
         const upcomingSeg = sliceWindow(pts, upcomingStartM, maxDistM);
         if (upcomingSeg.length >= 2) {
-            // Soft area fill beneath upcoming profile
             ctx.save();
             ctx.beginPath();
             ctx.moveTo(toX(upcomingSeg[0].distM), padTop + plotH);
@@ -312,17 +405,20 @@
             }
             ctx.lineTo(toX(upcomingSeg[upcomingSeg.length - 1].distM), padTop + plotH);
             ctx.closePath();
-            ctx.fillStyle = isDark ? "rgba(59, 130, 246, 0.14)" : "rgba(37, 99, 235, 0.10)";
+            ctx.fillStyle = rescueActive
+                ? "rgba(220, 38, 38, 0.18)"
+                : isDark
+                  ? "rgba(59, 130, 246, 0.14)"
+                  : "rgba(37, 99, 235, 0.10)";
             ctx.fill();
 
-            // Stroke each grade-colored segment
             ctx.lineWidth = 3;
             ctx.lineCap = "round";
             ctx.lineJoin = "round";
             for (let i = 1; i < upcomingSeg.length; i++) {
                 const a = upcomingSeg[i - 1];
                 const b = upcomingSeg[i];
-                ctx.strokeStyle = colorForGrade(b.gradePct);
+                ctx.strokeStyle = rescueActive ? "#ef4444" : colorForGrade(b.gradePct);
                 ctx.beginPath();
                 ctx.moveTo(toX(a.distM), toY(a.ele));
                 ctx.lineTo(toX(b.distM), toY(b.ele));
@@ -376,6 +472,65 @@
             ctx.lineWidth = 1.8;
             ctx.stroke();
             ctx.restore();
+        }
+
+        // 3b. Active Waze & Permanent Report Pins along the elevation profile
+        const nextReportPins: Array<{
+            id: string;
+            x: number;
+            y: number;
+            emoji: string;
+            label: string;
+            color: string;
+        }> = [];
+        if (!rescueActive && activeReports.length > 0) {
+            const nowMs = Date.now();
+            for (const rep of activeReports) {
+                if (!isReportVisibleOnMap(rep, nowMs)) continue;
+                const dAlong = resolveReportDistanceAlong(rep, pts, isRev, chartTotalDist);
+                if (dAlong === null || dAlong < minDistM || dAlong > maxDistM) continue;
+                const rx = toX(dAlong);
+                const rEle = interpolateElevationAt(pts, dAlong);
+                const ry = toY(rEle);
+                const pinY = Math.max(11, ry - 15);
+                const meta = getReportCategoryMeta(rep.category);
+
+                ctx.save();
+                ctx.strokeStyle = meta.color;
+                ctx.lineWidth = 1.5;
+                ctx.beginPath();
+                ctx.moveTo(rx, ry);
+                ctx.lineTo(rx, pinY + 6);
+                ctx.stroke();
+
+                ctx.beginPath();
+                ctx.arc(rx, ry, 3, 0, Math.PI * 2);
+                ctx.fillStyle = meta.color;
+                ctx.fill();
+                ctx.restore();
+
+                nextReportPins.push({
+                    id: rep.id,
+                    x: rx,
+                    y: pinY,
+                    emoji: meta.emoji,
+                    label: meta.labelRo,
+                    color: meta.color,
+                });
+            }
+        }
+        reportPinsOverlay = nextReportPins;
+
+        // 3c. SOS target pin at end of rescue profile
+        if (rescueActive) {
+            const endPt = pts[pts.length - 1];
+            rescueTargetOverlay = {
+                x: toX(endPt.distanceM),
+                y: Math.max(14, toY(endPt.ele) - 12),
+                visible: true,
+            };
+        } else {
+            rescueTargetOverlay = { x: 0, y: 0, visible: false };
         }
 
         // 4. "You are here" marker dot on canvas + pulsing overlay coords
@@ -450,9 +605,18 @@
     <div class="px-3.5 pt-2.5 pb-2.5 flex items-center justify-between gap-2">
         <div class="min-w-0 flex-1">
             <div class="flex items-baseline gap-2 flex-wrap">
+                {#if isRescueMode}
+                    <span class="px-2 py-0.5 rounded-full bg-red-600 text-white text-[10.5px] font-extrabold uppercase">
+                        🆘 Salvare
+                    </span>
+                {/if}
                 <span
                     data-testid="nav-remaining-duration"
-                    class="text-xl sm:text-2xl font-extrabold tracking-tight tabular-nums text-emerald-600 dark:text-emerald-400"
+                    class={`text-xl sm:text-2xl font-extrabold tracking-tight tabular-nums ${
+                        isRescueMode
+                            ? "text-red-600 dark:text-red-400"
+                            : "text-emerald-600 dark:text-emerald-400"
+                    }`}
                 >
                     {formatDuration(remainingSeconds)}
                 </span>
@@ -470,7 +634,7 @@
             </div>
             <div
                 data-testid="nav-remaining-summary"
-                class="text-xs font-medium text-content/75 flex items-center gap-1.5 mt-0.5 tabular-nums"
+                class="text-xs font-medium text-content/75 flex items-center flex-wrap gap-1.5 mt-0.5 tabular-nums"
             >
                 <span data-testid="nav-remaining-distance">
                     {formatDistance(Math.max(0, Math.round(remainingDistanceM)), { compact: true })}
@@ -479,6 +643,10 @@
                 <span data-testid="nav-remaining-climb">
                     +{formatElevation(Math.max(0, Math.round(remainingAscentM)))}
                 </span>
+                {#if activeHikersCount !== null}
+                    <span aria-hidden="true">·</span>
+                    <ActiveHikersBadge count={activeHikersCount} compact={true} />
+                {/if}
             </div>
         </div>
 
@@ -565,7 +733,14 @@
                         </span>
                     </span>
 
-                    {#if eta?.nextPeak}
+                    {#if isRescueMode && rescueRoute}
+                        <span
+                            data-testid="nav-rescue-profile-badge"
+                            class="inline-flex items-center gap-1 rounded-full bg-red-600/15 text-red-700 dark:text-red-300 px-2.5 py-0.5 text-[11px] font-bold tabular-nums"
+                        >
+                            <span>🆘 Urcare până la victimă: +{Math.round(rescueRoute.ascentM)} m</span>
+                        </span>
+                    {:else if eta?.nextPeak}
                         <span
                             data-testid="nav-next-peak-badge"
                             class="inline-flex items-center gap-1 rounded-full bg-content/[0.07] text-content/85 px-2.5 py-0.5 text-[11px] font-semibold tabular-nums"
@@ -580,37 +755,39 @@
                     {/if}
                 </div>
 
-                <div class="inline-flex rounded-full bg-content/[0.07] p-0.5 shrink-0">
-                    <button
-                        type="button"
-                        data-testid="chart-zoom-2km"
-                        aria-pressed={chartZoom === "2km"}
-                        onclick={() => (chartZoom = "2km")}
-                        class={`px-2.5 py-0.5 rounded-full text-[11px] font-semibold cursor-pointer transition-colors ${
-                            chartZoom === "2km"
-                                ? "bg-menu-background text-content shadow-sm"
-                                : "text-content/65 hover:text-content"
-                        }`}
-                    >
-                        {$_("nav-next-2km", { default: "Next 2 km" })}
-                    </button>
-                    <button
-                        type="button"
-                        data-testid="chart-zoom-full"
-                        aria-pressed={chartZoom === "full"}
-                        onclick={() => (chartZoom = "full")}
-                        class={`px-2.5 py-0.5 rounded-full text-[11px] font-semibold cursor-pointer transition-colors ${
-                            chartZoom === "full"
-                                ? "bg-menu-background text-content shadow-sm"
-                                : "text-content/65 hover:text-content"
-                        }`}
-                    >
-                        {$_("nav-full-trail", { default: "Full trail" })}
-                    </button>
-                </div>
+                {#if !isRescueMode}
+                    <div class="inline-flex rounded-full bg-content/[0.07] p-0.5 shrink-0">
+                        <button
+                            type="button"
+                            data-testid="chart-zoom-2km"
+                            aria-pressed={chartZoom === "2km"}
+                            onclick={() => (chartZoom = "2km")}
+                            class={`px-2.5 py-0.5 rounded-full text-[11px] font-semibold cursor-pointer transition-colors ${
+                                chartZoom === "2km"
+                                    ? "bg-menu-background text-content shadow-sm"
+                                    : "text-content/65 hover:text-content"
+                            }`}
+                        >
+                            {$_("nav-next-2km", { default: "Next 2 km" })}
+                        </button>
+                        <button
+                            type="button"
+                            data-testid="chart-zoom-full"
+                            aria-pressed={chartZoom === "full"}
+                            onclick={() => (chartZoom = "full")}
+                            class={`px-2.5 py-0.5 rounded-full text-[11px] font-semibold cursor-pointer transition-colors ${
+                                chartZoom === "full"
+                                    ? "bg-menu-background text-content shadow-sm"
+                                    : "text-content/65 hover:text-content"
+                            }`}
+                        >
+                            {$_("nav-full-trail", { default: "Full trail" })}
+                        </button>
+                    </div>
+                {/if}
             </div>
 
-            <!-- High-DPI Split Elevation Canvas + Pulsing Marker -->
+            <!-- High-DPI Split Elevation Canvas + Pulsing Marker + Report Icons -->
             <div
                 bind:this={chartWrapEl}
                 class="relative w-full h-[120px] select-none overflow-hidden rounded-xl bg-content/[0.03]"
@@ -620,6 +797,28 @@
                     data-testid="live-elevation-canvas"
                     class="block w-full h-full"
                 ></canvas>
+
+                {#each reportPinsOverlay as pin (pin.id)}
+                    <div
+                        data-testid="elevation-report-icon"
+                        title={pin.label}
+                        class="pointer-events-none absolute -translate-x-1/2 -translate-y-1/2 w-5 h-5 rounded-full flex items-center justify-center text-[11px] shadow-sm border border-white"
+                        style={`left: ${pin.x}px; top: ${pin.y}px; background: ${pin.color};`}
+                    >
+                        {pin.emoji}
+                    </div>
+                {/each}
+
+                {#if rescueTargetOverlay.visible}
+                    <div
+                        data-testid="elevation-sos-target"
+                        title="Persoană în dificultate (SOS)"
+                        class="pointer-events-none absolute -translate-x-1/2 -translate-y-1/2 px-1.5 py-0.5 rounded-full bg-red-600 text-white text-[10px] font-extrabold shadow border border-white"
+                        style={`left: ${rescueTargetOverlay.x}px; top: ${rescueTargetOverlay.y}px;`}
+                    >
+                        🆘
+                    </div>
+                {/if}
 
                 {#if markerOverlay.visible}
                     <div

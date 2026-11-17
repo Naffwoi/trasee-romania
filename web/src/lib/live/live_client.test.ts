@@ -1,0 +1,588 @@
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { computeDirectRescueRoute } from "#lib/navigation/off_trail_router.ts";
+import {
+	connectLiveStream,
+	createReport,
+	fetchTrailLiveSummary,
+	formatConfirmedAgo,
+	getOrCreateDeviceToken,
+	getReportCategoryMeta,
+	hasVotedOnReport,
+	isReportVisibleOnMap,
+	mergeReportIntoList,
+	mergeSosIntoList,
+	normalizeSosDto,
+	REPORT_CATEGORIES,
+	respondToSos,
+	sendHeartbeat,
+	subscribeWebPushIfSupported,
+	triggerSos,
+	updateSos,
+	urlBase64ToUint8Array,
+	voteReport,
+} from "./live_client.ts";
+
+const BASE_LAT = 45.45;
+const BASE_LON = 25.55;
+const M_PER_DEG_LAT = (Math.PI / 180) * 6371000;
+const M_PER_DEG_LON = M_PER_DEG_LAT * Math.cos((BASE_LAT * Math.PI) / 180);
+
+function offsetLatLon(eastM: number, northM: number): { lat: number; lon: number } {
+	return {
+		lat: BASE_LAT + northM / M_PER_DEG_LAT,
+		lon: BASE_LON + eastM / M_PER_DEG_LON,
+	};
+}
+
+describe("live_client device token, categories, and report lifecycle", () => {
+	const origWindow = globalThis.window;
+	const origFetch = globalThis.fetch;
+	let store: Record<string, string> = {};
+
+	beforeEach(() => {
+		store = {};
+		(globalThis as Record<string, unknown>).window = {
+			localStorage: {
+				getItem: (k: string) => store[k] ?? null,
+				setItem: (k: string, v: string) => {
+					store[k] = v;
+				},
+				removeItem: (k: string) => {
+					delete store[k];
+				},
+			},
+			atob: (b64: string) => Buffer.from(b64, "base64").toString("binary"),
+		};
+	});
+
+	afterEach(() => {
+		(globalThis as Record<string, unknown>).window = origWindow;
+		globalThis.fetch = origFetch;
+		vi.restoreAllMocks();
+	});
+
+	it("generates and persists a 64-char hex wanderer_device_token", () => {
+		const token1 = getOrCreateDeviceToken();
+		expect(token1).toMatch(/^[0-9a-f]{64}$/);
+		expect(store.wanderer_device_token).toBe(token1);
+
+		const token2 = getOrCreateDeviceToken();
+		expect(token2).toBe(token1);
+	});
+
+	it("exposes all 5 temporary categories (including positive green deer) and 3 permanent landmarks", () => {
+		const temp = REPORT_CATEGORIES.filter((c) => !c.isPermanent);
+		const perm = REPORT_CATEGORIES.filter((c) => c.isPermanent);
+		expect(temp.map((c) => c.category)).toEqual([
+			"bear",
+			"shepherd_dogs",
+			"fallen_tree_terrain",
+			"ice_mud",
+			"deer",
+		]);
+		expect(perm.map((c) => c.category)).toEqual(["spring", "viewpoint", "shelter"]);
+
+		const deerMeta = getReportCategoryMeta("deer");
+		expect(deerMeta.kind).toBe("wildlife_good");
+		expect(deerMeta.isPermanent).toBe(false);
+		expect(getReportCategoryMeta("spring").isPermanent).toBe(true);
+	});
+
+	it("evaluates report visibility for temporary TTL vs permanent seasonal landmarks", () => {
+		const now = Date.parse("2026-11-17T18:00:00Z");
+
+		const activeBear = {
+			id: "r-bear",
+			trailId: "t1",
+			category: "bear" as const,
+			kind: "hazard",
+			isPermanent: false,
+			conditionStatus: "active" as const,
+			note: "Urs pe potecă",
+			lat: 45.45,
+			lon: 25.55,
+			ele: 1200,
+			alongTrackM: 450,
+			confirmCount: 2,
+			dismissCount: 0,
+			createdAt: "2026-11-17T17:30:00Z",
+			lastConfirmedAt: "2026-11-17T17:45:00Z",
+			expiresAt: "2026-11-17T20:45:00Z",
+		};
+		expect(isReportVisibleOnMap(activeBear, now)).toBe(true);
+		expect(formatConfirmedAgo(activeBear.lastConfirmedAt, "ro", now)).toBe(
+			"Confirmat acum 15 min",
+		);
+
+		// Expired temporary alert hides automatically
+		expect(
+			isReportVisibleOnMap(
+				{ ...activeBear, expiresAt: "2026-11-17T17:59:00Z" },
+				now,
+			),
+		).toBe(false);
+
+		// Resolved temporary alert hides immediately
+		expect(
+			isReportVisibleOnMap({ ...activeBear, conditionStatus: "resolved" }, now),
+		).toBe(false);
+
+		// Permanent spring with seasonal dry_or_closed status never expires and remains visible
+		const drySpring = {
+			...activeBear,
+			id: "r-spring",
+			category: "spring" as const,
+			kind: "landmark_permanent",
+			isPermanent: true,
+			conditionStatus: "dry_or_closed" as const,
+			expiresAt: null,
+		};
+		expect(isReportVisibleOnMap(drySpring, now + 90 * 86_400_000)).toBe(true);
+		expect(
+			mergeReportIntoList([activeBear], {
+				...activeBear,
+				conditionStatus: "resolved",
+			}),
+		).toEqual([]);
+	});
+
+	it("sends X-Device-Token across heartbeat, summary, report vote, SOS, and Web Push endpoints", async () => {
+		const calls: Array<{ url: string; method: string; token: string | null; body: unknown }> =
+			[];
+
+		globalThis.fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+			const url = String(input);
+			const headers = new Headers(init?.headers);
+			const body = init?.body ? JSON.parse(String(init.body)) : null;
+			calls.push({
+				url,
+				method: init?.method ?? "GET",
+				token: headers.get("X-Device-Token"),
+				body,
+			});
+
+			if (url === "/api/v1/live/heartbeat") {
+				return new Response(
+					JSON.stringify({
+						activeHikers30m: 4,
+						reports: [
+							{
+								id: "rep-1",
+								trailId: "trail-1",
+								category: "spring",
+								kind: "landmark_permanent",
+								isPermanent: true,
+								conditionStatus: "active",
+								note: "Apă rece",
+								lat: 45.45,
+								lon: 25.55,
+								ele: 1100,
+								alongTrackM: 320,
+								confirmCount: 3,
+								dismissCount: 0,
+								createdAt: "2026-11-17T17:00:00Z",
+								lastConfirmedAt: "2026-11-17T17:10:00Z",
+								expiresAt: null,
+							},
+						],
+						sosAlerts: [],
+					}),
+					{ status: 200, headers: { "content-type": "application/json" } },
+				);
+			}
+			if (url === "/api/v1/live/trail/trail-1/summary") {
+				return new Response(
+					JSON.stringify({
+						trailId: "trail-1",
+						activeHikers30m: 4,
+						reports: [],
+						sosAlerts: [],
+					}),
+					{ status: 200, headers: { "content-type": "application/json" } },
+				);
+			}
+			if (url === "/api/v1/live/reports") {
+				return new Response(
+					JSON.stringify({
+						report: {
+							id: "rep-bear-1",
+							trailId: "trail-1",
+							category: "bear",
+							kind: "hazard",
+							isPermanent: false,
+							conditionStatus: "active",
+							note: "Urme proaspete",
+							lat: 45.451,
+							lon: 25.551,
+							ele: 1140,
+							alongTrackM: 600,
+							confirmCount: 1,
+							dismissCount: 0,
+							createdAt: "2026-11-17T17:30:00Z",
+							lastConfirmedAt: "2026-11-17T17:30:00Z",
+							expiresAt: "2026-11-17T20:30:00Z",
+						},
+					}),
+					{ status: 200, headers: { "content-type": "application/json" } },
+				);
+			}
+			if (url === "/api/v1/live/reports/rep-1/vote") {
+				return new Response(
+					JSON.stringify({
+						report: {
+							id: "rep-1",
+							trailId: "trail-1",
+							category: "spring",
+							kind: "landmark_permanent",
+							isPermanent: true,
+							conditionStatus: "dry_or_closed",
+							note: "Apă rece",
+							lat: 45.45,
+							lon: 25.55,
+							ele: 1100,
+							alongTrackM: 320,
+							confirmCount: 3,
+							dismissCount: 0,
+							createdAt: "2026-11-17T17:00:00Z",
+							lastConfirmedAt: "2026-11-17T17:35:00Z",
+							expiresAt: null,
+						},
+					}),
+					{ status: 200, headers: { "content-type": "application/json" } },
+				);
+			}
+			if (url === "/api/v1/live/sos") {
+				return new Response(
+					JSON.stringify({
+						sos: {
+							id: "sos-99",
+							trailId: "trail-1",
+							status: "active",
+							reason: "injury",
+							message: "Entorsă gleznă",
+							requesterName: "Andrei",
+							lat: 45.452,
+							lon: 25.552,
+							ele: 1320,
+							responderCount: 0,
+							nearestEtaSec: null,
+							nearestDistanceM: null,
+							isMine: true,
+							amResponding: false,
+							createdAt: "2026-11-17T17:40:00Z",
+							expiresAt: "2026-11-17T23:40:00Z",
+						},
+					}),
+					{ status: 200, headers: { "content-type": "application/json" } },
+				);
+			}
+			if (url === "/api/v1/live/sos/sos-other/respond") {
+				return new Response(
+					JSON.stringify({
+						sos: {
+							id: "sos-other",
+							trailId: "trail-1",
+							status: "active",
+							reason: "lost",
+							message: "",
+							requesterName: "Elena",
+							lat: 45.46,
+							lon: 25.56,
+							ele: 1400,
+							responderCount: 1,
+							nearestEtaSec: 780,
+							nearestDistanceM: 920,
+							isMine: false,
+							amResponding: true,
+							createdAt: "2026-11-17T17:40:00Z",
+							expiresAt: "2026-11-17T23:40:00Z",
+						},
+					}),
+					{ status: 200, headers: { "content-type": "application/json" } },
+				);
+			}
+			if (url === "/api/v1/live/sos/sos-99") {
+				return new Response(
+					JSON.stringify({
+						sos: {
+							id: "sos-99",
+							status: "resolved",
+						},
+					}),
+					{ status: 200, headers: { "content-type": "application/json" } },
+				);
+			}
+			if (url === "/api/v1/live/push/vapid-public-key") {
+				return new Response(JSON.stringify({ publicKey: "BEl62iUYgUivxIkv69yViEuiBIa-Ib9-SkvMeAtA3LFgDzkrxZJjSgSnfckjBJuBkr3qBUYIHBQFLXYp5Nksh8U" }), {
+					status: 200,
+					headers: { "content-type": "application/json" },
+				});
+			}
+			if (url === "/api/v1/live/push/subscribe") {
+				return new Response(JSON.stringify({ ok: true }), {
+					status: 200,
+					headers: { "content-type": "application/json" },
+				});
+			}
+			// Fallback HTML (simulates unmocked route in Playwright harness)
+			return new Response("<!doctype html><html></html>", {
+				status: 200,
+				headers: { "content-type": "text/html" },
+			});
+		}) as unknown as typeof fetch;
+
+		const hb = await sendHeartbeat({
+			trailId: "trail-1",
+			lat: 45.45,
+			lon: 25.55,
+			ele: 1100,
+			inNavigation: true,
+		});
+		expect(hb?.activeHikers30m).toBe(4);
+		expect(hb?.reports).toHaveLength(1);
+
+		const sum = await fetchTrailLiveSummary("trail-1");
+		expect(sum?.activeHikers30m).toBe(4);
+
+		const created = await createReport({
+			trailId: "trail-1",
+			category: "bear",
+			note: "Urme proaspete",
+			lat: 45.451,
+			lon: 25.551,
+			ele: 1140,
+			alongTrackM: 600,
+		});
+		expect(created?.id).toBe("rep-bear-1");
+		expect(hasVotedOnReport("rep-bear-1")).toBe(true);
+
+		const voted = await voteReport("rep-1", "seasonal_dry");
+		expect(voted?.conditionStatus).toBe("dry_or_closed");
+		expect(hasVotedOnReport("rep-1")).toBe(true);
+
+		const mySos = await triggerSos({
+			trailId: "trail-1",
+			reason: "injury",
+			message: "Entorsă gleznă",
+			requesterName: "Andrei",
+			lat: 45.452,
+			lon: 25.552,
+			ele: 1320,
+		});
+		expect(mySos?.isMine).toBe(true);
+
+		// Even if an SSE broadcast arrives with isMine: false, knownMySosIds preserves isMine === true!
+		const sseMerged = normalizeSosDto({
+			id: "sos-99",
+			trailId: "trail-1",
+			status: "active",
+			reason: "injury",
+			responderCount: 2,
+			nearestDistanceM: 450,
+			nearestEtaSec: 360,
+			isMine: false,
+		});
+		expect(sseMerged?.isMine).toBe(true);
+		expect(sseMerged?.responderCount).toBe(2);
+
+		const respSos = await respondToSos("sos-other", {
+			status: "coming",
+			lat: 45.45,
+			lon: 25.55,
+			ele: 1100,
+			distanceM: 920.4,
+			etaSec: 780.2,
+		});
+		expect(respSos?.amResponding).toBe(true);
+
+		const resolved = await updateSos("sos-99", { status: "resolved" });
+		expect(mergeSosIntoList([mySos!], resolved!)).toEqual([]);
+
+		// Non-JSON HTML fallback returns null gracefully without throwing
+		const htmlFallback = await fetchTrailLiveSummary("unmocked-trail");
+		expect(htmlFallback).toBeNull();
+
+		// Every call carried the exact same 64-char X-Device-Token
+		const token = getOrCreateDeviceToken();
+		for (const c of calls) {
+			expect(c.token).toBe(token);
+		}
+
+		// Verify base64url VAPID helper + Web Push subscription flow
+		const keyBytes = urlBase64ToUint8Array("BEl62iUYgUivxIkv69yViEuiBIa-Ib9-SkvMeAtA3LFgDzkrxZJjSgSnfckjBJuBkr3qBUYIHBQFLXYp5Nksh8U");
+		expect(keyBytes.byteLength).toBe(65);
+
+		const mockNotification = {
+			permission: "granted",
+			requestPermission: vi.fn().mockResolvedValue("granted"),
+		};
+		(globalThis.window as unknown as Record<string, unknown>).PushManager = class {};
+		(globalThis.window as unknown as Record<string, unknown>).Notification = mockNotification;
+		(globalThis as unknown as Record<string, unknown>).Notification = mockNotification;
+		const origNav = globalThis.navigator;
+		Object.defineProperty(globalThis, "navigator", {
+			configurable: true,
+			value: {
+				serviceWorker: {
+					register: vi.fn().mockResolvedValue({
+						pushManager: {
+							getSubscription: vi.fn().mockResolvedValue(null),
+							subscribe: vi.fn().mockResolvedValue({
+								toJSON: () => ({
+									endpoint: "https://push.example.test/sub/1",
+									keys: { p256dh: "k-p256dh", auth: "k-auth" },
+								}),
+							}),
+						},
+					}),
+					ready: Promise.resolve({}),
+				},
+			},
+		});
+		try {
+			const pushResult = await subscribeWebPushIfSupported(45.45, 25.55, "trail-1");
+			expect(pushResult).toBe("subscribed");
+			expect(calls.some((c) => c.url === "/api/v1/live/push/subscribe")).toBe(true);
+		} finally {
+			Object.defineProperty(globalThis, "navigator", {
+				configurable: true,
+				value: origNav,
+			});
+			delete (globalThis as Record<string, unknown>).Notification;
+		}
+	});
+
+	it("connects EventSource with deviceToken query param and parses SSE report_update & sos_update", () => {
+		const origES = globalThis.EventSource;
+		const instances: Array<{
+			url: string;
+			listeners: Record<string, EventListener>;
+			onerror: (() => void) | null;
+			closed: boolean;
+		}> = [];
+
+		(globalThis as Record<string, unknown>).EventSource = class {
+			url: string;
+			listeners: Record<string, EventListener> = {};
+			onerror: (() => void) | null = null;
+			closed = false;
+			constructor(url: string) {
+				this.url = url;
+				instances.push(this);
+			}
+			addEventListener(type: string, fn: EventListener) {
+				this.listeners[type] = fn;
+			}
+			close() {
+				this.closed = true;
+			}
+		};
+
+		try {
+			const receivedReports: string[] = [];
+			const receivedSos: string[] = [];
+			const handle = connectLiveStream({
+				trailId: "trail-sse",
+				lat: 45.45,
+				lon: 25.55,
+				callbacks: {
+					onReportUpdate: (r) => receivedReports.push(r.id),
+					onSosUpdate: (s) => receivedSos.push(s.id),
+				},
+			});
+
+			expect(instances).toHaveLength(1);
+			expect(instances[0].url).toContain("trailId=trail-sse");
+			expect(instances[0].url).toContain(`deviceToken=${getOrCreateDeviceToken()}`);
+
+			instances[0].listeners.report_update({
+				data: JSON.stringify({
+					report: {
+						id: "r-sse-1",
+						category: "deer",
+						lat: 45.45,
+						lon: 25.55,
+					},
+				}),
+			} as unknown as Event);
+
+			instances[0].listeners.sos_update({
+				data: JSON.stringify({
+					sos: {
+						id: "sos-sse-1",
+						status: "active",
+						reason: "lost",
+						lat: 45.46,
+						lon: 25.56,
+					},
+				}),
+			} as unknown as Event);
+
+			expect(receivedReports).toEqual(["r-sse-1"]);
+			expect(receivedSos).toEqual(["sos-sse-1"]);
+
+			handle.close();
+			expect(instances[0].closed).toBe(true);
+		} finally {
+			(globalThis as Record<string, unknown>).EventSource = origES;
+		}
+	});
+});
+
+describe("computeDirectRescueRoute (DEM A* to SOS victim)", () => {
+	it("contours around a steep 45° cliff ridge directly to the SOS target and scales to 3.5 km rescue radius", () => {
+		const responder = offsetLatLon(0, 0);
+		const victim = offsetLatLon(0, 220);
+
+		// Steep 45° cliff wall blocking direct North path (east in [-90..90], north in [80..130])
+		const cliffSampler = (lat: number, lon: number): number => {
+			const e = (lon - BASE_LON) * M_PER_DEG_LON;
+			const n = (lat - BASE_LAT) * M_PER_DEG_LAT;
+			if (e >= -90 && e <= 90 && n >= 80 && n <= 130) {
+				const distEdge = Math.min(n - 80, 130 - n);
+				return 1100 + Math.min(55, distEdge * 2.3);
+			}
+			return 1100 + (n / 220) * 18;
+		};
+
+		const route = computeDirectRescueRoute({
+			fromLat: responder.lat,
+			fromLon: responder.lon,
+			fromEle: 1100,
+			targetLat: victim.lat,
+			targetLon: victim.lon,
+			targetEle: 1118,
+			sampler: cliffSampler,
+			mode: "min-climb",
+			locale: "ro",
+		});
+
+		expect(route.points.length).toBeGreaterThan(2);
+		expect(route.maxSlopeDeg).toBeLessThan(37);
+		expect(route.avoidedSteepHazard).toBe(true);
+		expect(route.distanceM).toBeGreaterThan(220);
+		expect(route.estimatedSeconds).toBeGreaterThan(100);
+		expect(route.instruction).toContain("SOS");
+
+		// Verify 3.5 km SOS rescue distance reaches exact victim coordinates without grid boundary clipping
+		const farVictim = offsetLatLon(2400, 2500); // ~3,465 m away
+		const farRoute = computeDirectRescueRoute({
+			fromLat: responder.lat,
+			fromLon: responder.lon,
+			fromEle: 1000,
+			targetLat: farVictim.lat,
+			targetLon: farVictim.lon,
+			targetEle: 1350,
+			sampler: () => null,
+			mode: "min-climb",
+			locale: "ro",
+		});
+
+		expect(farRoute.distanceM).toBeGreaterThan(3350);
+		expect(farRoute.ascentM).toBeGreaterThan(300);
+		const endPt = farRoute.points[farRoute.points.length - 1];
+		expect(endPt.lat).toBeCloseTo(farVictim.lat, 5);
+		expect(endPt.lon).toBeCloseTo(farVictim.lon, 5);
+		expect(endPt.ele).toBeCloseTo(1350, 1);
+	});
+});

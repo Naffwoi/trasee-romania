@@ -23,6 +23,7 @@ import (
 	"pocketbase/hooks"
 	"pocketbase/pluginsystem"
 	"pocketbase/routes"
+	"pocketbase/services/live"
 	"pocketbase/services/regions"
 
 	_ "pocketbase/migrations"
@@ -446,9 +447,18 @@ func registerRoutes(se *core.ServeEvent, client meilisearch.ServiceManager) {
 	// superuser-bound registrations above (RegionArchiveDelete,
 	// RegionSyncStart, RegionSyncStatus).
 	se.Router.GET("/regions/{id}/geometry", routes.RegionGeometryGet).Bind(apis.RequireSuperuserAuth())
+
+	// Internal-only Trail Live Community endpoints (/live/*), gated by
+	// X-Internal-Secret from the SvelteKit /api/v1/live/* proxy.
+	routes.RegisterTrailLiveRoutes(se, live.DefaultHub())
 }
 
 func registerCronJobs(app core.App, client meilisearch.ServiceManager) {
+	app.Cron().MustAdd("trail-live-gc", "*/2 * * * *", func() {
+		if err := routes.RunTrailLiveGC(app, live.DefaultHub(), time.Now().UTC()); err != nil {
+			app.Logger().Error("trail-live-gc failed", "error", err)
+		}
+	})
 	schedule := os.Getenv("POCKETBASE_CRON_SYNC_SCHEDULE")
 	if len(schedule) == 0 {
 		schedule = "0 2 * * *"

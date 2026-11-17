@@ -40,12 +40,13 @@ import { json, type RequestEvent } from '@sveltejs/kit';
  */
 export async function GET(event: RequestEvent) {
     try {
-        if (!event.locals.pb.authStore.record) {
+        const customTileUrl = TILE_SERVER_URL?.trim();
+        if (!event.locals.pb.authStore.record && !customTileUrl) {
             return json({ message: "Unauthorized" }, { status: 401 });
         }
 
         // An empty value (e.g. `TILE_SERVER_URL=` in a compose file) counts as unset.
-        const tileUrl = TILE_SERVER_URL?.trim()
+        const tileUrl = customTileUrl
             || `https://api.protomaps.com/tiles/v4/{z}/{x}/{y}.mvt?key=${PROTOMAPS_API_KEY ?? ''}`;
 
         const assetsBase = (MAP_ASSETS_URL?.trim() || "https://protomaps.github.io/basemaps-assets")

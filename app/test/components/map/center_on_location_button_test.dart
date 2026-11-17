@@ -16,9 +16,10 @@ void main() {
   testWidgets(
     'CenterOnLocationButton cycles freeTracking -> followNorthUp -> followHeadingUp -> followNorthUp',
     (tester) async {
-      final posController = StreamController<LocationMarkerPosition?>.broadcast();
+      final posController =
+          StreamController<LocationMarkerPosition?>.broadcast(sync: true);
       final compassController =
-          StreamController<CompassHeadingReading?>.broadcast();
+          StreamController<CompassHeadingReading?>.broadcast(sync: true);
       final modeNotifier = ValueNotifier(LocationTrackingMode.freeTracking);
 
       addTearDown(() async {
@@ -61,10 +62,14 @@ void main() {
       compassController.add(const CompassHeadingReading(heading: 95));
       await tester.pump();
 
+      expect(
+        tester.widget<IconButton>(find.byType(IconButton)).onPressed,
+        isNotNull,
+      );
       expect(modeNotifier.value, LocationTrackingMode.freeTracking);
       expect(
-        tester.widget<FaIcon>(find.byType(FaIcon)).icon,
-        FontAwesomeIcons.locationCrosshairs,
+        tester.widget<FaIcon>(find.byType(FaIcon)).icon?.codePoint,
+        FontAwesomeIcons.locationCrosshairs.codePoint,
       );
 
       // Tap 1 -> followNorthUp (active blue crosshairs)
@@ -72,7 +77,10 @@ void main() {
       await tester.pump();
       expect(modeNotifier.value, LocationTrackingMode.followNorthUp);
       var faIcon = tester.widget<FaIcon>(find.byType(FaIcon));
-      expect(faIcon.icon, FontAwesomeIcons.locationCrosshairs);
+      expect(
+        faIcon.icon?.codePoint,
+        FontAwesomeIcons.locationCrosshairs.codePoint,
+      );
       expect(faIcon.color, kGoogleMapsBlue);
 
       // Tap 2 -> followHeadingUp (switches icon to blue locationArrow)
@@ -80,7 +88,7 @@ void main() {
       await tester.pump();
       expect(modeNotifier.value, LocationTrackingMode.followHeadingUp);
       faIcon = tester.widget<FaIcon>(find.byType(FaIcon));
-      expect(faIcon.icon, FontAwesomeIcons.locationArrow);
+      expect(faIcon.icon?.codePoint, FontAwesomeIcons.locationArrow.codePoint);
       expect(faIcon.color, kGoogleMapsBlue);
 
       // Tap 3 -> followNorthUp
@@ -88,7 +96,10 @@ void main() {
       await tester.pump();
       expect(modeNotifier.value, LocationTrackingMode.followNorthUp);
       faIcon = tester.widget<FaIcon>(find.byType(FaIcon));
-      expect(faIcon.icon, FontAwesomeIcons.locationCrosshairs);
+      expect(
+        faIcon.icon?.codePoint,
+        FontAwesomeIcons.locationCrosshairs.codePoint,
+      );
       expect(faIcon.color, kGoogleMapsBlue);
     },
   );
@@ -96,9 +107,10 @@ void main() {
   testWidgets(
     'CenterOnLocationButton stays in followNorthUp when no heading is available',
     (tester) async {
-      final posController = StreamController<LocationMarkerPosition?>.broadcast();
+      final posController =
+          StreamController<LocationMarkerPosition?>.broadcast(sync: true);
       final compassController =
-          StreamController<CompassHeadingReading?>.broadcast();
+          StreamController<CompassHeadingReading?>.broadcast(sync: true);
       final modeNotifier = ValueNotifier(LocationTrackingMode.freeTracking);
 
       addTearDown(() async {
@@ -136,6 +148,10 @@ void main() {
         ),
       );
       await tester.pump();
+      expect(
+        tester.widget<IconButton>(find.byType(IconButton)).onPressed,
+        isNotNull,
+      );
 
       await tester.tap(find.byType(IconButton));
       await tester.pump();

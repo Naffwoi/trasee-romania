@@ -2303,6 +2303,27 @@ abstract class AppLocalizations {
   /// In en, this message translates to:
   /// **'Remove all recent searches?'**
   String get clear_search_history_confirm;
+
+  bool get _isRo => localeName.startsWith('ro');
+
+  String get nav_remaining => _isRo ? 'Rămas' : 'Remaining';
+
+  String get nav_arrival => _isRo ? 'Sosire' : 'Arrival';
+
+  String get nav_climb_left => _isRo ? 'Urcare rămasă' : 'Climb left';
+
+  String get nav_off_trail_title => _isRo ? 'În afara traseului' : 'Off trail';
+
+  String nav_rejoin_in(String distance) =>
+      _isRo ? 'Revenire în $distance' : 'Rejoin in $distance';
+
+  String get nav_min_climb => _isRo ? 'Urcare minimă' : 'Min climb';
+
+  String get nav_shortest_path => _isRo ? 'Drum minim' : 'Shortest safe';
+
+  String nav_next_summit(String elevation, String distance) => _isRo
+      ? 'Vârf $elevation · peste $distance'
+      : 'Peak $elevation · in $distance';
 }
 
 class _AppLocalizationsDelegate

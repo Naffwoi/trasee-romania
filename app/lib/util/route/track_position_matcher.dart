@@ -1,5 +1,27 @@
+import 'dart:math' as math;
+
 import 'package:maplibre/maplibre.dart';
 import 'package:wanderer/util/route/map_matcher.dart';
+
+/// Rich match state returned by [TrackPositionMatcher.matchDetailed], including
+/// global cross-track distance and 3-fix hysteresis off-trail tracking.
+class TrackMatchDetail {
+  const TrackMatchDetail({
+    required this.isOffTrail,
+    required this.alongTrackMeters,
+    required this.crossTrackMeters,
+    required this.matchedPoint,
+    required this.segmentIndex,
+    required this.consecutiveOffTrailFixes,
+  });
+
+  final bool isOffTrail;
+  final double alongTrackMeters;
+  final double crossTrackMeters;
+  final Geographic matchedPoint;
+  final int segmentIndex;
+  final int consecutiveOffTrailFixes;
+}
 
 /// Resolves live GPS fixes to a distance along a GPX track in that track's
 /// OWN cumulative-metre coordinate — the elevation chart's x-axis (see
@@ -16,6 +38,9 @@ class TrackPositionMatcher {
     required List<Geographic> shape,
     required List<double> cumulativeMeters,
     this.onTrackThresholdMeters = 50.0,
+    this.offTrailEntryFloorMeters = 35.0,
+    this.offTrailRejoinMeters = 22.0,
+    this.offTrailConfirmFixes = 3,
   }) : assert(
          shape.length == cumulativeMeters.length,
          'shape and cumulativeMeters must be the same length',
@@ -39,6 +64,25 @@ class TrackPositionMatcher {
   /// [RouteMapMatcher.offRouteCrossTrackThresholdMeters] (40 m) plus slack;
   /// a discretionary choice, not a derived constant.
   final double onTrackThresholdMeters;
+
+  /// Minimum cross-track threshold (metres) before off-trail hysteresis counts
+  /// a fix as off-trail (`max(offTrailEntryFloorMeters, 1.5 * accuracy)`).
+  final double offTrailEntryFloorMeters;
+
+  /// Cross-track threshold (metres) at or below which an off-trail user is
+  /// considered back on the trail (`<= 22.0 m`).
+  final double offTrailRejoinMeters;
+
+  /// Consecutive fixes exceeding the entry threshold required to flip into
+  /// off-trail mode (`3`).
+  final int offTrailConfirmFixes;
+
+  bool _isOffTrail = false;
+  int _consecutiveOffTrailFixes = 0;
+  bool _hasValidMatch = false;
+  double _lastValidAlongTrack = 0.0;
+  int _lastValidSegmentIndex = 0;
+  Geographic? _lastValidPoint;
 
   /// Feeds one GPS fix into the underlying matcher and returns the along-
   /// track distance (chart x-axis units) when [pos] is within
@@ -72,6 +116,136 @@ class TrackPositionMatcher {
     );
     final distance = SphericalGreatCircle(matched).distanceTo(pos);
     return distance <= onTrackThresholdMeters ? result.alongTrackMeters : null;
+  }
+
+  /// Feeds one GPS fix into both the HMM matcher and a global nearest-segment
+  /// cross-track check, applying 3-fix off-trail hysteresis (`max(35.0,
+  /// 1.5 * accuracy)` entry, `<= 22.0 m` exit).
+  TrackMatchDetail? matchDetailed(
+    Geographic pos, {
+    double? heading,
+    double? headingAccuracy,
+    double? speed,
+    double? accuracy,
+  }) {
+    if (_shape.length < 2 || _cumulative.length < 2) return null;
+
+    final hmm = _matcher.update(
+      pos: pos,
+      heading: heading,
+      headingAccuracy: headingAccuracy,
+      speed: speed,
+      accuracy: accuracy,
+    );
+    final hmmPoint = pointAtAlongTrack(hmm.alongTrackMeters, hmm.shapeIndex);
+    final hmmCrossTrack = SphericalGreatCircle(hmmPoint).distanceTo(pos);
+
+    final nearest = _globalNearest(pos);
+    final effAcc =
+        (accuracy != null && accuracy.isFinite && accuracy > 0) ? accuracy : 0.0;
+    final entryThreshold = math.max(offTrailEntryFloorMeters, 1.5 * effAcc);
+
+    if (!_isOffTrail) {
+      if (nearest.crossTrackMeters > entryThreshold) {
+        _consecutiveOffTrailFixes++;
+        if (_consecutiveOffTrailFixes >= offTrailConfirmFixes) {
+          _isOffTrail = true;
+        }
+      } else {
+        _consecutiveOffTrailFixes = 0;
+        if (hmmCrossTrack <= onTrackThresholdMeters) {
+          _hasValidMatch = true;
+          _lastValidAlongTrack = hmm.alongTrackMeters;
+          _lastValidSegmentIndex = hmm.shapeIndex;
+          _lastValidPoint = hmmPoint;
+        } else {
+          _hasValidMatch = true;
+          _lastValidAlongTrack = nearest.alongTrackMeters;
+          _lastValidSegmentIndex = nearest.segmentIndex;
+          _lastValidPoint = nearest.point;
+        }
+      }
+    } else {
+      if (nearest.crossTrackMeters <= offTrailRejoinMeters) {
+        _isOffTrail = false;
+        _consecutiveOffTrailFixes = 0;
+        _hasValidMatch = true;
+        _lastValidAlongTrack = nearest.alongTrackMeters;
+        _lastValidSegmentIndex = nearest.segmentIndex;
+        _lastValidPoint = nearest.point;
+      } else {
+        _consecutiveOffTrailFixes++;
+      }
+    }
+
+    final reportedAlong = _hasValidMatch
+        ? _lastValidAlongTrack
+        : nearest.alongTrackMeters;
+    final reportedSeg = _hasValidMatch
+        ? _lastValidSegmentIndex
+        : nearest.segmentIndex;
+    final reportedPoint = _hasValidMatch
+        ? (_lastValidPoint ?? nearest.point)
+        : nearest.point;
+
+    return TrackMatchDetail(
+      isOffTrail: _isOffTrail,
+      alongTrackMeters: reportedAlong,
+      crossTrackMeters: nearest.crossTrackMeters,
+      matchedPoint: reportedPoint,
+      segmentIndex: reportedSeg,
+      consecutiveOffTrailFixes: _consecutiveOffTrailFixes,
+    );
+  }
+
+  ({
+    double crossTrackMeters,
+    double alongTrackMeters,
+    int segmentIndex,
+    Geographic point,
+  })
+  _globalNearest(Geographic pos) {
+    const metersPerDegree = 111320.0;
+    var bestApproxSq = double.infinity;
+    var bestSeg = 0;
+    var bestT = 0.0;
+
+    for (var i = 0; i < _shape.length - 1; i++) {
+      final a = _shape[i];
+      final b = _shape[i + 1];
+      final midLatRad = ((a.lat + b.lat) / 2.0) * math.pi / 180.0;
+      final cosMidLat = math.cos(midLatRad);
+
+      final abX = (b.lon - a.lon) * metersPerDegree * cosMidLat;
+      final abY = (b.lat - a.lat) * metersPerDegree;
+      final apX = (pos.lon - a.lon) * metersPerDegree * cosMidLat;
+      final apY = (pos.lat - a.lat) * metersPerDegree;
+
+      final segLenSq = abX * abX + abY * abY;
+      final t = segLenSq <= 0.0
+          ? 0.0
+          : ((apX * abX + apY * abY) / segLenSq).clamp(0.0, 1.0);
+
+      final footX = apX - t * abX;
+      final footY = apY - t * abY;
+      final dSq = footX * footX + footY * footY;
+      if (dSq < bestApproxSq) {
+        bestApproxSq = dSq;
+        bestSeg = i;
+        bestT = t;
+      }
+    }
+
+    final segLen = _cumulative[bestSeg + 1] - _cumulative[bestSeg];
+    final along = _cumulative[bestSeg] + bestT * segLen;
+    final pt = pointAtAlongTrack(along, bestSeg);
+    final dist = SphericalGreatCircle(pt).distanceTo(pos);
+    return (
+      crossTrackMeters: dist,
+      alongTrackMeters: along,
+      segmentIndex: bestSeg,
+      point: pt,
+    );
   }
 
   /// The point on the shape's polyline at [alongTrackMeters], interpolated

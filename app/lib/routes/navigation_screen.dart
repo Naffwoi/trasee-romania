@@ -1,10 +1,11 @@
 import 'package:wanderer/components/map/map_ui_controls.dart';
 import 'dart:async';
 import 'dart:convert';
-import 'dart:math' show exp, pi;
+import 'dart:math' show exp, max, min, pi;
 import 'dart:ui' show lerpDouble;
 
 import 'package:collection/collection.dart';
+import 'package:fl_chart/fl_chart.dart' show FlSpot;
 import 'package:flutter/material.dart';
 import 'package:flutter/scheduler.dart' show Ticker;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -52,6 +53,10 @@ import 'package:wanderer/util/gpx/conversion.dart' show serializeGpxToXml;
 import 'package:wanderer/util/gpx/gpx.dart';
 import 'package:wanderer/util/region/proxy_style_rewriter.dart';
 import 'package:wanderer/util/geo/polyline.dart';
+import 'package:wanderer/util/map/heading_math.dart' show shortestAngleDelta;
+import 'package:wanderer/util/navigation/dem_tile_grid.dart';
+import 'package:wanderer/util/navigation/eta_calculator.dart';
+import 'package:wanderer/util/navigation/off_trail_router.dart';
 import 'package:wanderer/util/route/planner_handoff.dart';
 import 'package:wanderer/util/route/track_position_matcher.dart';
 import 'package:wanderer/models/route_travel_bucket.dart';
@@ -253,6 +258,9 @@ class _NavigationScreenState extends ConsumerState<NavigationScreen>
   /// mode (the chart is the breadcrumb, the user is always at its end),
   /// while the trail is loading, or when the trail has no plottable track.
   TrackPositionMatcher? _trackMatcher;
+  EtaCalculator? _etaCalculator;
+  List<NavTrackPoint> _navTrackPoints = const [];
+  final DemTileGrid _demGrid = DemTileGrid();
 
   /// Latest on-track along-track metres for the elevation chart's live
   /// marker, null = off-track/unknown. A [ValueNotifier], like
@@ -260,6 +268,20 @@ class _NavigationScreenState extends ConsumerState<NavigationScreen>
   /// the whole screen — [ValueNotifier] skips notification when the value
   /// is unchanged, so a run of nulls is free.
   final ValueNotifier<double?> _liveTrackMeters = ValueNotifier(null);
+  final ValueNotifier<EtaSnapshot?> _etaNotifier = ValueNotifier(null);
+  final ValueNotifier<OffTrailRerouteResult?> _offTrailNotifier = ValueNotifier(
+    null,
+  );
+  final ValueNotifier<List<FlSpot>?> _offTrailChartSpots = ValueNotifier(null);
+  OffTrailMode _offTrailMode = OffTrailMode.minClimb;
+  ml.Geographic? _lastRerouteCalcPos;
+  OffTrailMode? _lastRerouteCalcMode;
+  DateTime? _lastRerouteCalcAt;
+  double? _lastMatchedAlongTrackM;
+  double? _lastKnownAltitudeM;
+  bool _didAutoExpandSheet = false;
+  bool _demFallbackPrefetchStarted = false;
+  String _localeCode = 'ro';
 
   /// Short per-fix position tween smoothing the marker/camera between raw GPS
   /// fixes — mirrors the 200ms `fastOutSlowIn` `flutter_map_location_marker`'s
@@ -355,6 +377,10 @@ class _NavigationScreenState extends ConsumerState<NavigationScreen>
   static const _kSheetMinSize = 0.2;
   static const _kSheetStatsSize = 0.3;
   static const _kSheetElevationSize = 0.45;
+  static const _kNavSheetElevationSize = 0.52;
+
+  double get _elevationSheetSize =>
+      widget.isRecording ? _kSheetElevationSize : _kNavSheetElevationSize;
 
   ml.MapController? _controller;
 
@@ -410,6 +436,8 @@ class _NavigationScreenState extends ConsumerState<NavigationScreen>
   void initState() {
     super.initState();
 
+    _showingElevation = !widget.isRecording;
+    _sheetAtElevationSize = !widget.isRecording;
     WidgetsBinding.instance.addObserver(this);
 
     _store = ref.read(objectBoxProvider);
@@ -501,6 +529,18 @@ class _NavigationScreenState extends ConsumerState<NavigationScreen>
     WidgetsBinding.instance.addPostFrameCallback((_) async {
       if (!mounted) return;
       final localizations = AppLocalizations.of(context)!;
+      _localeCode = localizations.localeName;
+      if (!widget.isRecording &&
+          _showingElevation &&
+          !_didAutoExpandSheet &&
+          _sheetController.isAttached) {
+        _didAutoExpandSheet = true;
+        _sheetController.animateTo(
+          _elevationSheetSize,
+          duration: const Duration(milliseconds: 300),
+          curve: Curves.easeOut,
+        );
+      }
       // Awaited (not fire-and-forget) purely so the rewrite below can never
       // reconfigure the service before it has been configured.
       await _positionSource.start(
@@ -524,7 +564,7 @@ class _NavigationScreenState extends ConsumerState<NavigationScreen>
           .read(trailProvider(widget.id).future)
           .then<Trail?>((trail) => trail, onError: (_) => null);
       if (!mounted || trail == null) return;
-      _initTrackMatcher(trail.expand?.gpx);
+      _initTrailNavigation(trail);
       final name = trail.name;
       if (name.isEmpty) return;
       await _positionSource.setNotificationText(
@@ -549,6 +589,8 @@ class _NavigationScreenState extends ConsumerState<NavigationScreen>
         // is unrelated bookkeeping and must keep running even while frozen,
         // so it's not gated here — only the breadcrumb append is.
         final fix = ml.Geographic(lat: pos.latitude, lon: pos.longitude);
+        final usableAlt = hasUsableAltitude(pos) ? pos.altitude : null;
+        if (usableAlt != null) _lastKnownAltitudeM = usableAlt;
         final advanced = _navNotifier.onPosition(
           fix,
           // `null`, never a fabricated 0, when the fix carries no real
@@ -558,7 +600,7 @@ class _NavigationScreenState extends ConsumerState<NavigationScreen>
           // becomes the anchor. Passing 0 here instead would bake a
           // ~absolute-altitude phantom climb into every saved recording that
           // started from an already-resolved map-marker position.
-          altitude: hasUsableAltitude(pos) ? pos.altitude : null,
+          altitude: usableAlt,
           heading: pos.heading,
           headingAccuracy: pos.headingAccuracy,
           speed: pos.speed,
@@ -571,14 +613,8 @@ class _NavigationScreenState extends ConsumerState<NavigationScreen>
         // marker and the elevation chart's marker never disagree. Not
         // gated on _frozen — a paused user's position is still valid.
         final matcher = _trackMatcher;
-        if (matcher != null) {
-          _liveTrackMeters.value = matcher.update(
-            fix,
-            heading: pos.heading,
-            headingAccuracy: pos.headingAccuracy,
-            speed: pos.speed,
-            accuracy: pos.accuracy,
-          );
+        if (!widget.isRecording && matcher != null) {
+          _handleNavMatchFix(pos, fix, matcher);
         }
         if (advanced) {
           _persistNow();
@@ -599,13 +635,199 @@ class _NavigationScreenState extends ConsumerState<NavigationScreen>
   /// chart plots on. Leaves [_trackMatcher] null (no live marker) when
   /// [gpx] is absent or has fewer than 2 plottable points.
   void _initTrackMatcher(Gpx? gpx) {
-    if (gpx == null) return;
+    if (gpx == null || _trackMatcher != null) return;
     final raw = buildRawTrackPoints(gpx);
     if (raw.length < 2) return;
     _trackMatcher = TrackPositionMatcher(
       shape: raw.map((p) => p.lonlat).toList(growable: false),
       cumulativeMeters: raw.map((p) => p.distanceM).toList(growable: false),
     );
+  }
+
+  void _initTrailNavigation(Trail trail) {
+    final gpx = trail.expand?.gpx;
+    if (gpx == null) return;
+    _initTrackMatcher(gpx);
+    if (_etaCalculator != null) return;
+
+    final navPoints = extractNavTrackPoints(gpx);
+    if (navPoints.length < 2) return;
+    _navTrackPoints = navPoints;
+
+    _trackMatcher ??= TrackPositionMatcher(
+      shape: navPoints.map((p) => p.geographic).toList(growable: false),
+      cumulativeMeters: navPoints
+          .map((p) => p.distanceM)
+          .toList(growable: false),
+    );
+
+    final isCycling =
+        costingForTrail(trail, subcategories: ref.read(subcategoryProvider)) ==
+        'bicycle';
+    final calc = EtaCalculator.fromPoints(navPoints, isCycling: isCycling);
+    _etaCalculator = calc;
+    _etaNotifier.value = calc.compute(0.0);
+
+    unawaited(
+      _demGrid.prefetchCorridor(
+        navPoints.map((p) => p.geographic).toList(growable: false),
+      ),
+    );
+  }
+
+  void _handleNavMatchFix(
+    geo.Position pos,
+    ml.Geographic fix,
+    TrackPositionMatcher matcher,
+  ) {
+    final detail = matcher.matchDetailed(
+      fix,
+      heading: pos.heading,
+      headingAccuracy: pos.headingAccuracy,
+      speed: pos.speed,
+      accuracy: pos.accuracy,
+    );
+    if (detail == null) return;
+
+    _lastMatchedAlongTrackM = detail.alongTrackMeters;
+    _liveTrackMeters.value = detail.alongTrackMeters;
+
+    if (!detail.isOffTrail) {
+      if (_offTrailNotifier.value != null) {
+        _offTrailNotifier.value = null;
+        _offTrailChartSpots.value = null;
+        _lastRerouteCalcPos = null;
+        _lastRerouteCalcMode = null;
+        _lastRerouteCalcAt = null;
+        _demFallbackPrefetchStarted = false;
+        _pushOffTrailSource(null);
+      }
+      _etaCalculator?.recordProgress(detail.alongTrackMeters, DateTime.now());
+      _etaNotifier.value = _etaCalculator?.compute(detail.alongTrackMeters);
+      return;
+    }
+
+    if (!_demFallbackPrefetchStarted &&
+        _demGrid.sampleElevation(fix.lat, fix.lon) == null) {
+      _demFallbackPrefetchStarted = true;
+      unawaited(
+        _demGrid.prefetchCorridor([fix, detail.matchedPoint]).then((_) {
+          if (!mounted || _offTrailNotifier.value == null) return;
+          final curPos = _lastRerouteCalcPos;
+          final curAlong = _lastMatchedAlongTrackM;
+          if (curPos != null && curAlong != null) {
+            _recomputeOffTrailReroute(curPos, curAlong);
+          }
+        }),
+      );
+    }
+
+    final now = DateTime.now();
+    final movedM = _lastRerouteCalcPos == null
+        ? double.infinity
+        : ml.SphericalGreatCircle(_lastRerouteCalcPos!).distanceTo(fix);
+    final elapsedSec = _lastRerouteCalcAt == null
+        ? 999
+        : now.difference(_lastRerouteCalcAt!).inSeconds;
+    final shouldRecompute =
+        _offTrailNotifier.value == null ||
+        _lastRerouteCalcMode != _offTrailMode ||
+        movedM >= 20.0 ||
+        elapsedSec >= 8;
+
+    if (shouldRecompute) {
+      _recomputeOffTrailReroute(fix, detail.alongTrackMeters);
+    } else {
+      final active = _offTrailNotifier.value;
+      _etaNotifier.value = _etaCalculator?.compute(
+        detail.alongTrackMeters,
+        now: now,
+        offTrailDistanceM: active?.distanceM,
+        offTrailDurationSec: active?.estimatedSeconds,
+        offTrailAscentM: active?.ascentM,
+        rejoinAlongTrackM: active?.rejoinAlongTrackM,
+      );
+    }
+  }
+
+  void _recomputeOffTrailReroute(ml.Geographic userPos, double alongTrackM) {
+    if (_navTrackPoints.length < 2) return;
+    final reroute = OffTrailRouter.compute(
+      userPos: userPos,
+      userEleM: _lastKnownAltitudeM,
+      trailPoints: _navTrackPoints,
+      lastAlongTrackM: alongTrackM,
+      sampler: _demGrid.sampleElevation,
+      mode: _offTrailMode,
+      localeCode: _localeCode,
+      isCycling: _etaCalculator?.isCycling ?? false,
+    );
+    final now = DateTime.now();
+    _lastRerouteCalcPos = userPos;
+    _lastRerouteCalcMode = _offTrailMode;
+    _lastRerouteCalcAt = now;
+    _offTrailNotifier.value = reroute;
+    _offTrailChartSpots.value = reroute == null
+        ? null
+        : _buildOffTrailChartSpots(alongTrackM, reroute);
+    _pushOffTrailSource(reroute);
+    _etaNotifier.value = _etaCalculator?.compute(
+      alongTrackM,
+      now: now,
+      offTrailDistanceM: reroute?.distanceM,
+      offTrailDurationSec: reroute?.estimatedSeconds,
+      offTrailAscentM: reroute?.ascentM,
+      rejoinAlongTrackM: reroute?.rejoinAlongTrackM,
+    );
+  }
+
+  List<FlSpot>? _buildOffTrailChartSpots(
+    double alongTrackM,
+    OffTrailRerouteResult reroute,
+  ) {
+    if (_navTrackPoints.length < 2 || reroute.points.length < 2) return null;
+    final maxDist = _navTrackPoints.last.distanceM;
+    if (maxDist <= 0) return null;
+
+    final rejoinX = reroute.rejoinAlongTrackM.clamp(0.0, maxDist);
+    var startX = alongTrackM.clamp(0.0, maxDist);
+    var endX = rejoinX;
+    if ((endX - startX).abs() < 8.0) {
+      final span = min(maxDist * 0.15, max(20.0, reroute.distanceM));
+      if (rejoinX >= span) {
+        startX = rejoinX - span;
+      } else {
+        startX = 0.0;
+        endX = min(maxDist, span);
+      }
+    }
+
+    final totalOffDist = reroute.distanceM > 0 ? reroute.distanceM : 1.0;
+    final spots = <FlSpot>[
+      for (final pt in reroute.points)
+        FlSpot(
+          startX + (endX - startX) * (pt.distanceM / totalOffDist).clamp(0.0, 1.0),
+          pt.ele,
+        ),
+    ];
+    if (spots.length >= 2 && spots.first.x > spots.last.x) {
+      return spots.reversed.toList(growable: false);
+    }
+    return spots;
+  }
+
+  void _selectOffTrailMode(OffTrailMode mode) {
+    if (_offTrailMode == mode) return;
+    _offTrailMode = mode;
+    final pos =
+        _lastRerouteCalcPos ??
+        (_lastLat != null && _lastLon != null
+            ? ml.Geographic(lat: _lastLat!, lon: _lastLon!)
+            : null);
+    final along = _lastMatchedAlongTrackM;
+    if (pos != null && along != null) {
+      _recomputeOffTrailReroute(pos, along);
+    }
   }
 
   /// Body of the Android foreground-service notification for this session.
@@ -832,6 +1054,9 @@ class _NavigationScreenState extends ConsumerState<NavigationScreen>
         // Catch the paused native map up on everything recorded while
         // backgrounded — per-fix pushes are skipped while !_uiVisible.
         _pushBreadcrumbSources(ref.read(_navProviderInstance).breadcrumb);
+        if (!widget.isRecording) {
+          _pushOffTrailSource(_offTrailNotifier.value);
+        }
       case AppLifecycleState.inactive:
         // Transient (notification shade, incoming call, app-switcher peek) —
         // treating it as background used to bounce tracelet through a full
@@ -872,6 +1097,9 @@ class _NavigationScreenState extends ConsumerState<NavigationScreen>
     );
     _currentPosition.dispose();
     _liveTrackMeters.dispose();
+    _etaNotifier.dispose();
+    _offTrailNotifier.dispose();
+    _offTrailChartSpots.dispose();
     _sheetController.dispose();
     _waypointSheetController.dispose();
     super.dispose();
@@ -1230,6 +1458,41 @@ class _NavigationScreenState extends ConsumerState<NavigationScreen>
         });
   }
 
+  String _offTrailGeoJson(OffTrailRerouteResult? reroute) {
+    if (reroute == null || reroute.points.length < 2) {
+      return jsonEncode(<String, Object?>{
+        'type': 'FeatureCollection',
+        'features': <Object?>[],
+      });
+    }
+    return jsonEncode(<String, Object?>{
+      'type': 'Feature',
+      'properties': <String, Object?>{},
+      'geometry': <String, Object?>{
+        'type': 'LineString',
+        'coordinates': <List<double>>[
+          for (final p in reroute.points) <double>[p.lon, p.lat],
+        ],
+      },
+    });
+  }
+
+  void _pushOffTrailSource(OffTrailRerouteResult? reroute) {
+    if (!_uiVisible) return;
+    final style = _controller?.style ?? _loadedStyle;
+    if (style == null) return;
+    style
+        .updateGeoJsonSource(
+          id: 'off-trail-reroute',
+          data: _offTrailGeoJson(reroute),
+        )
+        .catchError((Object e) {
+          debugPrint(
+            'NavigationScreen: failed to update off-trail reroute — $e',
+          );
+        });
+  }
+
   /// Adds the trail outline, if the trail is available and it is not already
   /// on this style.
   ///
@@ -1300,6 +1563,44 @@ class _NavigationScreenState extends ConsumerState<NavigationScreen>
           layout: breadcrumbLayout,
         ),
       );
+
+      if (!widget.isRecording) {
+        await style.addSource(
+          ml.GeoJsonSource(
+            id: 'off-trail-reroute',
+            data: _offTrailGeoJson(_offTrailNotifier.value),
+          ),
+        );
+        await style.addLayer(
+          const ml.LineStyleLayer(
+            id: 'off-trail-reroute-casing',
+            sourceId: 'off-trail-reroute',
+            layout: <String, Object>{
+              'line-cap': 'round',
+              'line-join': 'round',
+            },
+            paint: <String, Object>{
+              'line-color': '#FFFFFF',
+              'line-width': 7.0,
+            },
+          ),
+        );
+        await style.addLayer(
+          const ml.LineStyleLayer(
+            id: 'off-trail-reroute',
+            sourceId: 'off-trail-reroute',
+            layout: <String, Object>{
+              'line-cap': 'round',
+              'line-join': 'round',
+            },
+            paint: <String, Object>{
+              'line-color': '#F97316',
+              'line-width': 4.0,
+              'line-dasharray': [2.0, 1.5],
+            },
+          ),
+        );
+      }
     } catch (e) {
       debugPrint('NavigationScreen: onStyleLoaded failed — $e');
     }
@@ -1322,8 +1623,11 @@ class _NavigationScreenState extends ConsumerState<NavigationScreen>
     // recording, which has no trail id to resolve.
     if (!widget.isRecording && widget.id.isNotEmpty) {
       ref.listen(trailProvider(widget.id), (_, next) {
+        final trail = next.value;
+        if (trail?.expand?.gpx == null) return;
+        _initTrailNavigation(trail!);
         final style = _loadedStyle;
-        if (style == null || next.value?.expand?.gpx == null) return;
+        if (style == null) return;
         unawaited(
           _addTrailOutline(style).catchError((Object e) {
             debugPrint('NavigationScreen: failed to add trail outline — $e');
@@ -1359,6 +1663,7 @@ class _NavigationScreenState extends ConsumerState<NavigationScreen>
     // reach mid-recording. WaypointSheet already takes a nullable user.
     final user = ref.watch(authProvider).value;
     final localizations = AppLocalizations.of(context)!;
+    _localeCode = localizations.localeName;
     final unit = ref.watch(unitProvider);
 
     final baseAsync = ref.watch(mapStyleJsonProvider);
@@ -1375,6 +1680,22 @@ class _NavigationScreenState extends ConsumerState<NavigationScreen>
     final composed = _composeOutput;
     if (composed != null) _lastStyleJson = composed;
     final styleJson = _lastStyleJson;
+
+    if (styleJson != null &&
+        !widget.isRecording &&
+        _showingElevation &&
+        !_didAutoExpandSheet) {
+      _didAutoExpandSheet = true;
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted && _showingElevation && _sheetController.isAttached) {
+          _sheetController.animateTo(
+            _elevationSheetSize,
+            duration: const Duration(milliseconds: 300),
+            curve: Curves.easeOut,
+          );
+        }
+      });
+    }
 
     final maneuvers = widget.response.maneuvers;
     final isArrived =
@@ -1655,21 +1976,189 @@ class _NavigationScreenState extends ConsumerState<NavigationScreen>
     bool isArrived,
     String unit,
   ) {
-    return Card(
-      elevation: 4,
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-      color: Theme.of(context).colorScheme.surface,
-      child: Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 16.0, vertical: 12.0),
-        child: isArrived
-            ? _buildCompletionBannerContent(context, localizations)
-            : _buildActiveBannerContent(
+    return ValueListenableBuilder<OffTrailRerouteResult?>(
+      valueListenable: _offTrailNotifier,
+      builder: (context, reroute, _) {
+        if (reroute != null) {
+          return Card(
+            elevation: 6,
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(16),
+            ),
+            color: const Color(0xFFEA580C),
+            child: Padding(
+              padding: const EdgeInsets.symmetric(
+                horizontal: 14.0,
+                vertical: 10.0,
+              ),
+              child: _buildOffTrailBannerContent(
                 context,
                 localizations,
-                maneuvers,
-                currentIndex,
+                reroute,
                 unit,
               ),
+            ),
+          );
+        }
+
+        return Card(
+          elevation: 4,
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(16),
+          ),
+          color: Theme.of(context).colorScheme.surface,
+          child: Padding(
+            padding: const EdgeInsets.symmetric(
+              horizontal: 16.0,
+              vertical: 12.0,
+            ),
+            child: isArrived
+                ? _buildCompletionBannerContent(context, localizations)
+                : _buildActiveBannerContent(
+                    context,
+                    localizations,
+                    maneuvers,
+                    currentIndex,
+                    unit,
+                  ),
+          ),
+        );
+      },
+    );
+  }
+
+  Widget _buildOffTrailBannerContent(
+    BuildContext context,
+    AppLocalizations localizations,
+    OffTrailRerouteResult reroute,
+    String unit,
+  ) {
+    final distText = formatDistance(reroute.distanceM, unit: unit);
+    return Row(
+      crossAxisAlignment: CrossAxisAlignment.center,
+      children: [
+        ValueListenableBuilder<LocationMarkerPosition?>(
+          valueListenable: _currentPosition,
+          builder: (context, markerPos, _) {
+            final heading = markerPos?.heading ?? _smoothedHeading ?? 0.0;
+            final relDeg = shortestAngleDelta(
+              heading,
+              reroute.initialBearingDeg,
+            );
+            return Container(
+              width: 44,
+              height: 44,
+              decoration: BoxDecoration(
+                color: Colors.white.withValues(alpha: 0.2),
+                shape: BoxShape.circle,
+              ),
+              child: Center(
+                child: Transform.rotate(
+                  angle: relDeg * pi / 180.0,
+                  child: const Icon(
+                    Icons.navigation,
+                    color: Colors.white,
+                    size: 26,
+                  ),
+                ),
+              ),
+            );
+          },
+        ),
+        const SizedBox(width: 12),
+        Expanded(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Row(
+                children: [
+                  const Icon(
+                    Icons.warning_amber_rounded,
+                    color: Colors.white,
+                    size: 16,
+                  ),
+                  const SizedBox(width: 6),
+                  Flexible(
+                    child: Text(
+                      '${localizations.nav_off_trail_title} · ${localizations.nav_rejoin_in(distText)}',
+                      style: Theme.of(context).textTheme.labelMedium?.copyWith(
+                        color: Colors.white,
+                        fontWeight: FontWeight.w700,
+                      ),
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 2),
+              Text(
+                reroute.instruction,
+                style: Theme.of(context).textTheme.titleMedium?.copyWith(
+                  color: Colors.white,
+                  fontWeight: FontWeight.bold,
+                ),
+                maxLines: 2,
+                overflow: TextOverflow.ellipsis,
+              ),
+              const SizedBox(height: 2),
+              Text(
+                reroute.slopeAdvice,
+                style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                  color: Colors.white.withValues(alpha: 0.92),
+                ),
+                maxLines: 2,
+                overflow: TextOverflow.ellipsis,
+              ),
+              const SizedBox(height: 6),
+              Wrap(
+                spacing: 8,
+                runSpacing: 4,
+                children: [
+                  _buildOffTrailModeChip(
+                    context,
+                    label: localizations.nav_min_climb,
+                    selected: reroute.mode == OffTrailMode.minClimb,
+                    onTap: () => _selectOffTrailMode(OffTrailMode.minClimb),
+                  ),
+                  _buildOffTrailModeChip(
+                    context,
+                    label: localizations.nav_shortest_path,
+                    selected: reroute.mode == OffTrailMode.shortestSafe,
+                    onTap: () => _selectOffTrailMode(OffTrailMode.shortestSafe),
+                  ),
+                ],
+              ),
+            ],
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildOffTrailModeChip(
+    BuildContext context, {
+    required String label,
+    required bool selected,
+    required VoidCallback onTap,
+  }) {
+    return Material(
+      color: selected ? Colors.white : Colors.white.withValues(alpha: 0.18),
+      borderRadius: BorderRadius.circular(14),
+      child: InkWell(
+        onTap: onTap,
+        borderRadius: BorderRadius.circular(14),
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+          child: Text(
+            label,
+            style: Theme.of(context).textTheme.labelSmall?.copyWith(
+              color: selected ? const Color(0xFF9A3412) : Colors.white,
+              fontWeight: FontWeight.w700,
+            ),
+          ),
+        ),
       ),
     );
   }
@@ -1788,7 +2277,7 @@ class _NavigationScreenState extends ConsumerState<NavigationScreen>
   ) {
     final theme = Theme.of(context);
     final maxSize = _sheetAtElevationSize
-        ? _kSheetElevationSize
+        ? _elevationSheetSize
         : _kSheetStatsSize;
 
     return DraggableScrollableSheet(
@@ -1887,23 +2376,35 @@ class _NavigationScreenState extends ConsumerState<NavigationScreen>
           animation: _sheetController,
           builder: (ctx, child) {
             final targetSize = _showingElevation
-                ? _kSheetElevationSize
+                ? _elevationSheetSize
                 : _kSheetStatsSize;
             final t = _sheetController.isAttached
                 ? ((_sheetController.size - _kSheetMinSize) /
                           (targetSize - _kSheetMinSize))
                       .clamp(0.0, 1.0)
-                : 0.0;
+                : (_showingElevation ? 1.0 : 0.0);
             return Opacity(opacity: t, child: child);
           },
           child: AnimatedSwitcher(
             duration: const Duration(milliseconds: 250),
             child: _showingElevation
-                ? SizedBox(
-                    key: const ValueKey('elevation'),
-                    height: 216,
-                    child: _buildElevationPage(context, trailAsync),
-                  )
+                ? (widget.isRecording
+                      ? SizedBox(
+                          key: const ValueKey('elevation'),
+                          height: 216,
+                          child: _buildElevationPage(context, trailAsync),
+                        )
+                      : Column(
+                          key: const ValueKey('elevation'),
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            _buildTripSummaryRow(context, localizations, unit),
+                            SizedBox(
+                              height: 196,
+                              child: _buildElevationPage(context, trailAsync),
+                            ),
+                          ],
+                        ))
                 : SizedBox(
                     key: const ValueKey('stats'),
                     child: _buildAdditionalStats(
@@ -1920,6 +2421,114 @@ class _NavigationScreenState extends ConsumerState<NavigationScreen>
         const SizedBox(height: 80),
       ],
     );
+  }
+
+  Widget _buildTripSummaryRow(
+    BuildContext context,
+    AppLocalizations localizations,
+    String unit,
+  ) {
+    return ValueListenableBuilder<EtaSnapshot?>(
+      valueListenable: _etaNotifier,
+      builder: (context, eta, _) {
+        final theme = Theme.of(context);
+        final remTimeText = eta == null
+            ? '—'
+            : _formatCompactDuration(eta.remainingDuration);
+        final arrivalText = eta?.arrivalTimeFormatted ?? '—';
+        final remDistText = eta == null
+            ? '—'
+            : formatDistance(eta.remainingDistanceM, unit: unit);
+        final remClimbText = eta == null
+            ? '—'
+            : '+${formatElevation(eta.remainingAscentM, unit: unit)}';
+
+        return Padding(
+          padding: const EdgeInsets.fromLTRB(16, 0, 16, 6),
+          child: Container(
+            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+            decoration: BoxDecoration(
+              color: theme.colorScheme.surfaceContainerHighest.withValues(
+                alpha: 0.45,
+              ),
+              borderRadius: BorderRadius.circular(12),
+            ),
+            child: Row(
+              children: [
+                _buildTripSummaryCell(
+                  context,
+                  localizations.nav_remaining,
+                  remTimeText,
+                ),
+                _buildTripSummaryCell(
+                  context,
+                  localizations.nav_arrival,
+                  arrivalText,
+                ),
+                _buildTripSummaryCell(
+                  context,
+                  localizations.distance,
+                  remDistText,
+                ),
+                _buildTripSummaryCell(
+                  context,
+                  localizations.nav_climb_left,
+                  remClimbText,
+                ),
+              ],
+            ),
+          ),
+        );
+      },
+    );
+  }
+
+  Widget _buildTripSummaryCell(
+    BuildContext context,
+    String label,
+    String value,
+  ) {
+    final theme = Theme.of(context);
+    return Expanded(
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Text(
+            label,
+            style: theme.textTheme.labelSmall?.copyWith(
+              color: theme.colorScheme.onSurface.withValues(alpha: 0.6),
+            ),
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            textAlign: TextAlign.center,
+          ),
+          const SizedBox(height: 2),
+          Text(
+            value,
+            style: theme.textTheme.titleSmall?.copyWith(
+              fontWeight: FontWeight.bold,
+            ),
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            textAlign: TextAlign.center,
+          ),
+        ],
+      ),
+    );
+  }
+
+  String _formatCompactDuration(Duration d) {
+    final totalMinutes = d.inSeconds <= 0
+        ? 0
+        : max(1, (d.inSeconds / 60).round());
+    if (totalMinutes < 60) {
+      return '$totalMinutes min';
+    }
+    final hours = totalMinutes ~/ 60;
+    final mins = totalMinutes % 60;
+    return mins == 0
+        ? '${hours}h'
+        : '${hours}h ${mins.toString().padLeft(2, '0')}m';
   }
 
   Widget _buildAdditionalStats(
@@ -2068,12 +2677,15 @@ class _NavigationScreenState extends ConsumerState<NavigationScreen>
           return const SizedBox.shrink();
         }
         return Padding(
-          padding: const EdgeInsets.all(16.0),
+          padding: const EdgeInsets.fromLTRB(16, 4, 16, 8),
           child: ElevationProfile(
             trail: trail,
             gpx: gpx,
+            chartHeight: 140,
             enableLineTouch: false,
             livePositionMeters: _liveTrackMeters,
+            splitLiveProgress: true,
+            offTrailPreviewSpots: _offTrailChartSpots,
           ),
         );
       },
@@ -2138,7 +2750,7 @@ class _NavigationScreenState extends ConsumerState<NavigationScreen>
           WidgetsBinding.instance.addPostFrameCallback((_) {
             if (mounted) {
               _sheetController.animateTo(
-                _kSheetElevationSize,
+                _elevationSheetSize,
                 duration: const Duration(milliseconds: 300),
                 curve: Curves.easeInOut,
               );

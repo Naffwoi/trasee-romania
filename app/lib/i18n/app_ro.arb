@@ -741,5 +741,30 @@
   "clear_search_history_confirm": "Elimini toate căutările recente?",
   "@clear_search_history_confirm": {
     "description": "Body of the dialog confirming that the whole search history is removed."
+  },
+  "nav_remaining": "Rămas",
+  "nav_arrival": "Sosire",
+  "nav_climb_left": "Urcare rămasă",
+  "nav_off_trail_title": "În afara traseului",
+  "nav_rejoin_in": "Revenire în {distance}",
+  "@nav_rejoin_in": {
+    "placeholders": {
+      "distance": {
+        "type": "String"
+      }
+    }
+  },
+  "nav_min_climb": "Urcare minimă",
+  "nav_shortest_path": "Drum minim",
+  "nav_next_summit": "Vârf {elevation} · peste {distance}",
+  "@nav_next_summit": {
+    "placeholders": {
+      "elevation": {
+        "type": "String"
+      },
+      "distance": {
+        "type": "String"
+      }
+    }
   }
 }

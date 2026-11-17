@@ -40,6 +40,15 @@ class ElevationProfile extends ConsumerStatefulWidget {
   /// the marker lands on the identical axis the chart plots on.
   final ValueListenable<double?>? livePositionMeters;
 
+  /// When true and [livePositionMeters] has a value, splits the curve into a
+  /// muted slate walked segment `[0..liveMeters]` and a slope-colored upcoming
+  /// segment `[liveMeters..maxDist]`.
+  final bool splitLiveProgress;
+
+  /// Optional off-trail preview spots drawn as a dashed orange curve on the
+  /// chart when the user is off-trail.
+  final ValueListenable<List<FlSpot>?>? offTrailPreviewSpots;
+
   const ElevationProfile({
     super.key,
     this.trail,
@@ -50,6 +59,8 @@ class ElevationProfile extends ConsumerStatefulWidget {
     this.enableLineTouch = true,
     this.durationOverride,
     this.livePositionMeters,
+    this.splitLiveProgress = false,
+    this.offTrailPreviewSpots,
   });
 
   @override
@@ -249,34 +260,17 @@ class _ElevationProfileState extends ConsumerState<ElevationProfile> {
           clipBehavior: Clip.none,
           children: [
             // ── Chart ──────────────────────────────────────────────────────────
-            widget.livePositionMeters == null
-                ? _lineChart(
-                    context,
-                    null,
-                    barData: barData,
-                    spots: spots,
-                    waypoints: waypoints,
-                    yMin: yMin,
-                    yMax: yMax,
-                    maxDist: maxDist,
-                    xInterval: xInterval,
-                    yInterval: yInterval,
-                  )
-                : ValueListenableBuilder<double?>(
-                    valueListenable: widget.livePositionMeters!,
-                    builder: (context, liveMeters, _) => _lineChart(
-                      context,
-                      liveMeters,
-                      barData: barData,
-                      spots: spots,
-                      waypoints: waypoints,
-                      yMin: yMin,
-                      yMax: yMax,
-                      maxDist: maxDist,
-                      xInterval: xInterval,
-                      yInterval: yInterval,
-                    ),
-                  ),
+            _buildLiveChartListener(
+              context,
+              barData: barData,
+              spots: spots,
+              waypoints: waypoints,
+              yMin: yMin,
+              yMax: yMax,
+              maxDist: maxDist,
+              xInterval: xInterval,
+              yInterval: yInterval,
+            ),
 
             // ── Waypoint icon markers ─────────────────────────────────────────
             ...waypoints.map((w) {
@@ -310,14 +304,8 @@ class _ElevationProfileState extends ConsumerState<ElevationProfile> {
     );
   }
 
-  /// Builds the actual `LineChart` — factored out of [_buildChart] so the
-  /// live-marker branch there can rebuild only this widget (via
-  /// [ValueListenableBuilder]) on every GPS fix, never the surrounding
-  /// [LayoutBuilder]/waypoint-icon tree. [liveMeters] is the along-track
-  /// distance of the live marker (chart x units), or null to hide it.
-  Widget _lineChart(
-    BuildContext context,
-    double? liveMeters, {
+  Widget _buildLiveChartListener(
+    BuildContext context, {
     required LineChartBarData barData,
     required List<FlSpot> spots,
     required List<Waypoint> waypoints,
@@ -327,7 +315,168 @@ class _ElevationProfileState extends ConsumerState<ElevationProfile> {
     required double xInterval,
     required double yInterval,
   }) {
-    final lineBarsData = <LineChartBarData>[barData];
+    Widget withOffTrail(double? liveMeters) {
+      final preview = widget.offTrailPreviewSpots;
+      if (preview == null) {
+        return _lineChart(
+          context,
+          liveMeters,
+          null,
+          barData: barData,
+          spots: spots,
+          waypoints: waypoints,
+          yMin: yMin,
+          yMax: yMax,
+          maxDist: maxDist,
+          xInterval: xInterval,
+          yInterval: yInterval,
+        );
+      }
+      return ValueListenableBuilder<List<FlSpot>?>(
+        valueListenable: preview,
+        builder: (context, offTrailSpots, _) => _lineChart(
+          context,
+          liveMeters,
+          offTrailSpots,
+          barData: barData,
+          spots: spots,
+          waypoints: waypoints,
+          yMin: yMin,
+          yMax: yMax,
+          maxDist: maxDist,
+          xInterval: xInterval,
+          yInterval: yInterval,
+        ),
+      );
+    }
+
+    final live = widget.livePositionMeters;
+    if (live == null) {
+      return withOffTrail(null);
+    }
+    return ValueListenableBuilder<double?>(
+      valueListenable: live,
+      builder: (context, liveMeters, _) => withOffTrail(liveMeters),
+    );
+  }
+
+  /// Builds the actual `LineChart` — factored out of [_buildChart] so the
+  /// live-marker branch there can rebuild only this widget (via
+  /// [ValueListenableBuilder]) on every GPS fix, never the surrounding
+  /// [LayoutBuilder]/waypoint-icon tree. [liveMeters] is the along-track
+  /// distance of the live marker (chart x units), or null to hide it.
+  Widget _lineChart(
+    BuildContext context,
+    double? liveMeters,
+    List<FlSpot>? offTrailSpots, {
+    required LineChartBarData barData,
+    required List<FlSpot> spots,
+    required List<Waypoint> waypoints,
+    required double yMin,
+    required double yMax,
+    required double maxDist,
+    required double xInterval,
+    required double yInterval,
+  }) {
+    final lineBarsData = <LineChartBarData>[];
+
+    if (widget.splitLiveProgress && liveMeters != null && maxDist > 0) {
+      final splitX = liveMeters.clamp(0.0, maxDist);
+      final splitY = elevationAtDistance(_points, splitX);
+
+      final walkedSpots = <FlSpot>[
+        for (final p in _points)
+          if (p.distanceM < splitX) FlSpot(p.distanceM, p.elevationM),
+      ];
+      if (walkedSpots.isNotEmpty && walkedSpots.last.x < splitX) {
+        walkedSpots.add(FlSpot(splitX, splitY));
+      } else if (walkedSpots.isEmpty && splitX > 0) {
+        walkedSpots.add(FlSpot(0.0, _points.first.elevationM));
+        walkedSpots.add(FlSpot(splitX, splitY));
+      }
+
+      final upcomingPoints = <TrackPoint>[];
+      final trailing = _points.where((p) => p.distanceM > splitX).toList();
+      if (trailing.isNotEmpty) {
+        if (trailing.first.distanceM > splitX) {
+          upcomingPoints.add(
+            TrackPoint(
+              distanceM: splitX,
+              elevationM: splitY,
+              lonlat: trailing.first.lonlat,
+              gradient: trailing.first.gradient,
+            ),
+          );
+        }
+        upcomingPoints.addAll(trailing);
+      }
+
+      if (walkedSpots.length >= 2) {
+        lineBarsData.add(
+          LineChartBarData(
+            spots: walkedSpots,
+            isCurved: true,
+            curveSmoothness: 0.35,
+            barWidth: 2.5,
+            isStrokeCapRound: true,
+            dotData: const FlDotData(show: false),
+            color: const Color(0xFF94A3B8),
+            belowBarData: BarAreaData(
+              show: true,
+              color: const Color(0xFF94A3B8).withValues(alpha: 0.14),
+            ),
+          ),
+        );
+      }
+
+      if (upcomingPoints.length >= 2) {
+        lineBarsData.add(
+          LineChartBarData(
+            spots: upcomingPoints
+                .map((p) => FlSpot(p.distanceM, p.elevationM))
+                .toList(),
+            isCurved: true,
+            curveSmoothness: 0.35,
+            barWidth: 2.5,
+            isStrokeCapRound: true,
+            dotData: const FlDotData(show: false),
+            gradient: _buildSegmentLineGradient(
+              upcomingPoints,
+              splitX,
+              maxDist,
+            ),
+            belowBarData: BarAreaData(
+              show: true,
+              gradient: _buildSegmentFillGradient(
+                upcomingPoints,
+                splitX,
+                maxDist,
+              ),
+            ),
+          ),
+        );
+      }
+
+      if (lineBarsData.isEmpty) {
+        lineBarsData.add(barData);
+      }
+    } else {
+      lineBarsData.add(barData);
+    }
+
+    if (offTrailSpots != null && offTrailSpots.length >= 2) {
+      lineBarsData.add(
+        LineChartBarData(
+          spots: offTrailSpots,
+          isCurved: false,
+          color: const Color(0xFFF97316),
+          barWidth: 2.5,
+          isStrokeCapRound: true,
+          dashArray: const [6, 4],
+          dotData: const FlDotData(show: false),
+        ),
+      );
+    }
 
     final verticalLines = waypoints.map((w) {
       return VerticalLine(
@@ -381,7 +530,8 @@ class _ElevationProfileState extends ConsumerState<ElevationProfile> {
         minY: yMin,
         maxY: yMax,
         showingTooltipIndicators:
-            _selectedIndex != null &&
+            !widget.splitLiveProgress &&
+                _selectedIndex != null &&
                 _selectedIndex! > 0 &&
                 _selectedIndex! < spots.length
             ? [
@@ -533,20 +683,60 @@ class _ElevationProfileState extends ConsumerState<ElevationProfile> {
     );
   }
 
-  LinearGradient _buildLineGradient() {
-    final totalDist = _points.last.distanceM;
-    if (totalDist == 0) {
-      return const LinearGradient(colors: [Colors.purple, Colors.purple]);
+  LinearGradient _buildLineGradient() =>
+      _buildSegmentLineGradient(_points, 0.0, _points.last.distanceM);
+
+  LinearGradient _buildFillGradient() =>
+      _buildSegmentFillGradient(_points, 0.0, _points.last.distanceM);
+
+  LinearGradient _buildSegmentLineGradient(
+    List<TrackPoint> points,
+    double startX,
+    double endX,
+  ) => _buildGradientRange(points, startX, endX, alpha: 1.0);
+
+  LinearGradient _buildSegmentFillGradient(
+    List<TrackPoint> points,
+    double startX,
+    double endX,
+  ) => _buildGradientRange(points, startX, endX, alpha: 0.18);
+
+  LinearGradient _buildGradientRange(
+    List<TrackPoint> points,
+    double startX,
+    double endX, {
+    required double alpha,
+  }) {
+    final span = endX - startX;
+    if (points.isEmpty || span <= 0) {
+      final fallback = alpha < 1.0
+          ? const Color(0xFF6D28D9).withValues(alpha: 0.3)
+          : Colors.purple;
+      return LinearGradient(
+        colors: [
+          fallback,
+          alpha < 1.0 ? Colors.transparent : fallback,
+        ],
+        begin: alpha < 1.0 ? Alignment.topCenter : Alignment.centerLeft,
+        end: alpha < 1.0 ? Alignment.bottomCenter : Alignment.centerRight,
+      );
     }
 
     final colors = <Color>[];
     final stops = <double>[];
 
-    for (final pt in _points) {
-      final stop = (pt.distanceM / totalDist).clamp(0.0, 1.0);
+    for (final pt in points) {
+      final stop = ((pt.distanceM - startX) / span).clamp(0.0, 1.0);
       if (stops.isNotEmpty && stop <= stops.last) continue;
       stops.add(stop);
-      colors.add(_gradientColor(pt.gradient));
+      final base = _gradientColor(pt.gradient);
+      colors.add(alpha < 1.0 ? base.withValues(alpha: alpha) : base);
+    }
+
+    if (stops.isEmpty) {
+      final c = _gradientColor(points.first.gradient);
+      final colored = alpha < 1.0 ? c.withValues(alpha: alpha) : c;
+      return LinearGradient(colors: [colored, colored]);
     }
 
     if (stops.first > 0.0) {
@@ -557,43 +747,7 @@ class _ElevationProfileState extends ConsumerState<ElevationProfile> {
       stops.add(1.0);
       colors.add(colors.last);
     }
-
-    return LinearGradient(
-      begin: Alignment.centerLeft,
-      end: Alignment.centerRight,
-      colors: colors,
-      stops: stops,
-    );
-  }
-
-  LinearGradient _buildFillGradient() {
-    final totalDist = _points.last.distanceM;
-    if (totalDist == 0) {
-      return LinearGradient(
-        colors: [
-          const Color(0xFF6D28D9).withValues(alpha: 0.3),
-          Colors.transparent,
-        ],
-        begin: Alignment.topCenter,
-        end: Alignment.bottomCenter,
-      );
-    }
-
-    final colors = <Color>[];
-    final stops = <double>[];
-
-    for (final pt in _points) {
-      final stop = (pt.distanceM / totalDist).clamp(0.0, 1.0);
-      if (stops.isNotEmpty && stop <= stops.last) continue;
-      stops.add(stop);
-      colors.add(_gradientColor(pt.gradient).withValues(alpha: 0.18));
-    }
-
-    if (stops.first > 0.0) {
-      stops.insert(0, 0.0);
-      colors.insert(0, colors.first);
-    }
-    if (stops.last < 1.0) {
+    if (stops.length == 1) {
       stops.add(1.0);
       colors.add(colors.last);
     }

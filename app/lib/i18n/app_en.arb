@@ -739,5 +739,24 @@
   "clear_search_history_confirm": "Remove all recent searches?",
   "@clear_search_history_confirm": {
     "description": "Body of the dialog confirming that the whole search history is removed."
+  },
+  "nav_remaining": "Remaining",
+  "nav_arrival": "Arrival",
+  "nav_climb_left": "Climb left",
+  "nav_off_trail_title": "Off trail",
+  "nav_rejoin_in": "Rejoin in {distance}",
+  "@nav_rejoin_in": {
+    "placeholders": {
+      "distance": { "type": "String" }
+    }
+  },
+  "nav_min_climb": "Min climb",
+  "nav_shortest_path": "Shortest safe",
+  "nav_next_summit": "Peak {elevation} · in {distance}",
+  "@nav_next_summit": {
+    "placeholders": {
+      "elevation": { "type": "String" },
+      "distance": { "type": "String" }
+    }
   }
 }

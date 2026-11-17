@@ -22,6 +22,7 @@ import 'package:wanderer/provider/trail/subcategory_provider.dart';
 import 'package:wanderer/store/current_account.dart';
 import 'package:wanderer/util/gpx/gpx.dart';
 import 'package:wanderer/services/tracelet_position_source.dart';
+import 'package:wanderer/util/navigation/trail_maneuver_synthesizer.dart';
 import 'package:wanderer/util/route/valhalla.dart';
 
 /// Reads the cached [NavigateResponse] for [trailId] from ObjectBox, or null
@@ -209,6 +210,45 @@ Future<void> launchNavigation({
   // Shared with downloadTrail so cached and online shapes are byte-identical.
   final shape = buildNavShape(points);
 
+  NavigateResponse? fallbackNav() {
+    final store = ref.read(objectBoxProvider);
+    final cached = readCachedNav(store, trail.id);
+    if (cached != null &&
+        cached.maneuvers.isNotEmpty &&
+        cached.shape.isNotEmpty) {
+      return cached;
+    }
+    final synthesized = TrailManeuverSynthesizer.fromGpx(
+      gpx,
+      waypoints: trail.expand?.waypointsViaTrail,
+      localeCode: l10n.localeName,
+    );
+    if (synthesized.maneuvers.isNotEmpty && synthesized.shape.isNotEmpty) {
+      return synthesized;
+    }
+    return null;
+  }
+
+  void launchWith(NavigateResponse navResponse) {
+    if (!context.mounted) return;
+    // extra: (response, resumeSeed, seedFix) — null resumeSeed for a fresh
+    // launch.
+    context.push(
+      '/trail/${trail.id}/navigate',
+      extra: (navResponse, null, seedFix),
+    );
+  }
+
+  if (!ref.read(apiProvider.notifier).isConfigured) {
+    final fallback = fallbackNav();
+    if (fallback != null) {
+      launchWith(fallback);
+      return;
+    }
+    showError(l10n.couldnt_start_navigation);
+    return;
+  }
+
   try {
     final api = ref.read(apiProvider);
     final res = await api.post(
@@ -222,61 +262,35 @@ Future<void> launchNavigation({
 
     if (response.maneuvers.isEmpty || response.shape.isEmpty) {
       if (!context.mounted) return;
-      ref
-          .read(toastProvider.notifier)
-          .add(
-            ToastMessage(
-              type: ToastType.error,
-              icon: FontAwesomeIcons.triangleExclamation,
-              text: l10n.couldnt_start_navigation,
-            ),
-          );
+      final fallback = fallbackNav();
+      if (fallback != null) {
+        launchWith(fallback);
+        return;
+      }
+      showError(l10n.couldnt_start_navigation);
       return;
     }
 
     if (!context.mounted) return;
-
-    // extra: (response, resumeSeed, seedFix) — null resumeSeed for a fresh
-    // launch.
-    context.push(
-      '/trail/${trail.id}/navigate',
-      extra: (response, null, seedFix),
-    );
+    launchWith(response);
 
     final store = ref.read(objectBoxProvider);
     unawaited(_recacheNav(store, trail.id, response));
   } on DioException catch (_) {
     if (!context.mounted) return;
-    final store = ref.read(objectBoxProvider);
-    final cached = readCachedNav(store, trail.id);
-    if (cached != null &&
-        cached.maneuvers.isNotEmpty &&
-        cached.shape.isNotEmpty) {
-      context.push(
-        '/trail/${trail.id}/navigate',
-        extra: (cached, null, seedFix),
-      );
+    final fallback = fallbackNav();
+    if (fallback != null) {
+      launchWith(fallback);
       return;
     }
-    ref
-        .read(toastProvider.notifier)
-        .add(
-          ToastMessage(
-            type: ToastType.error,
-            icon: FontAwesomeIcons.triangleExclamation,
-            text: l10n.couldnt_start_navigation,
-          ),
-        );
+    showError(l10n.couldnt_start_navigation);
   } catch (_) {
     if (!context.mounted) return;
-    ref
-        .read(toastProvider.notifier)
-        .add(
-          ToastMessage(
-            type: ToastType.error,
-            icon: FontAwesomeIcons.triangleExclamation,
-            text: l10n.couldnt_start_navigation,
-          ),
-        );
+    final fallback = fallbackNav();
+    if (fallback != null) {
+      launchWith(fallback);
+      return;
+    }
+    showError(l10n.couldnt_start_navigation);
   }
 }

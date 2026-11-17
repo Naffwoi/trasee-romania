@@ -3,15 +3,18 @@ import { enhancedImages } from '@sveltejs/enhanced-img';
 import { sveltekit } from '@sveltejs/kit/vite';
 import { vitePreprocess } from '@sveltejs/vite-plugin-svelte';
 import tailwindcss from '@tailwindcss/vite';
+import basicSsl from '@vitejs/plugin-basic-ssl';
 import fs from 'fs';
 import openapiPlugin from 'sveltekit-openapi-generator';
 import { defineConfig } from 'vitest/config';
 import { openapiOptions } from './openapi.config.js';
 
 const packageJson = JSON.parse(fs.readFileSync('./package.json', 'utf-8'));
+const useDevHttps = process.env.VITE_DEV_HTTPS === 'true';
 
 export default defineConfig({
 	plugins: [
+		...(useDevHttps ? [basicSsl()] : []),
 		enhancedImages(),
 		openapiPlugin(openapiOptions(packageJson.version)),
 		tailwindcss(),
@@ -28,6 +31,12 @@ export default defineConfig({
 	],
 	test: { include: ['src/**/*.{test,spec}.{js,ts}'] },
 	ssr: { noExternal: ['three'] },
+	...(useDevHttps ? {
+		server: {
+			https: {},
+			host: true
+		}
+	} : {}),
 	...(process.env.WANDERER_ENV == "dev" ? {
 		server: {
 			// https: {

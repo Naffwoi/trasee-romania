@@ -1,0 +1,74 @@
+name: Android APK Build
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'app/**'
+      - '.github/workflows/android_apk.yaml'
+  workflow_dispatch:
+
+concurrency:
+  group: android-apk-build
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+
+env:
+  FLUTTER_VERSION: '3.47.8'
+
+jobs:
+  build-apk:
+    name: Build Installable Android APK
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: app
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          channel: stable
+          cache: true
+
+      - name: Build Android release APK
+        run: |
+          PUBSPEC_VERSION=$(sed -nE 's/^version: *([^ ]+).*/\1/p' pubspec.yaml)
+          BASE_BUILD=${PUBSPEC_VERSION#*+}
+          BUILD=$((BASE_BUILD + GITHUB_RUN_NUMBER))
+          flutter pub get
+          flutter build apk --release --build-number="$BUILD"
+          mkdir -p dist
+          cp build/app/outputs/flutter-apk/app-release.apk dist/TraseeRomania-Android.apk
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: TraseeRomania-Android-apk
+          path: app/dist/TraseeRomania-Android.apk
+          retention-days: 30
+
+      - name: Upload APK to GitHub Release (ios-latest)
+        if: github.ref == 'refs/heads/main'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="ios-latest"
+          if gh release view "$TAG" -R "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$TAG" dist/TraseeRomania-Android.apk --clobber -R "$GITHUB_REPOSITORY"
+            gh release edit "$TAG" --title "Trasee România — Mobile Apps (iOS .ipa & Android .apk)" -R "$GITHUB_REPOSITORY"
+          else
+            git tag -f "$TAG" "$GITHUB_SHA"
+            git push -f origin "$TAG"
+            gh release create "$TAG" dist/TraseeRomania-Android.apk \
+              --title "Trasee România — Mobile Apps (iOS .ipa & Android .apk)" \
+              --prerelease \
+              -R "$GITHUB_REPOSITORY"
+          fi

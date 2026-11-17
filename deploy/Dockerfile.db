@@ -1,0 +1,35 @@
+FROM curlimages/curl:8.22.0 AS download-tools
+ENV CURL_VERSION=8.22.0
+ENV PMTILES_VERSION=1.28.0
+RUN set -eux ; \
+    curl --connect-timeout 10 --fail --location --max-time 300 --output /tmp/curl.tar.xz --proto '=https' --show-error --silent --tlsv1.2 \
+      "https://github.com/stunnel/static-curl/releases/download/${CURL_VERSION}/curl-linux-x86_64-glibc-${CURL_VERSION}.tar.xz" ; \
+    tar -xJf /tmp/curl.tar.xz -C /tmp ; \
+    chmod +x /tmp/curl ; \
+    curl --connect-timeout 10 --fail --location --max-time 300 --output /tmp/pmtiles.tar.gz --proto '=https' --show-error --silent --tlsv1.2 \
+      "https://github.com/protomaps/go-pmtiles/releases/download/v${PMTILES_VERSION}/go-pmtiles_${PMTILES_VERSION}_Linux_x86_64.tar.gz" ; \
+    tar -xzf /tmp/pmtiles.tar.gz -C /tmp pmtiles ; \
+    chmod +x /tmp/pmtiles
+
+FROM golang:1.26@sha256:9d2f36f06329b2a141b9db99ffa32765cf695ee57b813ca29e245e8670bcbfff AS build
+WORKDIR /app
+COPY go.mod go.sum ./
+RUN go mod download
+COPY . .
+RUN install -d -m 1777 /rootfs/tmp
+RUN GOMAXPROCS=1 CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags="-s -w" -o /app/pocketbase
+
+FROM scratch
+WORKDIR /
+COPY --from=build /rootfs/ /
+COPY --from=build /app/pocketbase /pocketbase
+COPY --from=build /etc/ssl/certs /etc/ssl/certs
+COPY --from=download-tools /tmp/curl /curl
+COPY --from=download-tools /tmp/pmtiles /usr/local/bin/pmtiles
+COPY migrations ./migrations
+COPY templates ./templates
+ENV MEILI_URL=http://localhost:7700 \
+    MEILI_MASTER_KEY= \
+    POCKETBASE_ENCRYPTION_KEY=
+EXPOSE 8090
+ENTRYPOINT ["/pocketbase", "serve", "--http=0.0.0.0:8090", "--dir=/pb_data"]

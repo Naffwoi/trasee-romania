@@ -1,0 +1,48 @@
+{
+  "name": "Trasee România",
+  "identifier": "ro.skillfy.trasee.repo",
+  "subtitle": "Navigație GPS live, profil altitudine și redresare off-trail DEM",
+  "description": "Repository oficial pentru aplicația nativă iOS Trasee România (preconfigurată cu https://trasee.skillfy.ro).",
+  "iconURL": "https://trasee.skillfy.ro/favicon-512x512.png",
+  "website": "https://trasee.skillfy.ro",
+  "tintColor": "#047857",
+  "featuredApps": [
+    "com.openwanderer.wanderer"
+  ],
+  "apps": [
+    {
+      "name": "Trasee România",
+      "bundleIdentifier": "com.openwanderer.wanderer",
+      "developerName": "Skillfy",
+      "subtitle": "Trasee montane și navigație GPS live",
+      "localizedDescription": "Catalog interactiv cu 1.630+ trasee din România, navigație GPS live tip Google Maps, ETA dinamic, profil de altitudine în timp real și redresare off-trail prin pădure bazată pe DEM.",
+      "iconURL": "https://trasee.skillfy.ro/favicon-512x512.png",
+      "tintColor": "#047857",
+      "category": "navigation",
+      "version": "0.1.0",
+      "versionDate": "2026-11-17T13:29:00Z",
+      "versionDescription": "Preconfigurat cu trasee.skillfy.ro, navigație live, ETA și redresare off-trail A* DEM.",
+      "downloadURL": "https://trasee.skillfy.ro/downloads/TraseeRomania-iOS-unsigned.ipa",
+      "size": 21091569,
+      "appPermissions": {
+        "entitlements": [],
+        "privacy": {
+          "NSLocationWhenInUseUsageDescription": "Folosit pentru afișarea poziției GPS și navigația live pe traseu.",
+          "NSLocationAlwaysAndWhenInUseUsageDescription": "Folosit pentru ghidarea pe traseu în timp real."
+        }
+      },
+      "versions": [
+        {
+          "version": "0.1.0",
+          "buildVersion": "12",
+          "date": "2026-11-17T13:29:00Z",
+          "localizedDescription": "Preconfigurat cu trasee.skillfy.ro, navigație live, ETA și redresare off-trail A* DEM.",
+          "downloadURL": "https://trasee.skillfy.ro/downloads/TraseeRomania-iOS-unsigned.ipa",
+          "size": 21091569,
+          "minOSVersion": "14.0"
+        }
+      ]
+    }
+  ],
+  "news": []
+}

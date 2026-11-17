@@ -8,9 +8,9 @@
     }
 
     const IPA_URL =
-        "https://github.com/Naffwoi/trasee-romania/releases/download/ios-latest/TraseeRomania-iOS-unsigned.ipa";
+        "https://trasee.skillfy.ro/downloads/TraseeRomania-iOS-unsigned.ipa";
     const APK_URL =
-        "https://github.com/Naffwoi/trasee-romania/releases/download/ios-latest/TraseeRomania-Android.apk";
+        "https://trasee.skillfy.ro/downloads/TraseeRomania-Android.apk";
     const RELEASE_PAGE_URL =
         "https://github.com/Naffwoi/trasee-romania/releases/tag/ios-latest";
     const TEST_TRAIL_URL = "/map/trail/@romania/ayl2z0tf824rp3n";
@@ -183,16 +183,39 @@
                 <span
                     class="inline-block px-2.5 py-0.5 rounded-full bg-content/[0.08] text-content/75 text-[11px] font-bold mb-1.5"
                 >
-                    BUILD NATIV FLUTTER (.IPA)
+                    SIDE-LOAD NATIV (.IPA / REPO JSON)
                 </span>
-                <h2 class="text-base font-bold">2. Fișierul nativ iOS (.ipa)</h2>
+                <h2 class="text-base font-bold">2. SideStore / AltStore Classic / Feather</h2>
                 <p class="text-xs text-content/65 mt-0.5">
-                    Apple blochează instalarea directă din browser a fișierelor <code>.ipa</code> nesemnate cu certificat Apple. Pentru instalare nativă 100% wireless ai la dispoziție pachetul compilat automat pe GitHub (pentru TestFlight sau servicii de semnare OTA precum Signulous / Feather):
+                    Dacă adaugi sursa în <strong>Sources (+)</strong>, folosește URL-ul JSON de mai jos (nu linkul <code>.ipa</code> direct). Sau descarcă fișierul <code>.ipa</code> în <strong>Files</strong> și încarcă-l din <strong>My Apps → +</strong>.
                 </p>
+            </div>
+
+            <div class="rounded-2xl bg-content/[0.05] border border-input-border/50 px-3.5 py-2.5 text-xs font-mono break-all select-all">
+                https://trasee.skillfy.ro/altstore.json
+            </div>
+
+            <div class="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                <a
+                    href="sidestore://source?url=https://trasee.skillfy.ro/altstore.json"
+                    class="py-2.5 px-3 rounded-2xl bg-indigo-600 hover:bg-indigo-700 text-white font-semibold text-xs flex items-center justify-center gap-2 transition-colors"
+                >
+                    <i class="fa-solid fa-plus" aria-hidden="true"></i>
+                    <span>Adaugă în SideStore</span>
+                </a>
+                <a
+                    href="altstore://source?url=https://trasee.skillfy.ro/altstore.json"
+                    class="py-2.5 px-3 rounded-2xl bg-teal-600 hover:bg-teal-700 text-white font-semibold text-xs flex items-center justify-center gap-2 transition-colors"
+                >
+                    <i class="fa-solid fa-plus" aria-hidden="true"></i>
+                    <span>Adaugă în AltStore</span>
+                </a>
             </div>
 
             <a
                 href={IPA_URL}
+                rel="external"
+                download="TraseeRomania-iOS-unsigned.ipa"
                 class="w-full py-3 px-4 rounded-2xl bg-content text-background font-semibold text-sm flex items-center justify-center gap-2 hover:opacity-90 transition-opacity"
             >
                 <i class="fa-solid fa-download" aria-hidden="true"></i>
@@ -220,6 +243,8 @@
 
             <a
                 href={APK_URL}
+                rel="external"
+                download="TraseeRomania-Android.apk"
                 class="w-full py-3 px-4 rounded-2xl bg-emerald-700 hover:bg-emerald-800 text-white font-semibold text-sm flex items-center justify-center gap-2 transition-colors shadow-sm"
             >
                 <i class="fa-brands fa-android text-base" aria-hidden="true"></i>

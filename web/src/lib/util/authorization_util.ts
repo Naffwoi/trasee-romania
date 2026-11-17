@@ -17,6 +17,7 @@ const publicRoutes = [
   "/api/v1/auth/oauth",
   "/register",
   "/auth",
+  "/install",
   "/.well-known"
 ]
 

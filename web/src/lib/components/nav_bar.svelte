@@ -262,17 +262,14 @@
                         </button>
                     {/if}
                     <div class="border-t border-input-border/50 my-1"></div>
-                    <button
-                        type="button"
-                        onclick={() => {
-                            closeMenus();
-                            iosInstallModalOpen = true;
-                        }}
+                    <a
+                        href="/install"
+                        onclick={closeMenus}
                         class="w-full flex items-center gap-3 px-3 py-2.5 rounded-xl text-sm font-medium text-left hover:bg-secondary-hover cursor-pointer"
                     >
                         <i class="fa-solid fa-mobile-screen-button w-4 text-center text-emerald-600 dark:text-emerald-400" aria-hidden="true"></i>
-                        <span>{$_("install-on-iphone", { default: "Instalează pe iPhone" })}</span>
-                    </button>
+                        <span>{$_("install-on-phone", { default: "Instalează pe telefon" })}</span>
+                    </a>
                     <button
                         type="button"
                         onclick={() => {

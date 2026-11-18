@@ -18,9 +18,15 @@ import re
 import tarfile
 import xml.sax.saxutils as saxutils
 from pathlib import Path
-from typing import Iterable
+from typing import Any, Iterable
 
-import osmium
+try:
+    import osmium
+
+    _SimpleHandlerBase: type[Any] = osmium.SimpleHandler
+except ImportError:
+    osmium = None  # type: ignore[assignment]
+    _SimpleHandlerBase = object
 
 from dem_elevation import DemTileCache, enrich_segments_with_elevation
 
@@ -29,6 +35,11 @@ RO_LON_MIN, RO_LON_MAX = 20.0, 30.0
 MIN_DISTANCE_METERS = 400.0
 STITCH_GAP_METERS = 35.0
 DOWNSAMPLE_STEP_METERS = 10.0
+MAX_RAIL_ACCESS_METERS = 2000.0
+GORGE_NAME_RE = re.compile(
+    r"\b(cheile|canionul|canion|defileul|vale[ai]\s+cernei|vale[ai]\s+lui\s+stan)\b",
+    re.IGNORECASE,
+)
 
 IGNORED_MEMBER_ROLES = {"platform", "stop", "guidepost", "marker", "signpost"}
 
@@ -90,7 +101,84 @@ def haversine_meters(lon1: float, lat1: float, lon2: float, lat2: float) -> floa
     dphi = math.radians(lat2 - lat1)
     dlambda = math.radians(lon2 - lon1)
     a = math.sin(dphi / 2.0) ** 2 + math.cos(phi1) * math.cos(phi2) * math.sin(dlambda / 2.0) ** 2
-    return 2.0 * r * math.atan2(math.sqrt(a), math.sqrt(1.0 - a))
+    return 2.0 * r * math.atan2(math.sqrt(a), math.sqrt(max(0.0, 1.0 - a)))
+
+
+def normalize_station_name(raw_name: str) -> str:
+    cleaned = re.sub(
+        r"^(Gara\s+CFR\s+|Gara\s+|Halta\s+|Stația\s+)",
+        "",
+        raw_name.strip(),
+        flags=re.IGNORECASE,
+    ).strip()
+    return cleaned or raw_name.strip()
+
+
+def is_valid_passenger_rail_stop(tags: dict[str, str]) -> bool:
+    railway = tags.get("railway", "").strip().lower()
+    if railway not in ("station", "halt"):
+        return False
+    if tags.get("station", "").strip().lower() in ("subway", "light_rail", "monorail"):
+        return False
+    if tags.get("subway", "").strip().lower() == "yes":
+        return False
+    if tags.get("usage", "").strip().lower() in ("industrial", "military", "tourism", "freight"):
+        return False
+    if "disused:railway" in tags or "abandoned:railway" in tags or tags.get("disused") == "yes":
+        return False
+    return bool((tags.get("name:ro") or tags.get("name") or "").strip())
+
+
+def find_nearest_rail_stop(
+    endpoints: list[tuple[float, float]],
+    stops: list[dict[str, Any]],
+    max_distance_m: float = MAX_RAIL_ACCESS_METERS,
+) -> dict[str, Any] | None:
+    if not endpoints or not stops:
+        return None
+    best: dict[str, Any] | None = None
+    best_dist = max_distance_m + 1.0
+    for lon, lat in endpoints:
+        for st in stops:
+            if abs(st["lat"] - lat) > 0.025 or abs(st["lon"] - lon) > 0.035:
+                continue
+            d = haversine_meters(lon, lat, st["lon"], st["lat"])
+            if d <= max_distance_m and d < best_dist:
+                best_dist = d
+                best = {
+                    "name": normalize_station_name(st["name"]),
+                    "lat": round(st["lat"], 6),
+                    "lon": round(st["lon"], 6),
+                    "distance_m": round(d, 1),
+                }
+    return best
+
+
+def detect_water_gorge(
+    name: str,
+    tags: dict[str, str],
+    all_pts: list[tuple[float, float]],
+    gorge_pts: list[tuple[float, float]],
+) -> bool:
+    haystack = f"{name} {tags.get('description:ro', '')} {tags.get('description', '')}"
+    if GORGE_NAME_RE.search(haystack):
+        return True
+    if not gorge_pts or not all_pts:
+        return False
+    hits = 0
+    step = max(1, len(all_pts) // 25)
+    for lon, lat in all_pts[::step]:
+        for glon, glat in gorge_pts:
+            if (
+                abs(glat - lat) <= 0.0015
+                and abs(glon - lon) <= 0.002
+                and haversine_meters(lon, lat, glon, glat) <= 90.0
+            ):
+                hits += 1
+                if hits >= 2:
+                    return True
+                break
+    return False
 
 
 def parse_osmc_marking(osmc: str | None) -> str | None:
@@ -214,13 +302,13 @@ def build_gpx_xml(name: str, desc: str, segments: list[list[tuple[float, float, 
     return "\n".join(lines)
 
 
-class RelationCollector(osmium.SimpleHandler):
+class RelationCollector(_SimpleHandlerBase):
     def __init__(self) -> None:
         super().__init__()
-        self.relations: list[dict] = []
+        self.relations: list[dict[str, Any]] = []
         self.needed_ways: set[int] = set()
 
-    def relation(self, r: osmium.osm.Relation) -> None:
+    def relation(self, r: Any) -> None:
         tags = {t.k: t.v for t in r.tags}
         if tags.get("type") != "route":
             return
@@ -238,15 +326,36 @@ class RelationCollector(osmium.SimpleHandler):
             self.relations.append({"id": int(r.id), "tags": tags, "way_ids": way_ids})
 
 
-class WayGeometryCollector(osmium.SimpleHandler):
+class WayGeometryCollector(_SimpleHandlerBase):
     def __init__(self, needed_ways: set[int]) -> None:
         super().__init__()
         self.needed_ways = needed_ways
         self.ways: dict[int, list[tuple[float, float]]] = {}
+        self.rail_stops: list[dict[str, Any]] = []
+        self.gorge_pts: list[tuple[float, float]] = []
 
-    def way(self, w: osmium.osm.Way) -> None:
+    def node(self, n: Any) -> None:
+        if not n.tags or not n.location.valid():
+            return
+        lat, lon = n.location.lat, n.location.lon
+        if not (RO_LAT_MIN <= lat <= RO_LAT_MAX and RO_LON_MIN <= lon <= RO_LON_MAX):
+            return
+        tags = {t.k: t.v for t in n.tags}
+        if is_valid_passenger_rail_stop(tags):
+            self.rail_stops.append({
+                "name": (tags.get("name:ro") or tags.get("name") or "").strip(),
+                "lat": lat,
+                "lon": lon,
+            })
+        elif tags.get("natural") in ("gorge", "canyon"):
+            self.gorge_pts.append((lon, lat))
+
+    def way(self, w: Any) -> None:
         wid = int(w.id)
-        if wid not in self.needed_ways:
+        tags = {t.k: t.v for t in w.tags} if w.tags else {}
+        is_rail = is_valid_passenger_rail_stop(tags)
+        is_gorge = tags.get("natural") in ("gorge", "canyon")
+        if wid not in self.needed_ways and not is_rail and not is_gorge:
             return
         coords: list[tuple[float, float]] = []
         for n in w.nodes:
@@ -255,15 +364,26 @@ class WayGeometryCollector(osmium.SimpleHandler):
                 lon = n.lon
                 if RO_LAT_MIN <= lat <= RO_LAT_MAX and RO_LON_MIN <= lon <= RO_LON_MAX:
                     coords.append((lon, lat))
-        if len(coords) >= 2:
+        if wid in self.needed_ways and len(coords) >= 2:
             self.ways[wid] = coords
+        if is_rail and coords:
+            mid = coords[len(coords) // 2]
+            self.rail_stops.append({
+                "name": (tags.get("name:ro") or tags.get("name") or "").strip(),
+                "lat": mid[1],
+                "lon": mid[0],
+            })
+        if is_gorge and coords:
+            self.gorge_pts.extend(coords[::max(1, len(coords) // 5)])
 
 
 def build_trail_record(
-    rel: dict,
+    rel: dict[str, Any],
     ways: dict[int, list[tuple[float, float]]],
     dem: DemTileCache,
-) -> tuple[dict, str] | None:
+    rail_stops: list[dict[str, Any]] | None = None,
+    gorge_pts: list[tuple[float, float]] | None = None,
+) -> tuple[dict[str, Any], str] | None:
     rel_id: int = rel["id"]
     tags: dict[str, str] = rel["tags"]
     route_type = tags.get("route", "hiking")
@@ -343,6 +463,16 @@ def build_trail_record(
     lons = [p[0] for p in all_pts]
     lats = [p[1] for p in all_pts]
     start_lon, start_lat = segments_2d[0][0]
+    end_lon, end_lat = segments_2d[-1][-1]
+
+    rail_match = find_nearest_rail_stop(
+        [(start_lon, start_lat), (end_lon, end_lat)],
+        rail_stops or [],
+        MAX_RAIL_ACCESS_METERS,
+    )
+    if rail_match:
+        trail_tags.append("Cu trenul")
+    is_water_gorge = detect_water_gorge(name, tags, all_pts, gorge_pts or [])
 
     location = (
         tags.get("addr:city")
@@ -372,6 +502,11 @@ def build_trail_record(
         desc_parts.append(f"<p><strong>Operator / Întreținere:</strong> {html.escape(operator)}</p>")
     if network in NETWORK_LABELS:
         desc_parts.append(f"<p><strong>Rețea:</strong> {html.escape(NETWORK_LABELS[network])}</p>")
+    if rail_match:
+        desc_parts.append(
+            f"<p><strong>Acces cu trenul:</strong> Gara {html.escape(rail_match['name'])} "
+            f"({int(round(rail_match['distance_m']))} m)</p>"
+        )
     if tags.get("description:ro") or tags.get("description"):
         raw_desc = (tags.get("description:ro") or tags.get("description") or "").strip()
         desc_parts.append(f"<p>{html.escape(raw_desc[:600])}</p>")
@@ -404,12 +539,21 @@ def build_trail_record(
         "max_lat": round(max(lats), 6),
         "min_lon": round(min(lons), 6),
         "max_lon": round(max(lons), 6),
+        "train_accessible": bool(rail_match),
+        "rail_station_name": rail_match["name"] if rail_match else "",
+        "rail_station_distance_m": int(round(rail_match["distance_m"])) if rail_match else 0,
+        "rail_station_lat": rail_match["lat"] if rail_match else 0.0,
+        "rail_station_lon": rail_match["lon"] if rail_match else 0.0,
+        "is_water_gorge": is_water_gorge,
         "gpx_rel_path": f"gpx/{rel_id}.gpx",
     }
     return record, gpx_xml
 
 
 def main() -> None:
+    if osmium is None:
+        raise RuntimeError("pyosmium ('osmium' package) is required to scan .osm.pbf files.")
+
     parser = argparse.ArgumentParser(description="Extract Romanian hiking/MTB trails from OSM PBF.")
     parser.add_argument("--pbf", required=True, help="Path to romania-latest.osm.pbf")
     parser.add_argument("--out-dir", required=True, help="Output directory for GPX + manifest")
@@ -428,10 +572,14 @@ def main() -> None:
     rel_collector.apply_file(str(pbf_path))
     print(f"[Pass 1] Found {len(rel_collector.relations)} candidate relations using {len(rel_collector.needed_ways)} ways.")
 
-    print("[Pass 2] Extracting way node coordinates inside Romania...")
+    print("[Pass 2] Extracting way node coordinates, CFR passenger stops, and gorges inside Romania...")
     way_collector = WayGeometryCollector(rel_collector.needed_ways)
     way_collector.apply_file(str(pbf_path), locations=True, idx="flex_mem")
-    print(f"[Pass 2] Resolved geometries for {len(way_collector.ways)} ways.")
+    print(
+        f"[Pass 2] Resolved {len(way_collector.ways)} ways, "
+        f"{len(way_collector.rail_stops)} passenger rail stops, "
+        f"{len(way_collector.gorge_pts)} gorge nodes."
+    )
 
     tiles_needed: set[tuple[int, int]] = set()
     for pts in way_collector.ways.values():
@@ -446,7 +594,13 @@ def main() -> None:
 
     with manifest_path.open("w", encoding="utf-8") as mf:
         for rel in rel_collector.relations:
-            res = build_trail_record(rel, way_collector.ways, dem)
+            res = build_trail_record(
+                rel,
+                way_collector.ways,
+                dem,
+                way_collector.rail_stops,
+                way_collector.gorge_pts,
+            )
             if res is None:
                 skipped += 1
                 continue

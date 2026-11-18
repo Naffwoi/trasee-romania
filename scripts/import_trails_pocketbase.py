@@ -220,6 +220,50 @@ def fetch_existing_osm_relations(base_url: str, token: str) -> dict[int, str]:
     return existing
 
 
+def build_trail_multipart_fields(
+    rec: dict,
+    actor_id: str,
+    cat_id: str,
+    tag_map: dict[str, str],
+    existing_record_id: str | None = None,
+) -> list[tuple[str, str]]:
+    fields: list[tuple[str, str]] = [
+        ("name", rec["name"]),
+        ("description", rec["description"]),
+        ("location", rec["location"]),
+        ("public", "true"),
+        ("completed", "false"),
+        ("distance", str(rec["distance"])),
+        ("elevation_gain", str(rec.get("elevation_gain", 0))),
+        ("elevation_loss", str(rec.get("elevation_loss", 0))),
+        ("duration", str(rec["duration"])),
+        ("difficulty", rec["difficulty"]),
+        ("lat", str(rec["lat"])),
+        ("lon", str(rec["lon"])),
+        ("min_lat", str(rec["min_lat"])),
+        ("max_lat", str(rec["max_lat"])),
+        ("min_lon", str(rec["min_lon"])),
+        ("max_lon", str(rec["max_lon"])),
+        ("train_accessible", "true" if rec.get("train_accessible") else "false"),
+        ("rail_station_name", str(rec.get("rail_station_name") or "")),
+        ("rail_station_distance_m", str(rec.get("rail_station_distance_m") or 0)),
+        ("rail_station_lat", str(rec.get("rail_station_lat") or 0)),
+        ("rail_station_lon", str(rec.get("rail_station_lon") or 0)),
+        ("is_water_gorge", "true" if rec.get("is_water_gorge") else "false"),
+    ]
+    # PocketBase trails.updateRule enforces `@request.body.author:changed = false`,
+    # so `author` must only be included when creating a new trail.
+    if not existing_record_id:
+        fields.append(("author", actor_id))
+    if cat_id:
+        fields.append(("category", cat_id))
+    for t in rec.get("tags", []):
+        tid = tag_map.get(t)
+        if tid:
+            fields.append(("tags", tid))
+    return fields
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Import Romanian trail manifest into PocketBase.")
     parser.add_argument("--pb-url", default="http://127.0.0.1:8090", help="PocketBase base URL")
@@ -278,34 +322,13 @@ def main() -> None:
             continue
 
         cat_id = categories.get(rec.get("category", "Hiking")) or categories.get("Hiking", "")
-        fields: list[tuple[str, str]] = [
-            ("name", rec["name"]),
-            ("description", rec["description"]),
-            ("location", rec["location"]),
-            ("public", "true"),
-            ("completed", "false"),
-            ("distance", str(rec["distance"])),
-            ("elevation_gain", str(rec.get("elevation_gain", 0))),
-            ("elevation_loss", str(rec.get("elevation_loss", 0))),
-            ("duration", str(rec["duration"])),
-            ("difficulty", rec["difficulty"]),
-            ("lat", str(rec["lat"])),
-            ("lon", str(rec["lon"])),
-            ("min_lat", str(rec["min_lat"])),
-            ("max_lat", str(rec["max_lat"])),
-            ("min_lon", str(rec["min_lon"])),
-            ("max_lon", str(rec["max_lon"])),
-        ]
-        # PocketBase trails.updateRule enforces `@request.body.author:changed = false`,
-        # so `author` must only be included when creating a new trail.
-        if not existing_record_id:
-            fields.append(("author", actor_id))
-        if cat_id:
-            fields.append(("category", cat_id))
-        for t in rec.get("tags", []):
-            tid = tag_map.get(t)
-            if tid:
-                fields.append(("tags", tid))
+        fields = build_trail_multipart_fields(
+            rec,
+            actor_id=actor_id,
+            cat_id=cat_id,
+            tag_map=tag_map,
+            existing_record_id=existing_record_id,
+        )
 
         try:
             saved = multipart_save_trail(

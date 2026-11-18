@@ -74,9 +74,12 @@ class TrailQuickFilterBar extends ConsumerWidget {
     return filter.completed != null;
   }
 
+  bool _isTrainActive(TrailFilter filter) => filter.trainAccessible;
+
   bool _isAnyActive(TrailFilter filter) {
     return _isSortActive(filter) ||
         _isOfflineActive(filter) ||
+        _isTrainActive(filter) ||
         _isCategoryActive(filter) ||
         _isDifficultyActive(filter) ||
         _isDistanceActive(filter) ||
@@ -917,6 +920,7 @@ class TrailQuickFilterBar extends ConsumerWidget {
 
     final sortActive = filter != null && _isSortActive(filter);
     final offlineActive = filter != null && _isOfflineActive(filter);
+    final trainActive = filter != null && _isTrainActive(filter);
     final categoryActive = filter != null && _isCategoryActive(filter);
     final difficultyActive = filter != null && _isDifficultyActive(filter);
     final elevationActive = filter != null && _isElevationActive(filter);
@@ -961,6 +965,21 @@ class TrailQuickFilterBar extends ConsumerWidget {
                       : () {},
                 ),
               ],
+              const SizedBox(width: 8),
+              buildChip(
+                label: 'Cu trenul',
+                icon: Icons.train_outlined,
+                active: trainActive,
+                onPressed: filter != null
+                    ? () => ref
+                          .read(trailFilterProvider(filterId).notifier)
+                          .updateFilter(
+                            (f) => f.copyWith(
+                              trainAccessible: !f.trainAccessible,
+                            ),
+                          )
+                    : () {},
+              ),
               const SizedBox(width: 8),
               buildChip(
                 label: l10n.categories,

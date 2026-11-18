@@ -8,6 +8,7 @@ import 'package:wanderer/components/base/platform_view_pop_guard.dart';
 import 'package:wanderer/components/base/wanderer_attribution.dart';
 import 'package:wanderer/components/map/location_follow_controller.dart';
 import 'package:wanderer/components/map/location_marker_layer.dart';
+import 'package:wanderer/components/map/salvamont_map_layer.dart';
 import 'package:wanderer/components/map/trail_layer.dart';
 import 'package:wanderer/models/trail.dart';
 import 'package:wanderer/models/waypoint.dart';
@@ -256,6 +257,13 @@ class _TrailMapState extends ConsumerState<TrailMap>
           ),
 
         if (widget.elevationMarkerPosition != null) _buildElevationMarker(),
+
+        if (!widget.disabled)
+          SalvamontMapLayer(
+            refLat: widget.trail.lat,
+            refLon: widget.trail.lon,
+            isTrailRef: true,
+          ),
 
         if (widget.showLocation) const LocationMarkerLayer(),
         if (widget.trackingMode != null)

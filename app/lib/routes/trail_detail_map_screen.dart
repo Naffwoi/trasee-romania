@@ -6,6 +6,7 @@ import 'package:maplibre/maplibre.dart' as ml;
 import 'package:wanderer/components/base/wanderer_error.dart';
 import 'package:wanderer/components/base/trail_map.dart';
 import 'package:wanderer/components/map/center_on_location_button.dart';
+import 'package:wanderer/components/map/map_layers_sheet.dart';
 import 'package:wanderer/components/trail/elevation_profile.dart';
 import 'package:wanderer/components/trail/waypoint_sheet.dart';
 import 'package:wanderer/i18n/app_localizations.dart';
@@ -315,6 +316,12 @@ class _TrailDetailMapScreenState extends ConsumerState<TrailDetailMapScreen> {
                   selectedWaypoint = null;
                 });
               },
+            ),
+            IconButton(
+              key: const ValueKey('trail-detail-map-layers-btn'),
+              icon: const FaIcon(FontAwesomeIcons.layerGroup, size: 17),
+              visualDensity: VisualDensity.compact,
+              onPressed: () => showMapLayersSheet(context),
             ),
           ],
         ),

@@ -104,6 +104,12 @@ abstract class Trail with _$Trail, RecordFunctions implements TrailSummary {
     TrailExpand? expand,
     @Default("") String description,
     @Default("000000000000000") String author,
+    @JsonKey(name: 'train_accessible') @Default(false) bool trainAccessible,
+    @JsonKey(name: 'rail_station_name') @Default('') String railStationName,
+    @JsonKey(name: 'rail_station_distance_m')
+    @Default(0)
+    double railStationDistanceM,
+    @JsonKey(name: 'is_water_gorge') @Default(false) bool isWaterGorge,
 
     /// This `Trail` instance was read from local storage — it is set only by
     /// [TrailEntity.toModel], where it is hardcoded `true`.
@@ -302,6 +308,7 @@ abstract class TrailFilter with _$TrailFilter {
     // `applyTrailFilter` carries a second, non-redundant half for unsynced
     // local captures, which have no server id to whitelist.
     @Default(false) bool offlineOnly,
+    @Default(false) bool trainAccessible,
     required TrailFilterSort
     sort, // "name" | "distance" | "elevation_gain" | "created"
     required SortOrder sortOrder,
@@ -457,6 +464,10 @@ abstract class TrailFilter with _$TrailFilter {
       parts.add('completed = $completed');
     }
 
+    if (trainAccessible) {
+      parts.add('train_accessible = true');
+    }
+
     // Offline-available: expressed as an explicit id whitelist. Meilisearch
     // has no field for "is this trail's data on THIS device" -- the server
     // does not track downloads at all (`savedByUserIds` is device-local, and
@@ -552,4 +563,8 @@ const List<String> defaultTrailSearchAttributes = [
   "shares",
   "iri",
   "_geo",
+  "train_accessible",
+  "rail_station_name",
+  "rail_station_distance_m",
+  "is_water_gorge",
 ];

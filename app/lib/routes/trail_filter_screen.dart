@@ -491,6 +491,17 @@ class _TrailFilterScreenState extends ConsumerState<TrailFilterScreen> {
                       .read(trailFilterProvider(widget.filterId).notifier)
                       .updateFilter((filter) => filter.copyWith(liked: value)),
                 ),
+                CheckboxListTile(
+                  dense: true,
+                  value: filter.value?.trainAccessible ?? false,
+                  title: const Text('Cu trenul (accesibil din gară CFR)'),
+                  secondary: const FaIcon(FontAwesomeIcons.train, size: 16),
+                  onChanged: (value) => ref
+                      .read(trailFilterProvider(widget.filterId).notifier)
+                      .updateFilter(
+                        (flt) => flt.copyWith(trainAccessible: value ?? false),
+                      ),
+                ),
                 const SizedBox(height: 16),
 
                 Text(

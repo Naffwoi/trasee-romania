@@ -128,6 +128,46 @@ class WazeNearbyPrompt extends StatelessWidget {
                           style: theme.textTheme.bodySmall,
                         ),
                       ],
+                      if (report.photoVerified) ...[
+                        const SizedBox(height: 4),
+                        Container(
+                          key: const ValueKey('report-photo-verified-badge'),
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 8,
+                            vertical: 2,
+                          ),
+                          decoration: BoxDecoration(
+                            color: const Color(0xFF10B981).withValues(
+                              alpha: 0.14,
+                            ),
+                            borderRadius: BorderRadius.circular(10),
+                          ),
+                          child: Text(
+                            isRo
+                                ? '✓ Foto verificată la fața locului'
+                                : '✓ Verified on-site photo',
+                            style: theme.textTheme.labelSmall?.copyWith(
+                              color: const Color(0xFF047857),
+                              fontWeight: FontWeight.w700,
+                            ),
+                          ),
+                        ),
+                      ],
+                      if ((report.photoThumbUrl ?? report.photoUrl)
+                              ?.startsWith('http') ==
+                          true) ...[
+                        const SizedBox(height: 6),
+                        ClipRRect(
+                          borderRadius: BorderRadius.circular(10),
+                          child: Image.network(
+                            report.photoThumbUrl ?? report.photoUrl!,
+                            height: 88,
+                            width: double.infinity,
+                            fit: BoxFit.cover,
+                            errorBuilder: (_, _, _) => const SizedBox.shrink(),
+                          ),
+                        ),
+                      ],
                     ],
                   ),
                 ),

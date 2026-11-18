@@ -65,16 +65,18 @@ Map<String, dynamic> rewriteStyleForProxy(
       if (!isTiled) continue;
 
       final sourceMap = source as Map<String, dynamic>;
-      sourceMap.remove('url');
       if (sourceMap['type'] == 'raster-dem') {
+        sourceMap.remove('url');
         sourceMap['tiles'] = ['$proxyBaseUrl/dem/{z}/{x}/{y}.png'];
         sourceMap['encoding'] = 'terrarium';
         sourceMap['tileSize'] = 512;
         sourceMap['maxzoom'] = _proxyDemMaxZoom;
-      } else {
+      } else if (sourceMap['type'] == 'vector') {
+        sourceMap.remove('url');
         sourceMap['tiles'] = ['$proxyBaseUrl/vector/{z}/{x}/{y}.pbf'];
         sourceMap['maxzoom'] = _proxyVectorMaxZoom;
       }
+      // Sources with type == 'raster' keep their original tiles & maxzoom untouched!
     }
   }
 

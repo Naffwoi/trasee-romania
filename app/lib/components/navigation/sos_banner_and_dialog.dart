@@ -1,10 +1,15 @@
 import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
+import 'package:maplibre/maplibre.dart' show Geographic;
 import 'package:url_launcher/url_launcher.dart';
+import 'package:wanderer/components/navigation/rescue_coordinates_and_signal_card.dart';
+import 'package:wanderer/models/emergency/salvamont_models.dart';
 import 'package:wanderer/models/live/trail_live_models.dart';
 import 'package:wanderer/theme/colors.dart';
+import 'package:wanderer/util/emergency/salvamont_resolver.dart';
 import 'package:wanderer/util/map/heading_math.dart' show shortestAngleDelta;
+import 'package:wanderer/util/navigation/dem_tile_grid.dart';
 import 'package:wanderer/util/navigation/off_trail_router.dart';
 
 class SosTriggerSubmission {
@@ -33,6 +38,14 @@ Future<SosTriggerSubmission?> showSosTriggerDialog(
   String initialName = '',
   bool isOnline = true,
   bool isRo = true,
+  NearestSalvamontResolution? salvamontResolution,
+  ValueChanged<SalvamontPoint>? onRouteToSalvamont,
+  double? userLat,
+  double? userLon,
+  double? userEle,
+  double? userAccuracy,
+  DemTileGrid? demGrid,
+  List<Geographic> trailPoints = const <Geographic>[],
 }) {
   return showModalBottomSheet<SosTriggerSubmission>(
     context: context,
@@ -45,6 +58,14 @@ Future<SosTriggerSubmission?> showSosTriggerDialog(
       initialName: initialName,
       isOnline: isOnline,
       isRo: isRo,
+      salvamontResolution: salvamontResolution,
+      onRouteToSalvamont: onRouteToSalvamont,
+      userLat: userLat,
+      userLon: userLon,
+      userEle: userEle,
+      userAccuracy: userAccuracy,
+      demGrid: demGrid,
+      trailPoints: trailPoints,
     ),
   );
 }
@@ -93,11 +114,27 @@ class SosTriggerDialog extends StatefulWidget {
     this.initialName = '',
     this.isOnline = true,
     this.isRo = true,
+    this.salvamontResolution,
+    this.onRouteToSalvamont,
+    this.userLat,
+    this.userLon,
+    this.userEle,
+    this.userAccuracy,
+    this.demGrid,
+    this.trailPoints = const <Geographic>[],
   });
 
   final String initialName;
   final bool isOnline;
   final bool isRo;
+  final NearestSalvamontResolution? salvamontResolution;
+  final ValueChanged<SalvamontPoint>? onRouteToSalvamont;
+  final double? userLat;
+  final double? userLon;
+  final double? userEle;
+  final double? userAccuracy;
+  final DemTileGrid? demGrid;
+  final List<Geographic> trailPoints;
 
   @override
   State<SosTriggerDialog> createState() => _SosTriggerDialogState();
@@ -221,16 +258,45 @@ class _SosTriggerDialogState extends State<SosTriggerDialog> {
                       foregroundColor: const Color(0xFF991B1B),
                       side: const BorderSide(color: Color(0xFFDC2626)),
                     ),
-                    onPressed: () => _dialPhoneNumber('0725826668'),
+                    onPressed: () => _dialPhoneNumber('+40725826668'),
                     icon: const Icon(Icons.terrain, size: 16),
                     label: const Text(
-                      'Salvamont',
+                      '0-SALVAMONT',
                       overflow: TextOverflow.ellipsis,
                     ),
                   ),
                 ),
               ],
             ),
+            if (widget.salvamontResolution != null &&
+                widget.salvamontResolution!.isMountainZone &&
+                widget.salvamontResolution!.nearestBases.isNotEmpty) ...[
+              const SizedBox(height: 10),
+              _SosNearestSalvamontCard(
+                resolution: widget.salvamontResolution!,
+                isRo: isRo,
+                onRouteToSalvamont: widget.onRouteToSalvamont == null
+                    ? null
+                    : (pt) {
+                        if (Navigator.of(context).canPop()) {
+                          Navigator.of(context).pop();
+                        }
+                        widget.onRouteToSalvamont!(pt);
+                      },
+              ),
+            ],
+            if (widget.userLat != null && widget.userLon != null) ...[
+              const SizedBox(height: 10),
+              RescueCoordinatesAndSignalCard(
+                lat: widget.userLat!,
+                lon: widget.userLon!,
+                elevationM: widget.userEle,
+                accuracyM: widget.userAccuracy,
+                reasonRo: _reason.label(isRo: isRo),
+                demGrid: widget.demGrid,
+                trailPoints: widget.trailPoints,
+              ),
+            ],
             const SizedBox(height: 12),
             Wrap(
               spacing: 8,
@@ -728,6 +794,139 @@ class NearbySosResponderBanner extends StatelessWidget {
             ),
           ],
         ),
+      ),
+    );
+  }
+}
+
+class _SosNearestSalvamontCard extends StatelessWidget {
+  const _SosNearestSalvamontCard({
+    required this.resolution,
+    required this.isRo,
+    this.onRouteToSalvamont,
+  });
+
+  final NearestSalvamontResolution resolution;
+  final bool isRo;
+  final ValueChanged<SalvamontPoint>? onRouteToSalvamont;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final primary = resolution.nearestBases.first;
+    final distStr = primary.distanceM >= 1000
+        ? '${(primary.distanceM / 1000.0).toStringAsFixed(1)} km'
+        : '${primary.distanceM.round()} m';
+
+    return Container(
+      key: const ValueKey('sos-salvamont-nearest-card'),
+      padding: const EdgeInsets.all(10),
+      decoration: BoxDecoration(
+        color: theme.colorScheme.surfaceContainerLow,
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(
+          color: theme.colorScheme.outline.withValues(alpha: 0.45),
+        ),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Row(
+            children: [
+              Expanded(
+                child: Text(
+                  '${primary.point.name} ($distStr ${primary.cardinal})',
+                  style: theme.textTheme.labelMedium?.copyWith(
+                    fontWeight: FontWeight.w800,
+                  ),
+                ),
+              ),
+              if (resolution.isRidgeBorderZone)
+                Container(
+                  key: const ValueKey('sos-ridge-border-badge'),
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 7,
+                    vertical: 2,
+                  ),
+                  decoration: BoxDecoration(
+                    color: const Color(0xFFFEF3C7),
+                    borderRadius: BorderRadius.circular(999),
+                    border: Border.all(
+                      color: const Color(0xFFF59E0B).withValues(alpha: 0.5),
+                    ),
+                  ),
+                  child: Text(
+                    isRo
+                        ? 'Creastă ${resolution.borderCountyCodes.join(' / ')}'
+                        : 'Ridge ${resolution.borderCountyCodes.join(' / ')}',
+                    style: const TextStyle(
+                      color: Color(0xFF92400E),
+                      fontSize: 10,
+                      fontWeight: FontWeight.w800,
+                    ),
+                  ),
+                ),
+            ],
+          ),
+          if (resolution.nearestRefuge != null &&
+              resolution.nearestRefuge!.distanceM < primary.distanceM) ...[
+            const SizedBox(height: 3),
+            Text(
+              '⛺ ${resolution.nearestRefuge!.point.name} (${resolution.nearestRefuge!.distanceM >= 1000 ? '${(resolution.nearestRefuge!.distanceM / 1000.0).toStringAsFixed(1)} km' : '${resolution.nearestRefuge!.distanceM.round()} m'})',
+              style: theme.textTheme.bodySmall?.copyWith(fontSize: 11),
+            ),
+          ],
+          const SizedBox(height: 8),
+          Wrap(
+            spacing: 6,
+            runSpacing: 6,
+            children: [
+              for (final svcEntry in resolution.activeServices)
+                OutlinedButton.icon(
+                  key: ValueKey('sos-call-local-${svcEntry.service.id}'),
+                  style: OutlinedButton.styleFrom(
+                    visualDensity: VisualDensity.compact,
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 10,
+                      vertical: 6,
+                    ),
+                  ),
+                  onPressed: () =>
+                      _dialPhoneNumber(svcEntry.service.primaryPhone),
+                  icon: const Icon(Icons.call, size: 13),
+                  label: Text(
+                    '${svcEntry.service.shortName}: ${formatRoPhoneDisplay(svcEntry.service.primaryPhone)}',
+                    style: const TextStyle(
+                      fontSize: 11,
+                      fontWeight: FontWeight.w700,
+                    ),
+                  ),
+                ),
+            ],
+          ),
+          if (onRouteToSalvamont != null) ...[
+            const SizedBox(height: 8),
+            FilledButton.icon(
+              key: const ValueKey('sos-route-to-salvamont-btn'),
+              style: FilledButton.styleFrom(
+                backgroundColor: const Color(0xFF242734),
+                foregroundColor: Colors.white,
+                visualDensity: VisualDensity.compact,
+              ),
+              onPressed: () => onRouteToSalvamont!(primary.point),
+              icon: const Icon(Icons.route, size: 15),
+              label: Text(
+                isRo
+                    ? 'Rută pe teren spre ${primary.point.name}'
+                    : 'Terrain route to ${primary.point.name}',
+                style: const TextStyle(
+                  fontSize: 11,
+                  fontWeight: FontWeight.w700,
+                ),
+              ),
+            ),
+          ],
+        ],
       ),
     );
   }

@@ -419,24 +419,50 @@ class TrailLiveService {
     required double lon,
     double? ele,
     double? alongTrackM,
+    Uint8List? photoJpegBytes,
+    bool photoVerified = false,
   }) async {
     final options = await _liveOptions();
     final trimmedNote = note?.trim() ?? '';
     final safeNote = trimmedNote.length > 160
         ? trimmedNote.substring(0, 160)
         : trimmedNote;
-    final response = await _dio.post<Object?>(
-      '/live/reports',
-      data: <String, Object?>{
+    final safeEle = (ele != null && ele.isFinite) ? ele : 0.0;
+
+    final Object requestData;
+    if (photoJpegBytes != null && photoJpegBytes.isNotEmpty) {
+      requestData = FormData.fromMap(<String, dynamic>{
+        if (trailId != null && trailId.isNotEmpty) 'trailId': trailId,
+        'category': category.apiValue,
+        if (safeNote.isNotEmpty) 'note': safeNote,
+        'lat': lat.toString(),
+        'lon': lon.toString(),
+        'ele': safeEle.toString(),
+        if (alongTrackM != null && alongTrackM.isFinite)
+          'alongTrackM': alongTrackM.toString(),
+        'photoVerified': photoVerified ? 'true' : 'false',
+        'photo': MultipartFile.fromBytes(
+          photoJpegBytes,
+          filename: 'report.jpg',
+          contentType: DioMediaType('image', 'jpeg'),
+        ),
+      });
+    } else {
+      requestData = <String, Object?>{
         if (trailId != null && trailId.isNotEmpty) 'trailId': trailId,
         'category': category.apiValue,
         if (safeNote.isNotEmpty) 'note': safeNote,
         'lat': lat,
         'lon': lon,
-        'ele': (ele != null && ele.isFinite) ? ele : 0.0,
+        'ele': safeEle,
         if (alongTrackM != null && alongTrackM.isFinite)
           'alongTrackM': alongTrackM,
-      },
+      };
+    }
+
+    final response = await _dio.post<Object?>(
+      '/live/reports',
+      data: requestData,
       options: options,
     );
     final body = _asMap(response.data);

@@ -21,9 +21,13 @@ import 'package:objectbox/objectbox.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:wanderer/components/base/wanderer_attribution.dart';
 import 'package:wanderer/components/map/location_marker_layer.dart';
+import 'package:wanderer/components/map/map_layers_sheet.dart';
+import 'package:wanderer/components/map/salvamont_map_layer.dart';
 import 'package:wanderer/components/map/screen_marker_layer.dart';
+import 'package:wanderer/components/map/terrain_overlay_controls.dart';
 import 'package:wanderer/components/map/trail_layer.dart';
 import 'package:wanderer/components/navigation/group_sheet.dart';
+import 'package:wanderer/components/navigation/peak_finder_sheet.dart';
 import 'package:wanderer/components/navigation/sos_banner_and_dialog.dart';
 import 'package:wanderer/components/navigation/waze_nearby_prompt.dart';
 import 'package:wanderer/components/navigation/waze_report_sheet.dart';
@@ -33,6 +37,7 @@ import 'package:wanderer/components/trail/waypoint_sheet.dart';
 import 'package:wanderer/entities/active_navigation_entity.dart';
 import 'package:wanderer/entities/region_entity.dart';
 import 'package:wanderer/i18n/app_localizations.dart';
+import 'package:wanderer/models/emergency/salvamont_models.dart';
 import 'package:wanderer/models/live/trail_live_models.dart';
 import 'package:wanderer/models/navigate_response.dart';
 import 'package:wanderer/models/trail.dart';
@@ -50,6 +55,7 @@ import 'package:wanderer/provider/objectbox_store_provider.dart';
 import 'package:wanderer/provider/online_status_provider.dart';
 import 'package:wanderer/provider/profile/profile_trails_provider.dart';
 import 'package:wanderer/provider/region/tile_proxy_provider.dart';
+import 'package:wanderer/provider/salvamont_provider.dart';
 import 'package:wanderer/provider/subcategory_preference_provider.dart';
 import 'package:wanderer/provider/toast_provider.dart';
 import 'package:wanderer/provider/trail/category_provider.dart';
@@ -73,11 +79,15 @@ import 'package:wanderer/util/map/compass_rate_policy.dart';
 import 'package:wanderer/util/map/heading_math.dart'
     show normalizeHeading, shortestAngleDelta;
 import 'package:wanderer/theme/colors.dart';
+import 'package:wanderer/util/emergency/salvamont_resolver.dart';
 import 'package:wanderer/util/navigation/cooperative_gps_fusion.dart';
 import 'package:wanderer/util/navigation/dem_tile_grid.dart';
 import 'package:wanderer/util/navigation/eta_calculator.dart';
 import 'package:wanderer/util/navigation/gps_pace_coaster.dart';
 import 'package:wanderer/util/navigation/off_trail_router.dart';
+import 'package:wanderer/util/navigation/peak_finder_engine.dart';
+import 'package:wanderer/util/navigation/ridge_sunset_calculator.dart';
+import 'package:wanderer/util/navigation/sun_calc.dart';
 import 'package:wanderer/util/route/planner_handoff.dart';
 import 'package:wanderer/util/route/track_position_matcher.dart';
 import 'package:wanderer/models/route_travel_bucket.dart';
@@ -279,7 +289,20 @@ class _NavigationScreenState extends ConsumerState<NavigationScreen>
   TrackPositionMatcher? _trackMatcher;
   EtaCalculator? _etaCalculator;
   List<NavTrackPoint> _navTrackPoints = const [];
-  final DemTileGrid _demGrid = DemTileGrid();
+  late final DemTileGrid _demGrid = () {
+    try {
+      final base = ref.read(tileProxyBaseUrlProvider);
+      if (base.isNotEmpty) {
+        return DemTileGrid(tileUrlTemplate: '$base/dem/{z}/{x}/{y}.png');
+      }
+    } catch (_) {}
+    return DemTileGrid();
+  }();
+  final OfflinePeakFinder _peakFinder = OfflinePeakFinder();
+  final ValueNotifier<TrailSolarForecast?> _solarForecastNotifier =
+      ValueNotifier(null);
+  DateTime? _simulatedSolarTime;
+  DateTime? _lastSolarCalcAt;
 
   /// Latest on-track along-track metres for the elevation chart's live
   /// marker, null = off-track/unknown. A [ValueNotifier], like
@@ -567,6 +590,8 @@ class _NavigationScreenState extends ConsumerState<NavigationScreen>
     });
 
     _store = ref.read(objectBoxProvider);
+    ref.read(tileProxyServerProvider)?.terrainDemGrid = _demGrid;
+    unawaited(_peakFinder.ensureLoaded());
     final resumeSession = widget.resumeSession;
     _sessionNavJson = widget.isRecording
         ? null
@@ -985,6 +1010,9 @@ class _NavigationScreenState extends ConsumerState<NavigationScreen>
       }
       _terrainWorker = worker;
       await worker.prefetchCorridor(corridorGeos);
+      if (mounted) {
+        _maybeUpdateSolarForecast(force: true);
+      }
     }());
   }
 
@@ -2454,7 +2482,12 @@ class _NavigationScreenState extends ConsumerState<NavigationScreen>
   Future<void> _openWazeReportSheet(BuildContext context) async {
     final pos = _currentGeoFix();
     if (pos == null) return;
-    final submission = await showWazeReportSheet(context, isRo: _isRo);
+    final submission = await showWazeReportSheet(
+      context,
+      isRo: _isRo,
+      userLat: pos.lat,
+      userLon: pos.lon,
+    );
     if (submission == null || !mounted) return;
 
     final service = _liveService;
@@ -2470,6 +2503,8 @@ class _NavigationScreenState extends ConsumerState<NavigationScreen>
         lon: pos.lon,
         ele: _lastKnownAltitudeM,
         alongTrackM: _lastMatchedAlongTrackM,
+        photoJpegBytes: submission.photoJpegBytes,
+        photoVerified: submission.photoVerified,
       );
       if (!mounted) return;
       _snoozedOrVotedReportIds.add(created.id);
@@ -2548,11 +2583,28 @@ class _NavigationScreenState extends ConsumerState<NavigationScreen>
         ? prefName
         : (currentUser?.username.trim() ?? '');
     final isOnline = ref.read(onlineStatusProvider);
+    final salvamontDs = ref.read(salvamontDatasetProvider).value;
+    final salvamontRes = salvamontDs == null
+        ? null
+        : resolveNearestSalvamont(
+            salvamontDs,
+            lat: pos.lat,
+            lon: pos.lon,
+            ele: _lastKnownAltitudeM,
+          );
     final submission = await showSosTriggerDialog(
       context,
       initialName: initialName,
       isOnline: isOnline,
       isRo: _isRo,
+      salvamontResolution: salvamontRes,
+      onRouteToSalvamont: _handleRouteToSalvamontBase,
+      userLat: pos.lat,
+      userLon: pos.lon,
+      userEle: _lastKnownAltitudeM,
+      userAccuracy: _effectiveGpsAccuracy.value,
+      demGrid: _demGrid,
+      trailPoints: _navTrackPoints.map((p) => p.geographic).toList(growable: false),
     );
     if (submission == null || !mounted) return;
 
@@ -3430,6 +3482,182 @@ class _NavigationScreenState extends ConsumerState<NavigationScreen>
         });
   }
 
+  void _handleRouteToSalvamontBase(SalvamontPoint target) {
+    final pos = _currentGeoFix();
+    if (pos == null) return;
+    final targetGeo = ml.Geographic(lat: target.lat, lon: target.lon);
+    if (ref.read(onlineStatusProvider) &&
+        (_demGrid.sampleElevation(pos.lat, pos.lon) == null ||
+            _demGrid.sampleElevation(targetGeo.lat, targetGeo.lon) == null)) {
+      unawaited(
+        _demGrid.prefetchCorridor([pos, targetGeo]).then((_) {
+          if (!mounted) return;
+          final cur = _currentGeoFix();
+          if (cur == null) return;
+          final refreshed = OffTrailRouter.computeDirectRescueRoute(
+            userPos: cur,
+            userEleM: _lastKnownAltitudeM,
+            targetPos: targetGeo,
+            targetEleM: target.ele?.toDouble(),
+            referencePoints: _navTrackPoints,
+            sampler: _demGrid.sampleElevation,
+            mode: _offTrailMode,
+            localeCode: _localeCode,
+            isCycling: _etaCalculator?.isCycling ?? false,
+          );
+          _rescueRouteNotifier.value = refreshed;
+          _pushRescueSource(refreshed);
+        }),
+      );
+    }
+
+    final route = OffTrailRouter.computeDirectRescueRoute(
+      userPos: pos,
+      userEleM: _lastKnownAltitudeM,
+      targetPos: targetGeo,
+      targetEleM: target.ele?.toDouble(),
+      referencePoints: _navTrackPoints,
+      sampler: _demGrid.sampleElevation,
+      mode: _offTrailMode,
+      localeCode: _localeCode,
+      isCycling: _etaCalculator?.isCycling ?? false,
+    );
+    _rescueRouteNotifier.value = route;
+    _pushRescueSource(route);
+    _controller?.animateCamera(
+      center: targetGeo,
+      nativeDuration: const Duration(milliseconds: 500),
+    );
+  }
+
+  void _maybeUpdateSolarForecast({bool force = false}) {
+    if (widget.isRecording || _navTrackPoints.isEmpty) return;
+    final calc = _etaCalculator;
+    if (calc == null) return;
+    final now = DateTime.now();
+    if (!force &&
+        _lastSolarCalcAt != null &&
+        now.difference(_lastSolarCalcAt!).inSeconds < 60) {
+      return;
+    }
+    _lastSolarCalcAt = now;
+    _solarForecastNotifier.value = computeTrailSolarForecast(
+      points: _navTrackPoints,
+      etaCalc: calc,
+      dem: _demGrid,
+      alongTrackM: _lastMatchedAlongTrackM ?? 0.0,
+      now: now,
+      offTrailDurationSec: _offTrailNotifier.value?.estimatedSeconds,
+      rejoinAlongTrackM: _offTrailNotifier.value?.rejoinAlongTrackM,
+    );
+  }
+
+  Future<void> _openPeakFinderSheet(BuildContext context) async {
+    await _peakFinder.ensureLoaded();
+    if (!mounted) return;
+    final center =
+        _currentGeoFix() ??
+        _navTrackPoints.firstOrNull?.geographic ??
+        const ml.Geographic(lat: 45.4457, lon: 25.4563);
+    if (ref.read(onlineStatusProvider) &&
+        _demGrid.sampleElevation(center.lat, center.lon) == null) {
+      await _demGrid.prefetchCorridor([center]);
+      if (!mounted) return;
+    }
+    final panorama = _peakFinder.computePanorama(
+      _demGrid,
+      center.lat,
+      center.lon,
+      _lastKnownAltitudeM,
+      localeCode: _localeCode,
+    );
+    if (!mounted) return;
+    await showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: Colors.transparent,
+      builder: (ctx) => PeakFinderSheet(
+        panorama: panorama,
+        finder: _peakFinder,
+        onSelectPeak: (peak) {
+          Navigator.of(ctx).pop();
+          _controller?.animateCamera(
+            center: ml.Geographic(lat: peak.lat, lon: peak.lon),
+            nativeDuration: const Duration(milliseconds: 500),
+          );
+        },
+      ),
+    );
+  }
+
+  Future<void> _syncTerrainIntelLayers(
+    ml.StyleController style, {
+    required bool showAvalancheSlope,
+    required bool showSolarShadows,
+    required DateTime solarTime,
+    required ml.Geographic center,
+  }) async {
+    String proxyBase;
+    try {
+      proxyBase = ref.read(tileProxyBaseUrlProvider);
+    } catch (_) {
+      return;
+    }
+    if (proxyBase.isEmpty) return;
+
+    Future<void> safeRemove(String layerId, String sourceId) async {
+      try {
+        await style.removeLayer(layerId);
+      } catch (_) {}
+      try {
+        await style.removeSource(sourceId);
+      } catch (_) {}
+    }
+
+    await safeRemove('avalanche-slope-layer', 'avalanche-slope');
+    if (showAvalancheSlope) {
+      await style.addSource(
+        ml.RasterSource(
+          id: 'avalanche-slope',
+          tiles: ['$proxyBase/slope/{z}/{x}/{y}.png'],
+          tileSize: 256,
+          minZoom: 12,
+          maxZoom: 13,
+        ),
+      );
+      await style.addLayer(
+        const ml.RasterStyleLayer(
+          id: 'avalanche-slope-layer',
+          sourceId: 'avalanche-slope',
+          paint: {'raster-opacity': 0.62},
+        ),
+      );
+    }
+
+    await safeRemove('solar-shadows-layer', 'solar-shadows');
+    if (showSolarShadows) {
+      final sun = getSunPosition(solarTime, center.lat, center.lon);
+      await style.addSource(
+        ml.RasterSource(
+          id: 'solar-shadows',
+          tiles: [
+            '$proxyBase/shade/{z}/{x}/{y}.png?az=${sun.azimuthDeg.round()}&alt=${sun.altitudeDeg.round()}',
+          ],
+          tileSize: 256,
+          minZoom: 12,
+          maxZoom: 13,
+        ),
+      );
+      await style.addLayer(
+        const ml.RasterStyleLayer(
+          id: 'solar-shadows-layer',
+          sourceId: 'solar-shadows',
+          paint: {'raster-opacity': 0.78},
+        ),
+      );
+    }
+  }
+
   /// Body of the Android foreground-service notification for this session.
   ///
   /// Recording says what it is doing; navigating names the trail being
@@ -3747,6 +3975,11 @@ class _NavigationScreenState extends ConsumerState<NavigationScreen>
     _powerEngine.dispose();
     _radioScheduler.dispose();
     unawaited(_terrainWorker?.dispose());
+    final proxy = ref.read(tileProxyServerProvider);
+    if (proxy != null && identical(proxy.terrainDemGrid, _demGrid)) {
+      proxy.terrainDemGrid = null;
+    }
+    _solarForecastNotifier.dispose();
     unawaited(_demGrid.closeArchives());
     _persistTimer?.cancel();
     _coasterTimer?.cancel();
@@ -4363,6 +4596,18 @@ class _NavigationScreenState extends ConsumerState<NavigationScreen>
           },
         ),
       );
+
+      final localSettings = ref.read(localSettingsProvider);
+      await _syncTerrainIntelLayers(
+        style,
+        showAvalancheSlope: localSettings.showAvalancheSlope,
+        showSolarShadows: localSettings.showSolarShadows,
+        solarTime: _simulatedSolarTime ?? DateTime.now(),
+        center:
+            _currentGeoFix() ??
+            _navTrackPoints.firstOrNull?.geographic ??
+            const ml.Geographic(lat: 45.4457, lon: 25.4563),
+      );
     } catch (e) {
       debugPrint('NavigationScreen: onStyleLoaded failed — $e');
     }
@@ -4399,6 +4644,40 @@ class _NavigationScreenState extends ConsumerState<NavigationScreen>
     }
 
     ref.listen(mapStyleJsonProvider, (_, _) => _swapStyle());
+
+    ref.listen(showAvalancheSlopeProvider, (_, next) {
+      final style = _loadedStyle;
+      if (style == null) return;
+      unawaited(
+        _syncTerrainIntelLayers(
+          style,
+          showAvalancheSlope: next,
+          showSolarShadows: ref.read(showSolarShadowsProvider),
+          solarTime: _simulatedSolarTime ?? DateTime.now(),
+          center:
+              _currentGeoFix() ??
+              _navTrackPoints.firstOrNull?.geographic ??
+              const ml.Geographic(lat: 45.4457, lon: 25.4563),
+        ),
+      );
+    });
+
+    ref.listen(showSolarShadowsProvider, (_, next) {
+      final style = _loadedStyle;
+      if (style == null) return;
+      unawaited(
+        _syncTerrainIntelLayers(
+          style,
+          showAvalancheSlope: ref.read(showAvalancheSlopeProvider),
+          showSolarShadows: next,
+          solarTime: _simulatedSolarTime ?? DateTime.now(),
+          center:
+              _currentGeoFix() ??
+              _navTrackPoints.firstOrNull?.geographic ??
+              const ml.Geographic(lat: 45.4457, lon: 25.4563),
+        ),
+      );
+    });
 
     // Breadcrumb in-place update: swap the native tail source's data on every
     // new position fix, never remove/re-add sources. Keyed on
@@ -4550,6 +4829,10 @@ class _NavigationScreenState extends ConsumerState<NavigationScreen>
                           onReportTap: _onReportMarkerTapped,
                           onSosTap: _onSosMarkerTapped,
                           onGroupMemberTap: _onGroupMemberTapped,
+                        ),
+                        SalvamontMapLayer(
+                          isRo: _isRo,
+                          onRouteToPoint: _handleRouteToSalvamontBase,
                         ),
                         _LocationMarkerLayer(
                           position: _currentPosition,
@@ -4739,6 +5022,57 @@ class _NavigationScreenState extends ConsumerState<NavigationScreen>
                                   ),
                                 ),
                                 const SizedBox(height: 8),
+                                IconButton(
+                                  key: const ValueKey('nav-map-layers-btn'),
+                                  tooltip: _isRo ? 'Straturi hartă' : 'Map layers',
+                                  onPressed: () => showMapLayersSheet(context),
+                                  icon: FaIcon(
+                                    FontAwesomeIcons.layerGroup,
+                                    color: Theme.of(
+                                      context,
+                                    ).colorScheme.onSurface,
+                                    size: 18,
+                                  ),
+                                  style: IconButton.styleFrom(
+                                    backgroundColor: Theme.of(context)
+                                        .colorScheme
+                                        .surface
+                                        .withValues(alpha: 0.94),
+                                    side: BorderSide(
+                                      color: Theme.of(context)
+                                          .colorScheme
+                                          .outline
+                                          .withValues(alpha: 0.55),
+                                    ),
+                                  ),
+                                ),
+                                const SizedBox(height: 8),
+                                IconButton(
+                                  key: const ValueKey('nav-peak-finder-btn'),
+                                  tooltip: _isRo ? 'Ce vârf văd?' : 'Peak Finder',
+                                  onPressed: () =>
+                                      _openPeakFinderSheet(context),
+                                  icon: Icon(
+                                    Icons.landscape_outlined,
+                                    color: Theme.of(
+                                      context,
+                                    ).colorScheme.onSurface,
+                                    size: 21,
+                                  ),
+                                  style: IconButton.styleFrom(
+                                    backgroundColor: Theme.of(context)
+                                        .colorScheme
+                                        .surface
+                                        .withValues(alpha: 0.94),
+                                    side: BorderSide(
+                                      color: Theme.of(context)
+                                          .colorScheme
+                                          .outline
+                                          .withValues(alpha: 0.55),
+                                    ),
+                                  ),
+                                ),
+                                const SizedBox(height: 8),
                                 ValueListenableBuilder<SosAlertModel?>(
                                   valueListenable: _myActiveSos,
                                   builder: (context, mine, _) =>
@@ -4773,9 +5107,123 @@ class _NavigationScreenState extends ConsumerState<NavigationScreen>
                               unit,
                             ),
                           _buildLiveSosOverlays(context),
+                          ValueListenableBuilder<TrailSolarForecast?>(
+                            valueListenable: _solarForecastNotifier,
+                            builder: (context, forecast, _) {
+                              final ridge = forecast?.finishRidgeSunset.ridgeSunset;
+                              if (forecast == null ||
+                                  ridge == null ||
+                                  forecast.status ==
+                                      LightSafetyStatus.daylightSafe) {
+                                return const SizedBox.shrink();
+                              }
+                              final local = ridge.toLocal();
+                              final hh = local.hour.toString().padLeft(2, '0');
+                              final mm = local.minute.toString().padLeft(2, '0');
+                              final Color pillBg = switch (forecast.status) {
+                                LightSafetyStatus.nightDanger =>
+                                  const Color(0xFFDC2626),
+                                LightSafetyStatus.twilightWarning =>
+                                  const Color(0xFFD97706),
+                                LightSafetyStatus.ridgeShade =>
+                                  const Color(0xFF92400E),
+                                LightSafetyStatus.daylightSafe =>
+                                  const Color(0xFF242734),
+                              };
+                              return Padding(
+                                padding: const EdgeInsets.only(top: 6),
+                                child: Container(
+                                  key: const ValueKey('ridge-sunset-warning'),
+                                  padding: const EdgeInsets.symmetric(
+                                    horizontal: 10,
+                                    vertical: 5,
+                                  ),
+                                  decoration: BoxDecoration(
+                                    color: pillBg.withValues(alpha: 0.92),
+                                    borderRadius: BorderRadius.circular(10),
+                                  ),
+                                  child: Row(
+                                    mainAxisSize: MainAxisSize.min,
+                                    children: [
+                                      const Icon(
+                                        Icons.wb_twilight,
+                                        color: Colors.white,
+                                        size: 15,
+                                      ),
+                                      const SizedBox(width: 6),
+                                      Text(
+                                        _isRo
+                                            ? 'Apus creastă $hh:$mm · frontala pregătită'
+                                            : 'Ridge sunset $hh:$mm · pack headlamp',
+                                        style: const TextStyle(
+                                          color: Colors.white,
+                                          fontSize: 11.5,
+                                          fontWeight: FontWeight.w700,
+                                        ),
+                                      ),
+                                    ],
+                                  ),
+                                ),
+                              );
+                            },
+                          ),
                         ],
                       ),
                     ),
+                  ),
+
+                  Consumer(
+                    builder: (context, ref, _) {
+                      final showSlope = ref.watch(showAvalancheSlopeProvider);
+                      final showShade = ref.watch(showSolarShadowsProvider);
+                      if (!showSlope && !showShade) {
+                        return const SizedBox.shrink();
+                      }
+                      final center =
+                          _currentGeoFix() ??
+                          _navTrackPoints.firstOrNull?.geographic ??
+                          const ml.Geographic(lat: 45.4457, lon: 25.4563);
+                      return Positioned(
+                        left: 12,
+                        bottom:
+                            MediaQuery.of(context).size.height *
+                                _kSheetMinSize +
+                            14,
+                        child: Column(
+                          mainAxisSize: MainAxisSize.min,
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            if (showSlope) SlopeLegendPill(isRo: _isRo),
+                            if (showSlope && showShade)
+                              const SizedBox(height: 6),
+                            if (showShade)
+                              SolarTimeScrubberCard(
+                                lat: center.lat,
+                                lon: center.lon,
+                                simulatedTime:
+                                    _simulatedSolarTime ?? DateTime.now(),
+                                onChanged: (nextTime) {
+                                  setState(
+                                    () => _simulatedSolarTime = nextTime,
+                                  );
+                                  final style = _loadedStyle;
+                                  if (style != null) {
+                                    unawaited(
+                                      _syncTerrainIntelLayers(
+                                        style,
+                                        showAvalancheSlope: showSlope,
+                                        showSolarShadows: showShade,
+                                        solarTime: nextTime,
+                                        center: center,
+                                      ),
+                                    );
+                                  }
+                                },
+                              ),
+                          ],
+                        ),
+                      );
+                    },
                   ),
 
                   Positioned(

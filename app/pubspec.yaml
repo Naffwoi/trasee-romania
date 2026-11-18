@@ -91,6 +91,7 @@ flutter:
   assets:
     - assets/svgs/
     - assets/map/
+    - assets/data/
   fonts:
     - family: IBMPlexSans
       fonts:

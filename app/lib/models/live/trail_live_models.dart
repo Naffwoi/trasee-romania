@@ -211,6 +211,9 @@ class TrailReportModel {
     required this.lon,
     this.ele = 0.0,
     this.alongTrackM,
+    this.photoUrl,
+    this.photoThumbUrl,
+    this.photoVerified = false,
     this.confirmCount = 1,
     this.dismissCount = 0,
     this.createdAt,
@@ -229,6 +232,9 @@ class TrailReportModel {
   final double lon;
   final double ele;
   final double? alongTrackM;
+  final String? photoUrl;
+  final String? photoThumbUrl;
+  final bool photoVerified;
   final int confirmCount;
   final int dismissCount;
   final DateTime? createdAt;
@@ -334,6 +340,9 @@ class TrailReportModel {
     double? lon,
     double? ele,
     double? alongTrackM,
+    String? photoUrl,
+    String? photoThumbUrl,
+    bool? photoVerified,
     int? confirmCount,
     int? dismissCount,
     DateTime? createdAt,
@@ -353,6 +362,9 @@ class TrailReportModel {
       lon: lon ?? this.lon,
       ele: ele ?? this.ele,
       alongTrackM: alongTrackM ?? this.alongTrackM,
+      photoUrl: photoUrl ?? this.photoUrl,
+      photoThumbUrl: photoThumbUrl ?? this.photoThumbUrl,
+      photoVerified: photoVerified ?? this.photoVerified,
       confirmCount: confirmCount ?? this.confirmCount,
       dismissCount: dismissCount ?? this.dismissCount,
       createdAt: createdAt ?? this.createdAt,
@@ -391,6 +403,14 @@ class TrailReportModel {
       alongTrackM: _parseOptionalDouble(
         json['alongTrackM'] ?? json['along_track_m'],
       ),
+      photoUrl: _parseOptionalString(json['photoUrl'] ?? json['photo_url']),
+      photoThumbUrl: _parseOptionalString(
+        json['photoThumbUrl'] ?? json['photo_thumb_url'],
+      ),
+      photoVerified: _parseBool(
+        json['photoVerified'] ?? json['photo_verified'],
+        false,
+      ),
       confirmCount: _parseInt(
         json['confirmCount'] ?? json['confirm_count'],
         1,
@@ -419,6 +439,9 @@ class TrailReportModel {
     'lon': lon,
     'ele': ele,
     'alongTrackM': alongTrackM,
+    if (photoUrl != null) 'photoUrl': photoUrl,
+    if (photoThumbUrl != null) 'photoThumbUrl': photoThumbUrl,
+    'photoVerified': photoVerified,
     'confirmCount': confirmCount,
     'dismissCount': dismissCount,
     'createdAt': createdAt?.toUtc().toIso8601String(),

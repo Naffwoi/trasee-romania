@@ -502,12 +502,39 @@ export async function sendHeartbeat(params: {
 	return normalizeSummaryResponse(data, params.trailId ?? "");
 }
 
+export async function clearHeartbeat(): Promise<void> {
+	try {
+		const headers = new Headers();
+		headers.set("X-Device-Token", getOrCreateDeviceToken());
+		await fetch("/api/v1/live/heartbeat", {
+			method: "DELETE",
+			headers,
+			keepalive: true,
+		});
+	} catch {
+		// Best-effort presence cleanup on page unload / backgrounding
+	}
+}
+
 export async function fetchTrailLiveSummary(
 	trailId: string,
+	coords?: { lat?: number | null; lon?: number | null },
 ): Promise<TrailLiveSummaryDto | null> {
 	if (!trailId) return null;
+	const qs = new URLSearchParams();
+	if (
+		coords &&
+		typeof coords.lat === "number" &&
+		Number.isFinite(coords.lat) &&
+		typeof coords.lon === "number" &&
+		Number.isFinite(coords.lon)
+	) {
+		qs.set("lat", String(coords.lat));
+		qs.set("lon", String(coords.lon));
+	}
+	const suffix = qs.size > 0 ? `?${qs.toString()}` : "";
 	const data = await liveJsonFetch<Record<string, unknown>>(
-		`/api/v1/live/trail/${encodeURIComponent(trailId)}/summary`,
+		`/api/v1/live/trail/${encodeURIComponent(trailId)}/summary${suffix}`,
 		{ method: "GET" },
 	);
 	if (!data) return null;

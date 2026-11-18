@@ -7,10 +7,13 @@ import 'package:flutter_localizations/flutter_localizations.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:maplibre/maplibre.dart';
+import 'package:wanderer/components/navigation/sos_banner_and_dialog.dart';
 import 'package:wanderer/components/navigation/waze_nearby_prompt.dart';
+import 'package:wanderer/components/navigation/waze_report_sheet.dart';
 import 'package:wanderer/components/trail/active_hikers_badge.dart';
 import 'package:wanderer/models/live/trail_live_models.dart';
 import 'package:wanderer/services/trail_live_service.dart';
+import 'package:wanderer/util/navigation/eta_calculator.dart';
 import 'package:wanderer/util/navigation/off_trail_router.dart';
 
 class _FakeLiveAdapter implements HttpClientAdapter {
@@ -326,13 +329,50 @@ void main() {
       expect(offlineRescue, isNotNull);
       expect(offlineRescue!.ascentM, closeTo(80.0, 5.0));
       expect(offlineRescue.instruction, contains('Rescue route'));
+
+      // > 5 km off-trail (e.g. 270+ km away) returns O(1) direct geodesic guidance without thousands of DEM samples.
+      var farSamples = 0;
+      final farReroute = OffTrailRouter.compute(
+        userPos: const Geographic(lat: 47.1584, lon: 27.6014),
+        userEleM: 120.0,
+        trailPoints: const [
+          NavTrackPoint(lat: 46.16, lon: 24.35, ele: 320, distanceM: 0, gradePct: 0),
+          NavTrackPoint(lat: 46.17, lon: 24.36, ele: 340, distanceM: 1350, gradePct: 1.5),
+        ],
+        lastAlongTrackM: 0,
+        sampler: (_, _) {
+          farSamples++;
+          return 200.0;
+        },
+      );
+      expect(farReroute, isNotNull);
+      expect(farSamples, lessThanOrEqualTo(8));
+      expect(farReroute!.points, hasLength(2));
     });
   });
 
   group('Live community widgets', () {
-    testWidgets('ActiveHikersBadge renders RO and EN 30-min presence copy', (
+    testWidgets('ActiveHikersBadge hides when 0 and renders live nearby copy without 30 min', (
       tester,
     ) async {
+      await tester.pumpWidget(
+        const ProviderScope(
+          child: MaterialApp(
+            localizationsDelegates: [
+              GlobalMaterialLocalizations.delegate,
+              GlobalWidgetsLocalizations.delegate,
+              GlobalCupertinoLocalizations.delegate,
+            ],
+            supportedLocales: [Locale('ro'), Locale('en')],
+            locale: Locale('ro'),
+            home: Scaffold(
+              body: ActiveHikersBadge(countOverride: 0),
+            ),
+          ),
+        ),
+      );
+      expect(find.byKey(const ValueKey('active-hikers-badge')), findsNothing);
+
       await tester.pumpWidget(
         const ProviderScope(
           child: MaterialApp(
@@ -350,10 +390,8 @@ void main() {
         ),
       );
 
-      expect(
-        find.text('4 persoane pe traseu (ultimele 30 min)'),
-        findsOneWidget,
-      );
+      expect(find.text('4 persoane în zonă'), findsOneWidget);
+      expect(find.textContaining('30 min'), findsNothing);
 
       await tester.pumpWidget(
         const ProviderScope(
@@ -372,7 +410,7 @@ void main() {
         ),
       );
 
-      expect(find.text('1 hiker on trail (last 30 min)'), findsOneWidget);
+      expect(find.text('1 person nearby'), findsOneWidget);
 
       // Bare ProviderScope without cookieJarProvider override must settle
       // cleanly with zero uncaught Riverpod errors when trailId is supplied.
@@ -388,6 +426,50 @@ void main() {
       await tester.pumpAndSettle();
       expect(find.byKey(const ValueKey('active-hikers-badge')), findsNothing);
     });
+
+    testWidgets(
+      'SosFloatingButton is icon-only and WazeReportSheet submits in 1 tap without TTL clutter',
+      (tester) async {
+        WazeReportSubmission? submitted;
+        await tester.pumpWidget(
+          MaterialApp(
+            home: Scaffold(
+              body: Builder(
+                builder: (ctx) => Column(
+                  children: [
+                    SosFloatingButton(onPressed: () {}),
+                    ElevatedButton(
+                      key: const ValueKey('open-waze'),
+                      onPressed: () async {
+                        submitted = await showWazeReportSheet(ctx, isRo: true);
+                      },
+                      child: const Text('Open'),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ),
+        );
+
+        // Icon-only SOS button: no aggressive "Ajutor" text
+        expect(find.byKey(const ValueKey('nav-sos-btn')), findsOneWidget);
+        expect(find.text('Ajutor'), findsNothing);
+
+        await tester.tap(find.byKey(const ValueKey('open-waze')));
+        await tester.pumpAndSettle();
+
+        expect(find.textContaining('3h'), findsNothing);
+        expect(find.textContaining('expiră automat'), findsNothing);
+
+        // 1-tap on bear category immediately pops sheet with submission!
+        await tester.tap(find.byKey(const ValueKey('waze-cat-bear')));
+        await tester.pumpAndSettle();
+
+        expect(submitted, isNotNull);
+        expect(submitted!.category, TrailReportCategory.bear);
+      },
+    );
 
     testWidgets(
       'WazeNearbyPrompt dispatches confirm for temporary alert and seasonal votes for spring',

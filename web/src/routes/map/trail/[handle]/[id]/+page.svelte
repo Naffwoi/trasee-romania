@@ -123,7 +123,10 @@
 
     async function loadLiveSummary() {
         if (!trail.id) return;
-        const sum = await fetchTrailLiveSummary(trail.id);
+        const sum = await fetchTrailLiveSummary(trail.id, {
+            lat: trail.lat ?? null,
+            lon: trail.lon ?? null,
+        });
         if (sum) {
             activeHikers30m = sum.activeHikers30m;
             liveReports = sum.reports;
@@ -331,9 +334,11 @@
                 <i class="fa fa-chevron-up" aria-hidden="true"></i>
                 <span>{$_("elevation-profile")} · {$_("details")}</span>
             </button>
-            <div class="pointer-events-auto rounded-full bg-menu-background/95 shadow-lg">
-                <ActiveHikersBadge count={activeHikers30m} loading={liveLoading} compact={true} />
-            </div>
+            {#if activeHikers30m > 0}
+                <div class="pointer-events-auto rounded-full bg-menu-background/95 shadow-lg">
+                    <ActiveHikersBadge count={activeHikers30m} loading={liveLoading} compact={true} />
+                </div>
+            {/if}
         </div>
     {/if}
 
@@ -477,6 +482,12 @@
         overflow: hidden;
         margin: 0;
         background: rgba(var(--menu-background));
+    }
+    #trail-detail-map :global(.maplibregl-ctrl-top-right .maplibregl-ctrl-group.wanderer-style-switcher) {
+        overflow: visible;
+    }
+    #trail-detail-map :global(.maplibregl-ctrl-top-right .maplibregl-ctrl-group.wanderer-style-switcher > button) {
+        border-radius: 9999px;
     }
     #trail-detail-map :global(.maplibregl-ctrl-top-right .maplibregl-ctrl-group button) {
         width: 40px;

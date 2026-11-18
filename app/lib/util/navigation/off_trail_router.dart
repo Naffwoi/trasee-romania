@@ -334,6 +334,62 @@ class OffTrailRouter {
     }
 
     final nearestDistM = math.sqrt(nearestDistSq);
+    if (nearestDistM > 5000.0) {
+      final startEle = (userEleM != null && userEleM.isFinite)
+          ? userEleM
+          : sampleWithFallback(userPos.lat, userPos.lon);
+      final endEle = nearestEle.isFinite
+          ? nearestEle
+          : sampleWithFallback(nearestLat, nearestLon);
+      final dEle = endEle - startEle;
+      final slopeRatio = nearestDistM > 0.1 ? dEle / nearestDistM : 0.0;
+      final gradePct = slopeRatio * 100.0;
+      final maxSlopeDeg = math.atan(slopeRatio.abs()) * 180.0 / math.pi;
+      final vMs = 0.6 * toblerSpeedKmh(slopeRatio, isCycling: isCycling) / 3.6;
+      final estSec = (nearestDistM / math.max(0.15, vMs)).round();
+      final bearingDeg = bearingDegrees(
+        userPos.lat,
+        userPos.lon,
+        nearestLat,
+        nearestLon,
+      );
+      final isRo = localeCode.toLowerCase().startsWith('ro');
+      final cardinal = cardinalDirection(bearingDeg, localeCode: localeCode);
+      final distText = '${(nearestDistM / 1000.0).toStringAsFixed(1)} km';
+      return OffTrailRerouteResult(
+        mode: mode,
+        points: <OffTrailPoint>[
+          OffTrailPoint(
+            lat: userPos.lat,
+            lon: userPos.lon,
+            ele: startEle,
+            distanceM: 0.0,
+            gradePct: gradePct,
+          ),
+          OffTrailPoint(
+            lat: nearestLat,
+            lon: nearestLon,
+            ele: endEle,
+            distanceM: nearestDistM,
+            gradePct: gradePct,
+          ),
+        ],
+        rejoinPoint: Geographic(lat: nearestLat, lon: nearestLon),
+        rejoinAlongTrackM: nearestAlongM,
+        rejoinEleM: endEle,
+        distanceM: nearestDistM,
+        estimatedSeconds: estSec,
+        ascentM: math.max(0.0, dEle),
+        descentM: math.max(0.0, -dEle),
+        maxSlopeDeg: maxSlopeDeg,
+        avoidedSteepHazard: false,
+        initialBearingDeg: bearingDeg,
+        instruction: isRo
+            ? 'Îndreaptă-te spre $cardinal ($distText până la potecă)'
+            : 'Head $cardinal ($distText to trail)',
+        slopeAdvice: isRo ? 'Departe de traseu' : 'Far from trail',
+      );
+    }
     final padM = math.max(250.0, 0.45 * nearestDistM);
     minX -= padM;
     maxX += padM;

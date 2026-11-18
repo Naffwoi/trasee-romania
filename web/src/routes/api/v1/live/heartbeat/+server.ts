@@ -50,3 +50,17 @@ export async function POST(event: RequestEvent) {
 		resolveActorId(event),
 	);
 }
+
+export async function DELETE(event: RequestEvent) {
+	const identity = resolveDeviceIdentity(event);
+	if (!identity.ok) {
+		return identity.response;
+	}
+
+	return forwardAndProxyLiveJson(
+		"/heartbeat",
+		{ method: "DELETE" },
+		identity.deviceHash,
+		resolveActorId(event),
+	);
+}

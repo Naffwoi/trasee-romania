@@ -7,6 +7,41 @@ import { OverpassLayer, type OverpassPopupActionFactory } from "./overpass-layer
 const DEFAULT_GLYPHS = "https://tiles.openfreemap.org/fonts/{fontstack}/{range}.pbf";
 
 
+function normalizeMapState(raw: unknown): MapState {
+    const cleanDefault: MapState = JSON.parse(JSON.stringify(defaultMapState));
+    if (!raw || typeof raw !== "object") {
+        return cleanDefault;
+    }
+    const candidate = raw as Record<string, unknown>;
+    if (typeof candidate.base === "string" && candidate.base in baseMapStyles) {
+        cleanDefault.base = candidate.base;
+    }
+    if (candidate.overlays && typeof candidate.overlays === "object") {
+        const ov = candidate.overlays as Record<string, unknown>;
+        for (const key of Object.keys(cleanDefault.overlays)) {
+            if (typeof ov[key] === "boolean") {
+                cleanDefault.overlays[key] = ov[key];
+            }
+        }
+    }
+    if (candidate.pois && typeof candidate.pois === "object") {
+        const rawPois = candidate.pois as Record<string, unknown>;
+        const amenitySrc = (rawPois.amenity ?? rawPois.ammenity) as Record<string, unknown> | undefined;
+        for (const [cat, items] of Object.entries(cleanDefault.pois)) {
+            const catSrc = (cat === "amenity" ? amenitySrc : rawPois[cat]) as
+                | Record<string, unknown>
+                | undefined;
+            if (!catSrc || typeof catSrc !== "object") continue;
+            for (const poiKey of Object.keys(items)) {
+                if (typeof catSrc[poiKey] === "boolean") {
+                    cleanDefault.pois[cat][poiKey] = catSrc[poiKey];
+                }
+            }
+        }
+    }
+    return cleanDefault;
+}
+
 export class LayerManager {
     private map: M.Map;
     state!: MapState;
@@ -18,19 +53,13 @@ export class LayerManager {
         this.map = map;
         this.overpassActionFactory = options?.overpassActionFactory;
 
-        const storedMapState = localStorage.getItem("wanderer-ro-map-state-v3")
-        if (storedMapState) {
-            this.state = JSON.parse(storedMapState)
-
-            // Fix for spelling correction introduced in v0.18.4
-            if (this.state && 'ammenity' in this.state.pois) {
-                this.state.pois.amenity = this.state.pois.ammenity;
-                delete this.state.pois.ammenity;
-
-                localStorage.setItem('wanderer-ro-map-state-v3', JSON.stringify(this.state));
-            }
-        } else {
-            this.state = defaultMapState
+        try {
+            const storedMapState = localStorage.getItem("wanderer-ro-map-state-v3");
+            this.state = storedMapState
+                ? normalizeMapState(JSON.parse(storedMapState))
+                : normalizeMapState(null);
+        } catch {
+            this.state = normalizeMapState(null);
         }
     }
 

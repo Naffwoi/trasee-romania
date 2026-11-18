@@ -375,6 +375,12 @@
         margin: 0;
         background: rgba(var(--menu-background));
     }
+    #trail-map :global(.maplibregl-ctrl-top-right .maplibregl-ctrl-group.wanderer-style-switcher) {
+        overflow: visible;
+    }
+    #trail-map :global(.maplibregl-ctrl-top-right .maplibregl-ctrl-group.wanderer-style-switcher > button) {
+        border-radius: 9999px;
+    }
     #trail-map :global(.maplibregl-ctrl-top-right .maplibregl-ctrl-group button) {
         width: 40px;
         height: 40px;

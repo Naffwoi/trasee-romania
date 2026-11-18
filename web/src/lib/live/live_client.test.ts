@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { computeDirectRescueRoute } from "#lib/navigation/off_trail_router.ts";
 import {
+	clearHeartbeat,
 	connectLiveStream,
 	createReport,
 	fetchTrailLiveSummary,
@@ -584,5 +585,40 @@ describe("computeDirectRescueRoute (DEM A* to SOS victim)", () => {
 		expect(endPt.lat).toBeCloseTo(farVictim.lat, 5);
 		expect(endPt.lon).toBeCloseTo(farVictim.lon, 5);
 		expect(endPt.ele).toBeCloseTo(1350, 1);
+	});
+});
+
+describe("live_client location-based summary & clearHeartbeat", () => {
+	const origWindow = globalThis.window;
+	const origFetch = globalThis.fetch;
+
+	afterEach(() => {
+		(globalThis as Record<string, unknown>).window = origWindow;
+		globalThis.fetch = origFetch;
+	});
+
+	it("passes optional lat/lon to fetchTrailLiveSummary and sends DELETE on clearHeartbeat", async () => {
+		const calls: Array<{ url: string; method: string }> = [];
+		globalThis.fetch = vi.fn().mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => {
+			const url = typeof input === "string" ? input : input.toString();
+			calls.push({ url, method: init?.method ?? "GET" });
+			return new Response(
+				JSON.stringify({ trailId: "t-1", activeHikers30m: 2, reports: [], sosAlerts: [] }),
+				{ status: 200, headers: { "content-type": "application/json" } },
+			);
+		});
+
+		const sum = await fetchTrailLiveSummary("t-1", { lat: 45.44, lon: 25.55 });
+		expect(sum?.activeHikers30m).toBe(2);
+		expect(calls[0]).toEqual({
+			url: "/api/v1/live/trail/t-1/summary?lat=45.44&lon=25.55",
+			method: "GET",
+		});
+
+		await clearHeartbeat();
+		expect(calls[1]).toEqual({
+			url: "/api/v1/live/heartbeat",
+			method: "DELETE",
+		});
 	});
 });

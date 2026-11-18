@@ -148,16 +148,21 @@ func TestTrailLivePresenceCountingPrivacyAndGC(t *testing.T) {
 	curTime := time.Date(2026, 11, 17, 12, 0, 0, 0, time.UTC)
 	handler.Now = func() time.Time { return curTime }
 
-	// 3 distinct hikers on trail-bucegi, 1 hiker on trail-piatra-craiului.
+	// Active devices:
+	// - hiker-a: physically in Bucegi area on trail-bucegi
+	// - hiker-b: physically in Bucegi area on trail-bucegi
+	// - map-roamer: has app open on general map (trailId="") with location on in Bucegi area (~600 m away)
+	// - desktop-far: clicked Start on trail-bucegi from 306 km away (Iași/home) -> must NOT count as in area!
+	// - hiker-d: physically in Piatra Craiului (~28 km away)
 	for _, h := range []struct {
 		device string
-		trail  string
 		body   string
 	}{
-		{"hiker-a", "trail-bucegi", `{"trailId":"trail-bucegi","lat":45.408123,"lon":25.541987,"ele":2025,"inNavigation":true}`},
-		{"hiker-b", "trail-bucegi", `{"trailId":"trail-bucegi","lat":45.412345,"lon":25.545678,"ele":2110,"inNavigation":true}`},
-		{"hiker-c", "trail-bucegi", `{"trailId":"trail-bucegi","lat":45.419876,"lon":25.549111,"ele":2205,"inNavigation":false}`},
-		{"hiker-d", "trail-craiului", `{"trailId":"trail-craiului","lat":45.529999,"lon":25.221111,"ele":1800,"inNavigation":true}`},
+		{"hiker-a", `{"trailId":"trail-bucegi","lat":45.408123,"lon":25.541987,"ele":2025,"inNavigation":true}`},
+		{"hiker-b", `{"trailId":"trail-bucegi","lat":45.412345,"lon":25.545678,"ele":2110,"inNavigation":true}`},
+		{"map-roamer", `{"trailId":"","lat":45.410500,"lon":25.543500,"ele":2050,"inNavigation":false}`},
+		{"desktop-far", `{"trailId":"trail-bucegi","lat":47.158455,"lon":27.601442,"ele":120,"inNavigation":true}`},
+		{"hiker-d", `{"trailId":"trail-craiului","lat":45.529999,"lon":25.221111,"ele":1800,"inNavigation":true}`},
 	} {
 		status, raw := invokeLiveHandler(t, app, handler.Heartbeat, liveCallOptions{
 			method:     http.MethodPost,
@@ -171,7 +176,30 @@ func TestTrailLivePresenceCountingPrivacyAndGC(t *testing.T) {
 		}
 	}
 
-	// Repeat heartbeat from hiker-a (upsert by device_hash, must NOT double-count)
+	// 1. Distant desktop user (306 km away) who pressed Start sees 0 if looking around their own coords,
+	// or if trail coords are checked via summary, desktop-far is NEVER counted in Bucegi!
+	status, sumFarCheck := invokeLiveHandler(t, app, handler.TrailSummary, liveCallOptions{
+		method:     http.MethodGet,
+		target:     "/live/trail/trail-bucegi/summary?lat=45.4085&lon=25.5420",
+		secret:     testLiveSecret,
+		deviceHash: "desktop-far",
+		pathValues: map[string]string{"id": "trail-bucegi"},
+	})
+	if status != http.StatusOK {
+		t.Fatalf("summary status = %d, body = %s", status, sumFarCheck)
+	}
+	var sumResp struct {
+		ActiveHikers30m int `json:"activeHikers30m"`
+	}
+	if err := json.Unmarshal(sumFarCheck, &sumResp); err != nil {
+		t.Fatalf("unmarshal summary: %v", err)
+	}
+	// In Bucegi zone (<= 2 km of 45.4085, 25.5420): hiker-a, hiker-b, and map-roamer = 3 (desktop-far & hiker-d excluded!)
+	if sumResp.ActiveHikers30m != 3 {
+		t.Fatalf("summary activeHikers30m for Bucegi = %d, want 3 (hiker-a + hiker-b + map-roamer, excluding desktop-far)", sumResp.ActiveHikers30m)
+	}
+
+	// 2. Repeat heartbeat from hiker-a: excludes caller's own device ("hiker-a"), so sees 2 OTHER active people (hiker-b + map-roamer)!
 	status, hbRaw := invokeLiveHandler(t, app, handler.Heartbeat, liveCallOptions{
 		method:     http.MethodPost,
 		target:     "/live/heartbeat",
@@ -184,7 +212,7 @@ func TestTrailLivePresenceCountingPrivacyAndGC(t *testing.T) {
 	}
 
 	// Privacy assertion: raw hiker coordinates must NEVER appear in heartbeat or summary responses!
-	for _, secretCoord := range []string{"45.408123", "45.408555", "45.412345", "25.545678", "45.419876"} {
+	for _, secretCoord := range []string{"45.408123", "45.408555", "45.412345", "25.545678", "45.410500"} {
 		if strings.Contains(string(hbRaw), secretCoord) {
 			t.Fatalf("PRIVACY VIOLATION: heartbeat response leaked presence coordinate %s: %s", secretCoord, hbRaw)
 		}
@@ -198,29 +226,41 @@ func TestTrailLivePresenceCountingPrivacyAndGC(t *testing.T) {
 	if err := json.Unmarshal(hbRaw, &hbResp); err != nil {
 		t.Fatalf("unmarshal heartbeat: %v", err)
 	}
-	if hbResp.ActiveHikers30m != 3 {
-		t.Fatalf("activeHikers30m = %d, want 3", hbResp.ActiveHikers30m)
+	if hbResp.ActiveHikers30m != 2 {
+		t.Fatalf("activeHikers30m for hiker-a (excluding self) = %d, want 2", hbResp.ActiveHikers30m)
 	}
 
-	// GET /live/trail/{id}/summary without deviceHash works and never leaks coordinates
-	status, sumRaw := invokeLiveHandler(t, app, handler.TrailSummary, liveCallOptions{
-		method:     http.MethodGet,
-		target:     "/live/trail/trail-bucegi/summary",
+	// 3. Explicit DELETE /live/heartbeat when map-roamer closes the app removes them immediately!
+	status, _ = invokeLiveHandler(t, app, handler.ClearHeartbeat, liveCallOptions{
+		method:     http.MethodDelete,
+		target:     "/live/heartbeat",
 		secret:     testLiveSecret,
-		pathValues: map[string]string{"id": "trail-bucegi"},
+		deviceHash: "map-roamer",
 	})
 	if status != http.StatusOK {
-		t.Fatalf("summary status = %d, body = %s", status, sumRaw)
-	}
-	for _, secretCoord := range []string{"45.408555", "45.412345", "45.419876"} {
-		if strings.Contains(string(sumRaw), secretCoord) {
-			t.Fatalf("PRIVACY VIOLATION: summary leaked presence coordinate %s: %s", secretCoord, sumRaw)
-		}
+		t.Fatalf("DELETE /live/heartbeat status = %d, want 200", status)
 	}
 
-	// Advance clock by 31 minutes: only hiker-a refreshes presence.
-	curTime = curTime.Add(31 * time.Minute)
-	status, hbAfterRaw := invokeLiveHandler(t, app, handler.Heartbeat, liveCallOptions{
+	status, hbAfterLeave := invokeLiveHandler(t, app, handler.Heartbeat, liveCallOptions{
+		method:     http.MethodPost,
+		target:     "/live/heartbeat",
+		body:       `{"trailId":"trail-bucegi","lat":45.408555,"lon":25.542222,"ele":2030,"inNavigation":true}`,
+		secret:     testLiveSecret,
+		deviceHash: "hiker-a",
+	})
+	if status != http.StatusOK {
+		t.Fatalf("heartbeat after leave status = %d", status)
+	}
+	if err := json.Unmarshal(hbAfterLeave, &hbResp); err != nil {
+		t.Fatal(err)
+	}
+	if hbResp.ActiveHikers30m != 1 {
+		t.Fatalf("activeHikers30m after map-roamer closed app = %d, want 1 (only hiker-b)", hbResp.ActiveHikers30m)
+	}
+
+	// 4. Advance clock by 3 minutes (> 2 min live window): hiker-b stops sending heartbeats, hiker-a refreshes -> 0 others!
+	curTime = curTime.Add(3 * time.Minute)
+	status, hbAfter3m := invokeLiveHandler(t, app, handler.Heartbeat, liveCallOptions{
 		method:     http.MethodPost,
 		target:     "/live/heartbeat",
 		body:       `{"trailId":"trail-bucegi","lat":45.409000,"lon":25.543000}`,
@@ -228,16 +268,24 @@ func TestTrailLivePresenceCountingPrivacyAndGC(t *testing.T) {
 		deviceHash: "hiker-a",
 	})
 	if status != http.StatusOK {
-		t.Fatalf("heartbeat after 31m status = %d", status)
+		t.Fatalf("heartbeat after 3m status = %d", status)
 	}
-	if err := json.Unmarshal(hbAfterRaw, &hbResp); err != nil {
+	if err := json.Unmarshal(hbAfter3m, &hbResp); err != nil {
 		t.Fatal(err)
 	}
-	if hbResp.ActiveHikers30m != 1 {
-		t.Fatalf("activeHikers30m after 31m = %d, want 1", hbResp.ActiveHikers30m)
+	if hbResp.ActiveHikers30m != 0 {
+		t.Fatalf("activeHikers30m after 3m (no other active users) = %d, want 0", hbResp.ActiveHikers30m)
 	}
 
-	// Run Cron GC: stale presence rows (hiker-b, hiker-c, hiker-d) must be deleted, leaving only hiker-a.
+	// 5. Advance clock past 30m GC retention: stale presence rows are purged, leaving only refreshed hiker-a.
+	curTime = curTime.Add(28 * time.Minute)
+	_, _ = invokeLiveHandler(t, app, handler.Heartbeat, liveCallOptions{
+		method:     http.MethodPost,
+		target:     "/live/heartbeat",
+		body:       `{"trailId":"trail-bucegi","lat":45.409000,"lon":25.543000}`,
+		secret:     testLiveSecret,
+		deviceHash: "hiker-a",
+	})
 	if err := RunTrailLiveGC(app, hub, curTime); err != nil {
 		t.Fatalf("RunTrailLiveGC: %v", err)
 	}

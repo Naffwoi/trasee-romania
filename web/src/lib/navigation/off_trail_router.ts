@@ -429,6 +429,60 @@ export function computeOffTrailReroute(params: {
 		);
 	}
 
+	// Fast O(1) direct geodesic guidance when user is > 5 km away from the trail
+	// (e.g. testing Start from desktop hundreds of km away), avoiding local 35 m DEM A* grid clamping & millions of slope samples.
+	if (nearestCross > 5_000) {
+		const startEle = evalEle(params.userLat, params.userLon);
+		const rejoinEle = evalEle(nearestLat, nearestLon);
+		const directDistM = haversineMeters(params.userLat, params.userLon, nearestLat, nearestLon);
+		const dEle = rejoinEle - startEle;
+		const gradePct = directDistM > 0.1 ? (dEle / directDistM) * 100 : 0;
+		const slopeRatio = directDistM > 0.1 ? dEle / directDistM : 0;
+		const maxSlopeDeg = Math.atan(Math.abs(slopeRatio)) * RAD_TO_DEG;
+		const vKmh = toblerHikingSpeedKmh(slopeRatio, false);
+		const estimatedSeconds = directDistM > 0 ? directDistM / ((0.6 * vKmh) / 3.6) : 0;
+		const initialBearingDeg = bearingDegrees(params.userLat, params.userLon, nearestLat, nearestLon);
+		const dir = cardinalDirection(initialBearingDeg, isRo ? "ro" : "en");
+		const distLabel =
+			directDistM >= 1000
+				? `${(directDistM / 1000).toFixed(1)} km`
+				: `${Math.round(directDistM)} m`;
+		return {
+			mode,
+			points: [
+				{
+					lat: params.userLat,
+					lon: params.userLon,
+					ele: startEle,
+					distanceM: 0,
+					gradePct,
+				},
+				{
+					lat: nearestLat,
+					lon: nearestLon,
+					ele: rejoinEle,
+					distanceM: directDistM,
+					gradePct,
+				},
+			],
+			rejoinLat: nearestLat,
+			rejoinLon: nearestLon,
+			rejoinAlongTrackM: nearestAlong,
+			rejoinEleM: rejoinEle,
+			distanceM: directDistM,
+			estimatedSeconds,
+			ascentM: Math.max(0, dEle),
+			descentM: Math.max(0, -dEle),
+			maxSlopeDeg,
+			avoidedSteepHazard: false,
+			initialBearingDeg,
+			instruction: isRo
+				? `Urmează direcția ${dir} (${distLabel} până la potecă)`
+				: `Head ${dir} (${distLabel} to trail)`,
+			slopeAdvice: isRo ? "Departe de traseu" : "Far from trail",
+		};
+	}
+
 	const candAlongSet: number[] = [nearestAlong];
 	const minCand = Math.max(0, params.lastAlongTrackM - 150);
 	const maxCand = Math.min(totalTrailDist, params.lastAlongTrackM + 1500);

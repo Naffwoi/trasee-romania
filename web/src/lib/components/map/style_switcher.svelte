@@ -3,7 +3,7 @@
     import { _ } from "svelte-i18n";
     import RadioGroup, { type RadioItem } from "../base/radio_group.svelte";
     import { defaultMapState } from "#lib/vendor/maplibre-layer-manager/layers.ts";
-    import { untrack } from "svelte";
+    import { onDestroy, onMount, untrack } from "svelte";
 
     interface Props {
         settings: StyleSwitcherControlOptions;
@@ -23,18 +23,50 @@
     );
 
     let selectedStyle: number = $derived(
-        styleItems.findIndex((i) => i.text === mapState.base),
+        Math.max(
+            0,
+            styleItems.findIndex((i) => i.text === mapState.base),
+        ),
     );
 
     let showSwitcher: boolean = $state(false);
 
-    function toggleSwitcher() {
+    function toggleSwitcher(e: MouseEvent) {
+        e.stopPropagation();
         showSwitcher = !showSwitcher;
     }
 
     function hideSwitcher() {
         showSwitcher = false;
     }
+
+    function handlePointerDownOutside(e: PointerEvent) {
+        if (!showSwitcher || !container) return;
+        const target = e.target as Node | null;
+        if (target && !container.contains(target)) {
+            showSwitcher = false;
+        }
+    }
+
+    function handleKeydown(e: KeyboardEvent) {
+        if (showSwitcher && e.key === "Escape") {
+            showSwitcher = false;
+        }
+    }
+
+    onMount(() => {
+        if (typeof window !== "undefined") {
+            window.addEventListener("pointerdown", handlePointerDownOutside, true);
+            window.addEventListener("keydown", handleKeydown);
+        }
+    });
+
+    onDestroy(() => {
+        if (typeof window !== "undefined") {
+            window.removeEventListener("pointerdown", handlePointerDownOutside, true);
+            window.removeEventListener("keydown", handleKeydown);
+        }
+    });
 
     export function getElement() {
         return container;
@@ -43,23 +75,32 @@
 
 <div
     bind:this={container}
-    class="maplibregl-ctrl maplibregl-ctrl-group relative z-10"
+    style="overflow: visible !important;"
+    class="maplibregl-ctrl maplibregl-ctrl-group wanderer-style-switcher relative z-30"
 >
-    <button onclick={toggleSwitcher} aria-label={$_("toggle-style-switcher")}>
-        <i class="fa fa-layer-group text-black"></i>
+    <button
+        type="button"
+        data-testid="style-switcher-btn"
+        aria-expanded={showSwitcher}
+        onclick={toggleSwitcher}
+        aria-label={$_("toggle-style-switcher")}
+        title={$_("toggle-style-switcher")}
+    >
+        <i class="fa fa-layer-group text-content" aria-hidden="true"></i>
     </button>
 
     <div
-        class="absolute bg-menu-background rounded-lg px-4 py-2 mt-2 shadow-xl space-y-3 max-h-96 overflow-y-scroll min-w-48"
+        data-testid="style-switcher-menu"
+        class="absolute right-0 top-full bg-menu-background text-content rounded-2xl px-4 py-3 mt-2 shadow-2xl border border-input-border/60 space-y-3 max-h-96 overflow-y-auto min-w-52 z-50"
         class:hidden={!showSwitcher}
-        style="transform: translateX(calc(-100% + 29px))"
     >
-        <div class="flex items-center justify-between">
-            <span class="font-semibold whitespace-nowrap text-base"
+        <div class="flex items-center justify-between gap-2">
+            <span class="font-semibold whitespace-nowrap text-sm"
                 >{$_("map-style")}</span
             >
             <button
-                class="fa fa-close !rounded-full"
+                type="button"
+                class="fa fa-close !w-7 !h-7 !rounded-full flex items-center justify-center hover:bg-secondary-hover text-content/75 cursor-pointer"
                 onclick={hideSwitcher}
                 aria-label={$_("close-style-switcher")}
             ></button>
@@ -74,43 +115,43 @@
             }}
         ></RadioGroup>
         <hr class="border-input-border" />
-        <span class="font-semibold whitespace-nowrap text-base"
+        <span class="font-semibold whitespace-nowrap text-sm block"
             >{$_("layer", { values: { n: 2 } })}</span
         >
         {#each Object.keys(defaultMapState.overlays) as overlay}
-            <div class="flex items-center mt-2 mb-4">
+            <div class="flex items-center mt-1.5 mb-2.5">
                 <input
                     id="{overlay}-layer-checkbox"
                     type="checkbox"
                     bind:checked={mapState.overlays[overlay]}
                     class="w-4 h-4 bg-input-background accent-primary border-input-border focus:ring-input-ring focus:ring-2"
-                    onchange={(e) => {
+                    onchange={() => {
                         settings.onchange(mapState);
                     }}
                 />
 
-                <label for="{overlay}-layer-checkbox" class="ms-2 text-sm"
+                <label for="{overlay}-layer-checkbox" class="ms-2 text-sm cursor-pointer"
                     >{$_(overlay)}</label
                 >
             </div>
         {/each}
         <hr class="border-input-border" />
-        <p class="font-semibold whitespace-nowrap text-base">{$_("pois")}</p>
+        <p class="font-semibold whitespace-nowrap text-sm">{$_("pois")}</p>
         {#each Object.entries(defaultMapState.pois) as [category, pois]}
-            <p class="text-sm font-medium whitespace-nowrap">{$_(category)}</p>
+            <p class="text-xs font-semibold text-content/75 whitespace-nowrap">{$_(category)}</p>
             {#each Object.keys(pois) as poi}
-                <div class="flex items-center mt-2 mb-4 ml-2">
+                <div class="flex items-center mt-1.5 mb-2.5 ml-2">
                     <input
                         id="{poi}-poi-checkbox"
                         type="checkbox"
                         bind:checked={mapState.pois[category][poi]}
                         class="w-4 h-4 bg-input-background accent-primary border-input-border focus:ring-input-ring focus:ring-2"
-                        onchange={(e) => {
+                        onchange={() => {
                             settings.onchange(mapState);
                         }}
                     />
 
-                    <label for="{poi}-poi-checkbox" class="ms-2 text-sm"
+                    <label for="{poi}-poi-checkbox" class="ms-2 text-sm cursor-pointer"
                         >{$_(poi)}</label
                     >
                 </div>

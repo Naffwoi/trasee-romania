@@ -38,7 +38,7 @@ import {
 	resetVapidKeysCache,
 	VAPID_SUBJECT,
 } from "./vapid_push.ts";
-import { POST as postHeartbeat } from "../../../routes/api/v1/live/heartbeat/+server.ts";
+import { DELETE as deleteHeartbeat, POST as postHeartbeat } from "../../../routes/api/v1/live/heartbeat/+server.ts";
 import { POST as postPushSubscribe } from "../../../routes/api/v1/live/push/subscribe/+server.ts";
 import { GET as getVapidKey } from "../../../routes/api/v1/live/push/vapid-public-key/+server.ts";
 import { POST as postReports } from "../../../routes/api/v1/live/reports/+server.ts";
@@ -522,8 +522,19 @@ describe("SvelteKit /api/v1/live route handlers", () => {
 		} as never);
 		expect(hbRes.status).toBe(200);
 
-		// 2. Trail summary without X-Device-Token (optional)
-		const sumReq = new Request("https://trasee.skillfy.ro/api/v1/live/trail/t1/summary");
+		const delHbReq = new Request("https://trasee.skillfy.ro/api/v1/live/heartbeat", {
+			method: "DELETE",
+			headers: { "X-Device-Token": VALID_TOKEN_A },
+		});
+		const delHbRes = await deleteHeartbeat({
+			request: delHbReq,
+			url: new URL(delHbReq.url),
+			locals: {},
+		} as never);
+		expect(delHbRes.status).toBe(200);
+
+		// 2. Trail summary without X-Device-Token (optional) + lat/lon forwarding
+		const sumReq = new Request("https://trasee.skillfy.ro/api/v1/live/trail/t1/summary?lat=45.44&lon=25.55");
 		const sumRes = await getTrailSummary({
 			request: sumReq,
 			url: new URL(sumReq.url),

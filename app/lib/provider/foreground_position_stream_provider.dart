@@ -6,6 +6,7 @@ import 'package:flutter/widgets.dart'
     show AppLifecycleState, WidgetsBinding, WidgetsBindingObserver;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:geolocator/geolocator.dart';
+import 'package:wanderer/services/trail_live_service.dart';
 
 /// Plain data class carrying a foreground GPS fix for map location markers.
 class LocationMarkerPosition {
@@ -106,6 +107,32 @@ class ForegroundPositionStream extends Notifier<Stream<LocationMarkerPosition?>>
   /// Whether a start attempt has already been allowed to raise the system
   /// "Turn on GPS?" dialog this session. See [_startPositionStream].
   bool _promptedForService = false;
+  Timer? _presenceTimer;
+  DateTime? _lastPresenceSentAt;
+  bool _hasActivePresence = false;
+
+  void _maybeSendForegroundPresence(LocationMarkerPosition pos, {bool force = false}) {
+    if (_uiSuspended || _consumers <= 0) return;
+    final service = ref.read(trailLiveServiceProvider);
+    if (service == null || !service.isConfigured) return;
+    final now = DateTime.now();
+    if (!force &&
+        _lastPresenceSentAt != null &&
+        now.difference(_lastPresenceSentAt!) < const Duration(seconds: 40)) {
+      return;
+    }
+    _lastPresenceSentAt = now;
+    _hasActivePresence = true;
+    unawaited(
+      service
+          .sendHeartbeat(
+            lat: pos.latitude,
+            lon: pos.longitude,
+            inNavigation: false,
+          )
+          .catchError((Object _) => null),
+    );
+  }
 
   /// How stale the platform's [Geolocator.getLastKnownPosition] can be and
   /// still stand in for a fresh fix in [currentFix]. `launch_navigation.dart`
@@ -248,7 +275,16 @@ class ForegroundPositionStream extends Notifier<Stream<LocationMarkerPosition?>>
   void _cancelPosition() {
     _positionSub?.cancel();
     _positionSub = null;
+    _presenceTimer?.cancel();
+    _presenceTimer = null;
     _latest = null;
+    if (_hasActivePresence) {
+      _hasActivePresence = false;
+      final service = ref.read(trailLiveServiceProvider);
+      if (service != null && service.isConfigured) {
+        unawaited(service.clearHeartbeat());
+      }
+    }
   }
 
   Future<void> _startPositionStream() async {
@@ -288,6 +324,13 @@ class ForegroundPositionStream extends Notifier<Stream<LocationMarkerPosition?>>
     // nobody watching / nothing visible.
     if (_consumers == 0 || _uiSuspended) return;
 
+    _presenceTimer = Timer.periodic(const Duration(seconds: 45), (_) {
+      final pos = _latest;
+      if (pos != null) {
+        _maybeSendForegroundPresence(pos);
+      }
+    });
+
     _positionSub = Geolocator.getPositionStream(locationSettings: _settings)
         .listen(
           (pos) {
@@ -300,6 +343,7 @@ class ForegroundPositionStream extends Notifier<Stream<LocationMarkerPosition?>>
                 headingAccuracy: pos.headingAccuracy,
               );
               _controller.add(_latest);
+              _maybeSendForegroundPresence(_latest!);
             }
           },
           onError: (_) {

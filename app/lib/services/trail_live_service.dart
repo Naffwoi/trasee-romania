@@ -277,12 +277,36 @@ class TrailLiveService {
     return summary;
   }
 
-  Future<TrailLiveSummary?> fetchTrailSummary(String trailId) async {
+  Future<void> clearHeartbeat() async {
+    if (!isConfigured) return;
+    try {
+      final options = await _liveOptions();
+      await _dio.delete<Object?>(
+        '/live/heartbeat',
+        options: options,
+      );
+    } catch (_) {
+      // Best-effort presence cleanup on background/exit.
+    }
+  }
+
+  Future<TrailLiveSummary?> fetchTrailSummary(
+    String trailId, {
+    double? lat,
+    double? lon,
+  }) async {
     final trimmed = trailId.trim();
     if (trimmed.isEmpty || !isConfigured) return null;
     final options = await _liveOptions();
+    final queryParams = <String, dynamic>{
+      if (lat != null && lat.isFinite && lon != null && lon.isFinite) ...{
+        'lat': lat,
+        'lon': lon,
+      },
+    };
     final response = await _dio.get<Object?>(
       '/live/trail/${Uri.encodeComponent(trimmed)}/summary',
+      queryParameters: queryParams.isEmpty ? null : queryParams,
       options: options,
     );
     return TrailLiveSummary.fromJson(_asMap(response.data));

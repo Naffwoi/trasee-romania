@@ -30,5 +30,6 @@ export interface UserLocationControlOptions {
     animate?: boolean;
     labels?: Partial<UserLocationControlLabels>;
     onModeChange?: (mode: LocationTrackingMode) => void;
+    onPositionUpdate?: (fix: UserLocationFix) => void;
     onError?: (message: string) => void;
 }

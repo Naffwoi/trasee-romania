@@ -9,6 +9,7 @@
     import WazeNearbyPrompt from "#lib/components/navigation/waze_nearby_prompt.svelte";
     import WazeReportSheet from "#lib/components/navigation/waze_report_sheet.svelte";
     import {
+        clearHeartbeat,
         connectLiveStream,
         createReport,
         fetchTrailLiveSummary,
@@ -62,9 +63,14 @@
     import { CompassSensor } from "#lib/vendor/maplibre-user-location/compass-sensor.ts";
     import { normalizeHeading } from "#lib/vendor/maplibre-user-location/heading-math.ts";
     import { LocationPuckMarker } from "#lib/vendor/maplibre-user-location/location-puck-marker.ts";
+    import { baseMapStyles } from "#lib/vendor/maplibre-layer-manager/layers.ts";
+    import { LayerManager } from "#lib/vendor/maplibre-layer-manager/maplibre-layer-manager.ts";
+    import { OverlayLayer } from "#lib/vendor/maplibre-layer-manager/overlay-layer.ts";
+    import { StyleSwitcherControl } from "#lib/vendor/maplibre-style-switcher/style-switcher-control.ts";
     import type { FeatureCollection } from "geojson";
     import * as M from "maplibre-gl";
     import "maplibre-gl/dist/maplibre-gl.css";
+    import "#lib/util/maplibre_worker.ts";
     import { onDestroy, onMount, untrack } from "svelte";
     import { _, locale } from "svelte-i18n";
 
@@ -1496,15 +1502,46 @@
                 : 0;
 
         if (mapContainer) {
+            for (const tileset of page.data.settings?.tilesets ?? []) {
+                baseMapStyles[tileset.name] = tileset.url;
+            }
+
+            let initialStyle: string | M.StyleSpecification = "/styles/ofm.json";
+            try {
+                const rawState = localStorage.getItem("wanderer-ro-map-state-v3");
+                if (rawState) {
+                    const parsedState = JSON.parse(rawState) as { base?: string };
+                    if (parsedState?.base && parsedState.base in baseMapStyles) {
+                        initialStyle = baseMapStyles[parsedState.base];
+                    }
+                }
+            } catch {
+                // Keep default OpenFreeMap style when storage is restricted
+            }
+
             map = new M.Map({
                 container: mapContainer,
-                style: "/styles/ofm.json",
+                style: initialStyle,
                 center: initialCoord,
                 zoom: 16.2,
                 pitch: is3D ? 50 : 0,
                 bearing: initialBearing,
                 attributionControl: false,
             });
+
+            const navLayerManager = new LayerManager(map);
+            const switcherControl = new StyleSwitcherControl({
+                styles: baseMapStyles,
+                onchange: (nextState) => {
+                    const prevBase = navLayerManager.state.base;
+                    if (nextState.base !== prevBase) {
+                        styleReady = false;
+                    }
+                    navLayerManager.update(JSON.parse(JSON.stringify(nextState)));
+                },
+                state: JSON.parse(JSON.stringify(navLayerManager.state)),
+            });
+            map.addControl(switcherControl, "top-right");
 
             locationPuck = new LocationPuckMarker();
             locationPuck.attach(map);
@@ -1514,6 +1551,11 @@
 
             const onStyleReady = () => {
                 styleReady = true;
+                for (const [ovName, active] of Object.entries(navLayerManager.state.overlays)) {
+                    if (active && !navLayerManager.layers[ovName]) {
+                        navLayerManager.addLayer(ovName, new OverlayLayer(ovName));
+                    }
+                }
                 ensureBaseNavSourcesAndLayers();
                 syncNavGeoJson();
                 syncStartEndMarkers();
@@ -1521,7 +1563,13 @@
             };
 
             map.on("style.load", onStyleReady);
+            map.on("styledata", () => {
+                if (map && map.isStyleLoaded()) {
+                    onStyleReady();
+                }
+            });
             map.on("load", () => {
+                map?.resize();
                 onStyleReady();
                 updateFollowCamera({ forceZoom: true, duration: 0 });
             });
@@ -1531,6 +1579,14 @@
                     isFollowing = false;
                 }
             });
+        }
+
+        let mapResizeObserver: ResizeObserver | null = null;
+        if (mapContainer && typeof ResizeObserver !== "undefined") {
+            mapResizeObserver = new ResizeObserver(() => {
+                map?.resize();
+            });
+            mapResizeObserver.observe(mapContainer);
         }
 
         compassSensor = new CompassSensor();
@@ -1602,13 +1658,25 @@
         void acquireWakeLock();
 
         const handleVisibilityChange = () => {
-            if (typeof document !== "undefined" && document.visibilityState === "visible") {
-                void acquireWakeLock();
-                void triggerHeartbeatNow(false);
+            if (typeof document !== "undefined") {
+                if (document.visibilityState === "visible") {
+                    void acquireWakeLock();
+                    void triggerHeartbeatNow(true);
+                } else if (document.visibilityState === "hidden" && latestFix) {
+                    void clearHeartbeat();
+                }
+            }
+        };
+        const handlePageHide = () => {
+            if (latestFix) {
+                void clearHeartbeat();
             }
         };
         if (typeof document !== "undefined") {
             document.addEventListener("visibilitychange", handleVisibilityChange);
+        }
+        if (typeof window !== "undefined") {
+            window.addEventListener("pagehide", handlePageHide);
         }
 
         // Initialize Live Community state (votes, initial trail summary, 60s heartbeat, SSE & Web Push)
@@ -1634,7 +1702,10 @@
         }
 
         if (trail.id) {
-            void fetchTrailLiveSummary(trail.id).then((sum) => {
+            void fetchTrailLiveSummary(trail.id, {
+                lat: trail.lat ?? null,
+                lon: trail.lon ?? null,
+            }).then((sum) => {
                 if (!sum) return;
                 if (activeHikersCount === null) {
                     activeHikersCount = sum.activeHikers30m;
@@ -1649,8 +1720,10 @@
         }
 
         heartbeatTimer = setInterval(() => {
-            void triggerHeartbeatNow(false);
-        }, 60_000);
+            if (typeof document === "undefined" || document.visibilityState === "visible") {
+                void triggerHeartbeatNow(false);
+            }
+        }, 45_000);
 
         streamHandle = connectLiveStream({
             trailId: trail.id,
@@ -1734,14 +1807,21 @@
         }
 
         return () => {
+            mapResizeObserver?.disconnect();
             removeIosCompassGesture?.();
             if (typeof document !== "undefined") {
                 document.removeEventListener("visibilitychange", handleVisibilityChange);
+            }
+            if (typeof window !== "undefined") {
+                window.removeEventListener("pagehide", handlePageHide);
             }
         };
     });
 
     onDestroy(() => {
+        if (latestFix) {
+            void clearHeartbeat();
+        }
         if (watchId !== null && typeof navigator !== "undefined" && navigator.geolocation) {
             navigator.geolocation.clearWatch(watchId);
             watchId = null;
@@ -1779,7 +1859,7 @@
 
 <MetaTags title={`${trail.name} | ${$_("map")} | wanderer`} />
 
-<main class="fixed inset-0 w-screen h-dvh overflow-hidden bg-background">
+<main id="nav-map-wrap" class="fixed inset-0 w-screen h-dvh overflow-hidden bg-background">
     <div bind:this={mapContainer} data-testid="nav-map" class="w-full h-full"></div>
 
     <!-- Top Navigation Banner + SOS Rescue Banner + Nearby Waze Prompt -->
@@ -1865,22 +1945,23 @@
         <button
             type="button"
             data-testid="nav-sos-btn"
+            aria-label="SOS Urgență"
+            title="SOS Urgență"
             onclick={() => {
                 void handleEnableWebPush();
                 sosModalOpen = true;
             }}
-            class={`pointer-events-auto h-10 px-3.5 rounded-full shadow-lg text-xs font-extrabold flex items-center gap-1.5 cursor-pointer transition-colors border ${
+            class={`pointer-events-auto h-11 w-11 rounded-full shadow-lg flex items-center justify-center cursor-pointer transition-colors border ${
                 myActiveSos
-                    ? "bg-red-700 text-white border-white/50 animate-pulse"
-                    : "bg-red-600 hover:bg-red-700 text-white border-red-400/50"
+                    ? "bg-red-600 text-white border-white/60 animate-pulse"
+                    : "bg-menu-background/95 backdrop-blur hover:bg-secondary-hover text-red-500 border-input-border/60"
             }`}
         >
-            <span aria-hidden="true">🆘</span>
-            <span>Ajutor</span>
+            <i class="fa-solid fa-life-ring text-base" aria-hidden="true"></i>
         </button>
     </div>
 
-    <!-- Floating Right Controls: Waze Report, 3D/2D Pitch Toggle & Recenter Pill -->
+    <!-- Floating Right Controls: Waze Report Icon, 3D/2D Pitch Toggle & Recenter Pill -->
     <div
         class="fixed right-3 z-40 flex flex-col items-end gap-2 pointer-events-none transition-all duration-200"
         style="bottom: calc({floatingBottomPx}px + env(safe-area-inset-bottom, 0px));"
@@ -1890,11 +1971,10 @@
             data-testid="nav-waze-report-btn"
             onclick={() => (reportSheetOpen = true)}
             aria-label="Raportează pe potecă"
-            title="Raportează atenționare sau reper pe potecă"
-            class="pointer-events-auto h-10 px-3.5 rounded-full bg-orange-600 hover:bg-orange-700 text-white border border-orange-400/50 shadow-lg text-xs font-extrabold flex items-center gap-1.5 cursor-pointer transition-colors"
+            title="Raportează pe potecă"
+            class="pointer-events-auto h-11 w-11 rounded-full bg-menu-background/95 backdrop-blur hover:bg-secondary-hover text-orange-500 border border-input-border/60 shadow-lg flex items-center justify-center cursor-pointer transition-colors"
         >
-            <i class="fa-solid fa-triangle-exclamation text-[11px]" aria-hidden="true"></i>
-            <span>Raportează</span>
+            <i class="fa-solid fa-triangle-exclamation text-base" aria-hidden="true"></i>
         </button>
 
         <button
@@ -1953,3 +2033,26 @@
         />
     </div>
 </main>
+
+<style>
+    #nav-map-wrap :global(.maplibregl-ctrl-top-right) {
+        top: calc(5.25rem + env(safe-area-inset-top, 0px));
+        right: 12px;
+        z-index: 38;
+    }
+    #nav-map-wrap :global(.maplibregl-ctrl-top-right .maplibregl-ctrl-group) {
+        border-radius: 9999px;
+        box-shadow: 0 3px 12px rgb(0 0 0 / 0.18);
+        border: 1.5px solid rgba(36, 39, 52, 0.18);
+        margin: 0;
+        background: rgba(var(--menu-background));
+    }
+    #nav-map-wrap :global(.maplibregl-ctrl-top-right .maplibregl-ctrl-group.wanderer-style-switcher) {
+        overflow: visible;
+    }
+    #nav-map-wrap :global(.maplibregl-ctrl-top-right .maplibregl-ctrl-group > button) {
+        width: 40px;
+        height: 40px;
+        border-radius: 9999px;
+    }
+</style>

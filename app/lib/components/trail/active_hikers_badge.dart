@@ -4,21 +4,27 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:wanderer/services/trail_live_service.dart';
 
-/// Privacy-preserving 30-minute active hikers badge:
-/// `🟢 X persoane pe traseu (ultimele 30 min)`.
+/// Privacy-preserving live nearby users badge:
+/// `🟢 X persoane în zonă` (hidden when 0).
 class ActiveHikersBadge extends ConsumerStatefulWidget {
   const ActiveHikersBadge({
     super.key,
     this.trailId,
+    this.lat,
+    this.lon,
     this.countOverride,
     this.compact = false,
-    this.showWhenZero = true,
+    this.showWhenZero = false,
+    this.topPadding = 0,
   });
 
   final String? trailId;
+  final double? lat;
+  final double? lon;
   final int? countOverride;
   final bool compact;
   final bool showWhenZero;
+  final double topPadding;
 
   @override
   ConsumerState<ActiveHikersBadge> createState() => _ActiveHikersBadgeState();
@@ -44,20 +50,28 @@ class _ActiveHikersBadgeState extends ConsumerState<ActiveHikersBadge> {
     if (service == null || !service.isConfigured) return;
     _fetchedTrailId = trailId;
     unawaited(
-      service.fetchTrailSummary(trailId).then((summary) {
-        if (!mounted || _fetchedTrailId != trailId || summary == null) return;
-        setState(() {
-          _fetchedCount = summary.activeHikers30m;
-        });
-      }).catchError((Object _) {
-        // Offline or unreachable — keep badge hidden gracefully.
-      }),
+      service
+          .fetchTrailSummary(
+            trailId,
+            lat: widget.lat,
+            lon: widget.lon,
+          )
+          .then((summary) {
+            if (!mounted || _fetchedTrailId != trailId || summary == null) {
+              return;
+            }
+            setState(() {
+              _fetchedCount = summary.activeHikers30m;
+            });
+          })
+          .catchError((Object _) {
+            // Offline or unreachable — keep badge hidden gracefully.
+          }),
     );
   }
 
   @override
   Widget build(BuildContext context) {
-    // Only watch the service provider when no explicit countOverride was passed.
     if (widget.countOverride == null) {
       final service = ref.watch(trailLiveServiceProvider);
       if (_fetchedCount == null &&
@@ -85,13 +99,9 @@ class _ActiveHikersBadgeState extends ConsumerState<ActiveHikersBadge> {
 
     final String text;
     if (isRo) {
-      text = count == 1
-          ? '1 persoană pe traseu (ultimele 30 min)'
-          : '$count persoane pe traseu (ultimele 30 min)';
+      text = count == 1 ? '1 persoană în zonă' : '$count persoane în zonă';
     } else {
-      text = count == 1
-          ? '1 hiker on trail (last 30 min)'
-          : '$count hikers on trail (last 30 min)';
+      text = count == 1 ? '1 person nearby' : '$count people nearby';
     }
 
     final bgColor = isActive
@@ -109,7 +119,7 @@ class _ActiveHikersBadgeState extends ConsumerState<ActiveHikersBadge> {
         ? const Color(0xFF10B981)
         : theme.colorScheme.onSurface.withValues(alpha: 0.38);
 
-    return Container(
+    final badge = Container(
       key: const ValueKey('active-hikers-badge'),
       padding: EdgeInsets.symmetric(
         horizontal: widget.compact ? 10 : 12,
@@ -157,5 +167,13 @@ class _ActiveHikersBadgeState extends ConsumerState<ActiveHikersBadge> {
         ],
       ),
     );
+
+    if (widget.topPadding > 0) {
+      return Padding(
+        padding: EdgeInsets.only(top: widget.topPadding),
+        child: badge,
+      );
+    }
+    return badge;
   }
 }

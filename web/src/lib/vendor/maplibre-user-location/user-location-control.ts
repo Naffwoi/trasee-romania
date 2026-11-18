@@ -214,6 +214,7 @@ export class UserLocationControl implements IControl {
                         this.latestFix.accuracy,
                     );
                     this.refreshHeadingVisuals();
+                    this.options.onPositionUpdate?.(this.latestFix);
                     if (this._mode === "followNorthUp" || this._mode === "followHeadingUp") {
                         this.applyCameraForMode(!this.hasPerformedInitialZoom);
                         this.hasPerformedInitialZoom = true;

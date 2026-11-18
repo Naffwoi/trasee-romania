@@ -207,5 +207,16 @@ test.describe("Mobile 1:1 Web UI Parity", () => {
                 page.evaluate(() => Boolean((window as any).realMap.getLayer("selected-trail-route"))),
             )
             .toBe(false);
+
+        // 6. Layer switcher button opens an unclipped interactive menu (regression test for .maplibregl-ctrl-group overflow:hidden)
+        const layerBtn = page.locator("#trail-map .maplibregl-ctrl-top-right button").filter({
+            has: page.locator(".fa-layer-group"),
+        });
+        await expect(layerBtn).toBeVisible();
+        await layerBtn.click();
+        const topoLabel = page.locator("#trail-map").getByText("OpenTopoMap");
+        await expect(topoLabel).toBeVisible();
+        // Real pointer click verifies the dropdown is NOT clipped by parent overflow:hidden
+        await topoLabel.click({ timeout: 3000 });
     });
 });

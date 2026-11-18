@@ -643,7 +643,7 @@
                 <span data-testid="nav-remaining-climb">
                     +{formatElevation(Math.max(0, Math.round(remainingAscentM)))}
                 </span>
-                {#if activeHikersCount !== null}
+                {#if (activeHikersCount ?? 0) > 0}
                     <span aria-hidden="true">·</span>
                     <ActiveHikersBadge count={activeHikersCount} compact={true} />
                 {/if}

@@ -413,9 +413,11 @@ class TrailPanel extends ConsumerWidget {
                   if (!isUnsyncedState(trail.syncState) &&
                       trail.id.isNotEmpty &&
                       !isSkeleton)
-                    Padding(
-                      padding: const EdgeInsets.only(top: 12),
-                      child: ActiveHikersBadge(trailId: trail.id),
+                    ActiveHikersBadge(
+                      trailId: trail.id,
+                      lat: trail.lat,
+                      lon: trail.lon,
+                      topPadding: 12,
                     ),
                 ],
               ),

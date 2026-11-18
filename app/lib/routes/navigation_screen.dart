@@ -1774,6 +1774,12 @@ class _NavigationScreenState extends ConsumerState<NavigationScreen>
     _persistTimer?.cancel();
     _liveHeartbeatTimer?.cancel();
     _disconnectLiveSse();
+    if (active_nav.read(_store) == null) {
+      final service = _liveService;
+      if (service != null && service.isConfigured) {
+        unawaited(service.clearHeartbeat());
+      }
+    }
     _positionAnimController.dispose();
     _bearingTransitionController.dispose();
     _bearingFollowTicker.dispose();
@@ -2602,11 +2608,13 @@ class _NavigationScreenState extends ConsumerState<NavigationScreen>
                                   onPressed: () =>
                                       _openWazeReportSheet(context),
                                   icon: const Icon(
-                                    Icons.add_alert_rounded,
-                                    color: Colors.white,
+                                    Icons.warning_amber_rounded,
+                                    color: Color(0xFFEA580C),
                                   ),
                                   style: IconButton.styleFrom(
-                                    backgroundColor: const Color(0xFFD97706),
+                                    backgroundColor: Theme.of(
+                                      context,
+                                    ).colorScheme.surface,
                                   ),
                                 ),
                                 const SizedBox(height: 8),
@@ -3158,7 +3166,9 @@ class _NavigationScreenState extends ConsumerState<NavigationScreen>
         ValueListenableBuilder<int?>(
           valueListenable: _activeHikers30m,
           builder: (context, activeCount, _) {
-            if (activeCount == null) return const SizedBox.shrink();
+            if (activeCount == null || activeCount <= 0) {
+              return const SizedBox.shrink();
+            }
             return Padding(
               padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
               child: Align(

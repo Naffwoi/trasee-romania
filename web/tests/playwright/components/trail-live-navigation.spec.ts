@@ -103,11 +103,20 @@ async function buildNavigatePageBundle(): Promise<string> {
                     if (id === "$app/navigation") return "\0fixture:navigation";
                     if (id === "$app/state") return "\0fixture:state.svelte.js";
                     if (id === "svelte-i18n") return "\0fixture:i18n";
-                    if (id === "maplibre-gl/dist/maplibre-gl.css") return "\0fixture:empty";
+                    if (
+                        id === "maplibre-gl/dist/maplibre-gl.css" ||
+                        id === "#lib/util/maplibre_worker.ts"
+                    ) {
+                        return "\0fixture:empty";
+                    }
                     if (id === "maplibre-gl") return "\0fixture:maplibre";
                     if (id.startsWith("#lib/")) {
-                        const target = resolve(webRoot, "src/lib", id.slice(5));
-                        return extname(id) ? target : [target + ".ts", target + ".js"].find(existsSync);
+                        const [cleanId, query] = id.split("?");
+                        const target = resolve(webRoot, "src/lib", cleanId.slice(5));
+                        const resolved = extname(cleanId)
+                            ? target
+                            : [target + ".ts", target + ".js"].find(existsSync);
+                        return resolved && query ? `${resolved}?${query}` : resolved;
                     }
                 },
                 async load(id) {

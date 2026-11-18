@@ -18,6 +18,8 @@ const maplibreDist = fileURLToPath(
 
 const TEST_PROXY_SECRET = "e2e-live-hmac-secret";
 const PRESENCE_WINDOW_MS = 30 * 60_000;
+const LIVE_PRESENCE_WINDOW_MS = 2 * 60_000;
+const PRESENCE_AREA_RADIUS_METERS = 2_000;
 const LIVE_RADIUS_METERS = 5_000;
 
 const CATEGORY_META: Record<
@@ -128,13 +130,20 @@ async function buildNavigatePageBundle(): Promise<string> {
                     if (id === "$app/navigation") return "\0fixture:navigation";
                     if (id === "$app/state") return "\0fixture:state.svelte.js";
                     if (id === "svelte-i18n") return "\0fixture:i18n";
-                    if (id === "maplibre-gl/dist/maplibre-gl.css") return "\0fixture:empty";
+                    if (
+                        id === "maplibre-gl/dist/maplibre-gl.css" ||
+                        id === "#lib/util/maplibre_worker.ts"
+                    ) {
+                        return "\0fixture:empty";
+                    }
                     if (id === "maplibre-gl") return "\0fixture:maplibre";
                     if (id.startsWith("#lib/")) {
-                        const target = resolve(webRoot, "src/lib", id.slice(5));
-                        return extname(id)
+                        const [cleanId, query] = id.split("?");
+                        const target = resolve(webRoot, "src/lib", cleanId.slice(5));
+                        const resolved = extname(cleanId)
                             ? target
                             : [target + ".ts", target + ".js"].find(existsSync);
+                        return resolved && query ? `${resolved}?${query}` : resolved;
                     }
                 },
                 async load(id) {
@@ -401,11 +410,17 @@ class LiveCommunityTestServer {
         };
     }
 
-    private countActiveHikers30m(trailId: string, now: number): number {
-        if (!trailId) return 0;
+    private countActiveNearby(
+        refLat: number,
+        refLon: number,
+        callerHash: string,
+        now: number,
+    ): number {
         let count = 0;
-        for (const p of this.presence.values()) {
-            if (p.trailId === trailId && now - p.lastSeenMs <= PRESENCE_WINDOW_MS) {
+        for (const [dh, p] of this.presence.entries()) {
+            if (callerHash && dh === callerHash) continue;
+            if (now - p.lastSeenMs > LIVE_PRESENCE_WINDOW_MS) continue;
+            if (haversineMeters(refLat, refLon, p.lat, p.lon) <= PRESENCE_AREA_RADIUS_METERS) {
                 count++;
             }
         }
@@ -578,6 +593,8 @@ window.RealMapLibre = {
             const summaryMatch = pathname.match(/^\/api\/v1\/live\/trail\/([^/]+)\/summary$/);
             if (summaryMatch && method === "GET") {
                 const trailId = decodeURIComponent(summaryMatch[1]);
+                const qLat = Number(url.searchParams.get("lat") ?? sampleTrail.lat);
+                const qLon = Number(url.searchParams.get("lon") ?? sampleTrail.lon);
                 const reports = [...this.reports.values()]
                     .filter((r) => r.trailId === trailId && this.isReportVisible(r, now))
                     .map((r) => this.serializeReport(r));
@@ -586,7 +603,7 @@ window.RealMapLibre = {
                     .map((s) => this.serializeSosForDevice(s, deviceHash, now));
                 this.sendJson(res, 200, {
                     trailId,
-                    activeHikers30m: this.countActiveHikers30m(trailId, now),
+                    activeHikers30m: this.countActiveNearby(qLat, qLon, deviceHash, now),
                     reports,
                     sosAlerts,
                 });
@@ -595,6 +612,12 @@ window.RealMapLibre = {
 
             if (!deviceHash) {
                 this.sendJson(res, 400, { message: "invalid_device_token" });
+                return;
+            }
+
+            if (pathname === "/api/v1/live/heartbeat" && method === "DELETE") {
+                this.presence.delete(deviceHash);
+                this.sendJson(res, 200, { ok: true });
                 return;
             }
 
@@ -630,8 +653,10 @@ window.RealMapLibre = {
                     )
                     .map((s) => this.serializeSosForDevice(s, deviceHash, now));
 
+                const targetLat = trailId === sampleTrail.id ? sampleTrail.lat : lat;
+                const targetLon = trailId === sampleTrail.id ? sampleTrail.lon : lon;
                 this.sendJson(res, 200, {
-                    activeHikers30m: this.countActiveHikers30m(trailId, now),
+                    activeHikers30m: this.countActiveNearby(targetLat, targetLon, deviceHash, now),
                     reports,
                     sosAlerts,
                 });
@@ -960,9 +985,28 @@ test.describe("Multi-User Trail Live Community (Waze Alerts, Permanent Landmarks
             expect(tokenA).not.toBe(tokenB);
 
             // =========================================================================
-            // (a) Active 30-minute hikers presence badge (`🟢 2 persoane pe traseu`)
+            // (a) Icon-only Waze controls, Layer Switcher on /navigate & Location Presence
             // =========================================================================
-            // Hiker A starts ~300 m North along trail -> first GPS fix triggers heartbeat #1
+            const sosBtnA = pageA.locator('[data-testid="nav-sos-btn"]');
+            const reportBtnA = pageA.locator('[data-testid="nav-waze-report-btn"]');
+            await expect(sosBtnA).toBeVisible();
+            await expect(reportBtnA).toBeVisible();
+            // Icon-only circular buttons: must NOT show aggressive "Ajutor" / "Raportează" text
+            await expect(sosBtnA).not.toContainText("Ajutor");
+            await expect(reportBtnA).not.toContainText("Raportează");
+            const sosBox = (await sosBtnA.boundingBox())!;
+            const reportBox = (await reportBtnA.boundingBox())!;
+            expect(Math.abs(sosBox.width - sosBox.height)).toBeLessThanOrEqual(2);
+            expect(Math.abs(reportBox.width - reportBox.height)).toBeLessThanOrEqual(2);
+
+            // Layer switcher button works on /navigate and opens unclipped menu
+            const navLayerBtn = pageA.locator('[data-testid="nav-layers-btn"], [aria-label="Comută straturile hărții"]').first();
+            await expect(navLayerBtn).toBeVisible();
+            await navLayerBtn.click();
+            await expect(pageA.getByText("OpenTopoMap")).toBeVisible();
+            await navLayerBtn.click();
+
+            // Hiker A starts ~300 m North along trail -> alone in area (0 OTHERS), so badge MUST STAY HIDDEN!
             await pageA.evaluate(() => {
                 const w = window as unknown as {
                     __wandererNavTest: {
@@ -980,10 +1024,9 @@ test.describe("Multi-User Trail Live Community (Waze Alerts, Permanent Landmarks
             });
 
             const badgeA = pageA.locator('[data-testid="active-hikers-badge"]');
-            await expect(badgeA).toHaveAttribute("data-active-count", "1");
-            await expect(badgeA).toContainText("1 persoană pe traseu");
+            await expect(badgeA).toHaveCount(0);
 
-            // Hiker B starts at trailhead (45.4400, 25.5500) -> heartbeat #2 brings trail total to 2!
+            // Hiker B starts at trailhead (45.4400, 25.5500) -> sees 1 OTHER active person in area ("1 persoană în zonă", NEVER "30 min")!
             await pageB.evaluate(() => {
                 const w = window as unknown as {
                     __wandererNavTest: {
@@ -1001,25 +1044,25 @@ test.describe("Multi-User Trail Live Community (Waze Alerts, Permanent Landmarks
             });
 
             const badgeB = pageB.locator('[data-testid="active-hikers-badge"]');
-            await expect(badgeB).toHaveAttribute("data-active-count", "2");
-            await expect(badgeB).toContainText("2 persoane pe traseu");
-            await expect(badgeB).toHaveAttribute(
-                "title",
-                /🟢 2 persoane pe traseu \(ultimele 30 min\)/,
-            );
+            await expect(badgeB).toHaveAttribute("data-active-count", "1");
+            await expect(badgeB).toContainText("1 persoană în zonă");
+            await expect(badgeB).not.toContainText("30 min");
 
             // =========================================================================
-            // (b) Temporary `bear` alert + Permanent `spring` landmark & <150 m Waze prompt
+            // (b) 1-Tap Minimalist Waze Report Sheet (Temporary `bear` + Permanent `spring`)
             // =========================================================================
-            // 1. Hiker A reports a temporary `bear` alert at (45.4427, 25.5500)
+            // 1. Hiker A opens report sheet -> zero TTL clutter, optional note + 1-tap category submit!
             await pageA.locator('[data-testid="nav-waze-report-btn"]').click();
-            await expect(pageA.locator('[data-testid="waze-report-sheet"]')).toBeVisible();
-            await pageA.locator('[data-testid="waze-cat-bear"]').click();
+            const reportSheetA = pageA.locator('[data-testid="waze-report-sheet"]');
+            await expect(reportSheetA).toBeVisible();
+            await expect(reportSheetA).not.toContainText("Activ 3h");
+            await expect(reportSheetA).not.toContainText("Expiră automat");
             await pageA
                 .locator('[data-testid="waze-report-note"]')
                 .fill("Ursoaică văzută lângă lizieră");
-            await pageA.locator('[data-testid="waze-report-submit-btn"]').click();
-            await expect(pageA.locator('[data-testid="waze-report-sheet"]')).toHaveCount(0);
+            // Single tap on category publishes immediately and closes sheet!
+            await pageA.locator('[data-testid="waze-cat-bear"]').click();
+            await expect(reportSheetA).toHaveCount(0);
 
             // Real-time SSE delivers `report_update` to Hiker B's map & elevation sheet
             await expect(
@@ -1038,7 +1081,7 @@ test.describe("Multi-User Trail Live Community (Waze Alerts, Permanent Landmarks
             // Hiker B is still ~300 m away (>150 m), so nearby Waze prompt must NOT appear yet
             await expect(pageB.locator('[data-testid="waze-nearby-prompt"]')).toHaveCount(0);
 
-            // 2. Hiker A hikes further North to (45.4463, 25.5500) and adds a permanent `spring` landmark
+            // 2. Hiker A hikes further North to (45.4463, 25.5500) and 1-tap adds permanent `spring`
             await pageA.evaluate(() => {
                 const w = window as unknown as {
                     __wandererNavTest: {
@@ -1056,11 +1099,11 @@ test.describe("Multi-User Trail Live Community (Waze Alerts, Permanent Landmarks
             });
 
             await pageA.locator('[data-testid="nav-waze-report-btn"]').click();
-            await pageA.locator('[data-testid="waze-cat-spring"]').click();
             await pageA
                 .locator('[data-testid="waze-report-note"]')
                 .fill("Izvor rece sub stâncă");
-            await pageA.locator('[data-testid="waze-report-submit-btn"]').click();
+            await pageA.locator('[data-testid="waze-cat-spring"]').click();
+            await expect(pageA.locator('[data-testid="waze-report-sheet"]')).toHaveCount(0);
 
             await expect(
                 pageB.locator(

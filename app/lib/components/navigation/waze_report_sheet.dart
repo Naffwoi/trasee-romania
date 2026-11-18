@@ -37,6 +37,31 @@ Color categoryAccentColor(TrailReportCategory category) => switch (category) {
   TrailReportCategory.shelter => const Color(0xFF0D9488),
 };
 
+String _shortCategoryLabel(TrailReportCategory cat, {required bool isRo}) {
+  if (!isRo) {
+    return switch (cat) {
+      TrailReportCategory.bear => 'Bear',
+      TrailReportCategory.shepherdDogs => 'Dogs',
+      TrailReportCategory.fallenTreeTerrain => 'Obstacle',
+      TrailReportCategory.iceMud => 'Ice / Mud',
+      TrailReportCategory.deer => 'Wildlife',
+      TrailReportCategory.spring => 'Spring',
+      TrailReportCategory.viewpoint => 'Viewpoint',
+      TrailReportCategory.shelter => 'Shelter',
+    };
+  }
+  return switch (cat) {
+    TrailReportCategory.bear => 'Urs',
+    TrailReportCategory.shepherdDogs => 'Câini',
+    TrailReportCategory.fallenTreeTerrain => 'Obstacol',
+    TrailReportCategory.iceMud => 'Gheață / Noroi',
+    TrailReportCategory.deer => 'Faună',
+    TrailReportCategory.spring => 'Izvor',
+    TrailReportCategory.viewpoint => 'Belvedere',
+    TrailReportCategory.shelter => 'Adăpost',
+  };
+}
+
 class WazeReportSheet extends StatefulWidget {
   const WazeReportSheet({
     super.key,
@@ -50,13 +75,21 @@ class WazeReportSheet extends StatefulWidget {
 }
 
 class _WazeReportSheetState extends State<WazeReportSheet> {
-  TrailReportCategory _selected = TrailReportCategory.bear;
   final TextEditingController _noteController = TextEditingController();
 
   @override
   void dispose() {
     _noteController.dispose();
     super.dispose();
+  }
+
+  void _handleQuickTap(TrailReportCategory category) {
+    Navigator.of(context).pop(
+      WazeReportSubmission(
+        category: category,
+        note: _noteController.text.trim(),
+      ),
+    );
   }
 
   @override
@@ -67,10 +100,10 @@ class _WazeReportSheetState extends State<WazeReportSheet> {
 
     return Padding(
       padding: EdgeInsets.only(
-        left: 20,
-        right: 20,
-        top: 12,
-        bottom: 20 + bottomInset,
+        left: 16,
+        right: 16,
+        top: 10,
+        bottom: 16 + bottomInset,
       ),
       child: SingleChildScrollView(
         child: Column(
@@ -79,118 +112,61 @@ class _WazeReportSheetState extends State<WazeReportSheet> {
           children: [
             Center(
               child: Container(
-                width: 40,
+                width: 36,
                 height: 4,
                 decoration: BoxDecoration(
-                  color: theme.colorScheme.onSurface.withValues(alpha: 0.25),
+                  color: theme.colorScheme.onSurface.withValues(alpha: 0.22),
                   borderRadius: BorderRadius.circular(2),
                 ),
               ),
             ),
-            const SizedBox(height: 14),
+            const SizedBox(height: 10),
             Row(
               children: [
                 Expanded(
                   child: Text(
-                    isRo
-                        ? 'Raportează pe traseu'
-                        : 'Report on trail',
-                    style: theme.textTheme.titleLarge?.copyWith(
-                      fontWeight: FontWeight.bold,
+                    isRo ? 'Ce ai observat?' : 'What do you see?',
+                    style: theme.textTheme.titleMedium?.copyWith(
+                      fontWeight: FontWeight.w800,
                     ),
                   ),
                 ),
                 IconButton(
+                  visualDensity: VisualDensity.compact,
                   onPressed: () => Navigator.of(context).pop(),
-                  icon: const Icon(Icons.close),
+                  icon: const Icon(Icons.close, size: 20),
                 ),
               ],
             ),
-            const SizedBox(height: 6),
-            Text(
-              isRo
-                  ? 'Atenționări Temporare (expiră automat dacă nu sunt reconfirmate)'
-                  : 'Temporary Waze Alerts (auto-expire unless reconfirmed)',
-              style: theme.textTheme.labelLarge?.copyWith(
-                fontWeight: FontWeight.w700,
-                color: theme.colorScheme.onSurface.withValues(alpha: 0.8),
-              ),
-            ),
-            const SizedBox(height: 10),
-            Wrap(
-              spacing: 8,
-              runSpacing: 8,
+            const SizedBox(height: 8),
+            GridView.count(
+              crossAxisCount: 4,
+              shrinkWrap: true,
+              physics: const NeverScrollableScrollPhysics(),
+              mainAxisSpacing: 8,
+              crossAxisSpacing: 8,
+              childAspectRatio: 0.95,
               children: [
-                for (final cat in TrailReportCategory.temporaryCategories)
-                  _buildCategoryTile(context, cat, isRo: isRo),
+                for (final cat in TrailReportCategory.values)
+                  _buildQuickTile(context, cat, isRo: isRo),
               ],
             ),
-            const SizedBox(height: 18),
-            Text(
-              isRo
-                  ? 'Repere Permanente pe Traseu (rămân pe hartă)'
-                  : 'Permanent Trail Landmarks (stay on map)',
-              style: theme.textTheme.labelLarge?.copyWith(
-                fontWeight: FontWeight.w700,
-                color: theme.colorScheme.onSurface.withValues(alpha: 0.8),
-              ),
-            ),
-            const SizedBox(height: 10),
-            Wrap(
-              spacing: 8,
-              runSpacing: 8,
-              children: [
-                for (final cat in TrailReportCategory.permanentCategories)
-                  _buildCategoryTile(context, cat, isRo: isRo),
-              ],
-            ),
-            const SizedBox(height: 16),
+            const SizedBox(height: 12),
             TextField(
               controller: _noteController,
               maxLength: 160,
-              maxLines: 2,
-              minLines: 1,
+              maxLines: 1,
               textInputAction: TextInputAction.done,
+              style: theme.textTheme.bodySmall,
               decoration: InputDecoration(
-                labelText: isRo
-                    ? 'Detalii scurte (opțional)'
-                    : 'Short note (optional)',
+                isDense: true,
+                counterText: '',
                 hintText: isRo
-                    ? 'Ex: ursoaică cu pui lângă poiană / izvor cu debit bun'
-                    : 'E.g. near clearing / strong water flow',
+                    ? 'Notă scurtă opțională (înainte să apeși iconul)...'
+                    : 'Optional short note (before tapping icon)...',
                 border: OutlineInputBorder(
-                  borderRadius: BorderRadius.circular(14),
+                  borderRadius: BorderRadius.circular(12),
                 ),
-              ),
-            ),
-            const SizedBox(height: 10),
-            FilledButton.icon(
-              key: const ValueKey('waze-submit-report-btn'),
-              style: FilledButton.styleFrom(
-                backgroundColor: categoryAccentColor(_selected),
-                foregroundColor: Colors.white,
-                padding: const EdgeInsets.symmetric(vertical: 14),
-                shape: RoundedRectangleBorder(
-                  borderRadius: BorderRadius.circular(14),
-                ),
-              ),
-              onPressed: () {
-                Navigator.of(context).pop(
-                  WazeReportSubmission(
-                    category: _selected,
-                    note: _noteController.text.trim(),
-                  ),
-                );
-              },
-              icon: Text(
-                _selected.emoji,
-                style: const TextStyle(fontSize: 18),
-              ),
-              label: Text(
-                isRo
-                    ? 'Adaugă pe hartă (${_selected.label(isRo: true)})'
-                    : 'Post to map (${_selected.label(isRo: false)})',
-                style: const TextStyle(fontWeight: FontWeight.bold),
               ),
             ),
           ],
@@ -199,59 +175,38 @@ class _WazeReportSheetState extends State<WazeReportSheet> {
     );
   }
 
-  Widget _buildCategoryTile(
+  Widget _buildQuickTile(
     BuildContext context,
     TrailReportCategory cat, {
     required bool isRo,
   }) {
     final theme = Theme.of(context);
-    final selected = _selected == cat;
-    final accent = categoryAccentColor(cat);
+    final isDeer = cat == TrailReportCategory.deer;
+    final bgColor = isDeer
+        ? const Color(0xFF16A34A).withValues(alpha: 0.10)
+        : theme.colorScheme.surfaceContainerHighest.withValues(alpha: 0.45);
 
     return Material(
-      color: selected
-          ? accent.withValues(alpha: 0.16)
-          : theme.colorScheme.surfaceContainerHighest.withValues(alpha: 0.45),
-      borderRadius: BorderRadius.circular(14),
+      color: bgColor,
+      borderRadius: BorderRadius.circular(16),
       child: InkWell(
         key: ValueKey('waze-cat-${cat.apiValue}'),
-        onTap: () => setState(() => _selected = cat),
-        borderRadius: BorderRadius.circular(14),
-        child: Container(
-          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-          decoration: BoxDecoration(
-            borderRadius: BorderRadius.circular(14),
-            border: Border.all(
-              color: selected ? accent : Colors.transparent,
-              width: 1.8,
-            ),
-          ),
-          child: Row(
-            mainAxisSize: MainAxisSize.min,
+        onTap: () => _handleQuickTap(cat),
+        borderRadius: BorderRadius.circular(16),
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 6),
+          child: Column(
+            mainAxisAlignment: MainAxisAlignment.center,
             children: [
-              Text(cat.emoji, style: const TextStyle(fontSize: 20)),
-              const SizedBox(width: 8),
-              Flexible(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    Text(
-                      cat.label(isRo: isRo),
-                      style: theme.textTheme.labelLarge?.copyWith(
-                        fontWeight: selected
-                            ? FontWeight.w700
-                            : FontWeight.w600,
-                      ),
-                    ),
-                    Text(
-                      cat.ttlBadgeLabel(isRo: isRo),
-                      style: theme.textTheme.labelSmall?.copyWith(
-                        color: accent,
-                        fontWeight: FontWeight.w700,
-                      ),
-                    ),
-                  ],
+              Text(cat.emoji, style: const TextStyle(fontSize: 24)),
+              const SizedBox(height: 4),
+              Text(
+                _shortCategoryLabel(cat, isRo: isRo),
+                textAlign: TextAlign.center,
+                maxLines: 2,
+                overflow: TextOverflow.ellipsis,
+                style: theme.textTheme.labelSmall?.copyWith(
+                  fontWeight: FontWeight.w700,
                 ),
               ),
             ],

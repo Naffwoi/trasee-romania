@@ -624,4 +624,29 @@ describe("additional edge cases across maneuvers and DEM bilinear interpolation"
 			(globalThis as Record<string, unknown>).OffscreenCanvas = origOffscreen;
 		}
 	});
+
+	it("returns O(1) direct geodesic guidance when user is >5 km away (e.g. 306 km desktop Start) without millions of DEM samples", () => {
+		const trail = [
+			{ lat: 46.16, lon: 24.35, ele: 320, distanceM: 0, gradePct: 0 },
+			{ lat: 46.17, lon: 24.36, ele: 340, distanceM: 1350, gradePct: 1.5 },
+		];
+		let samplerCalls = 0;
+		const res = computeOffTrailReroute({
+			userLat: 47.1584,
+			userLon: 27.6014, // ~270+ km away
+			userEle: 120,
+			trailPoints: trail,
+			lastAlongTrackM: 0,
+			sampler: () => {
+				samplerCalls++;
+				return 200;
+			},
+			mode: "min-climb",
+			locale: "ro",
+		});
+
+		expect(samplerCalls).toBeLessThanOrEqual(8);
+		expect(res.points.length).toBe(2);
+		expect(res.distanceM).toBeGreaterThan(200_000);
+	});
 });

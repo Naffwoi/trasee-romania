@@ -13,16 +13,19 @@ import (
 	"github.com/pocketbase/dbx"
 	"github.com/pocketbase/pocketbase/core"
 	"github.com/pocketbase/pocketbase/tools/types"
+	"github.com/twpayne/go-polyline"
 
 	"pocketbase/services/live"
 	"pocketbase/util"
 )
 
 const (
-	presenceWindow     = 30 * time.Minute
-	reportDedupMeters  = 40.0
-	sosDefaultTTL      = 6 * time.Hour
-	unsetAlongTrackVal = -1.0
+	presenceWindow           = 30 * time.Minute
+	livePresenceWindow       = 2 * time.Minute
+	presenceAreaRadiusMeters = 2000.0
+	reportDedupMeters        = 40.0
+	sosDefaultTTL            = 6 * time.Hour
+	unsetAlongTrackVal       = -1.0
 )
 
 type reportCategoryMeta struct {
@@ -156,6 +159,7 @@ func RegisterTrailLiveRoutes(se *core.ServeEvent, hub *live.TrailLiveHub) {
 	group.BindFunc(RequireLiveInternalProxy)
 
 	group.POST("/heartbeat", handler.Heartbeat)
+	group.DELETE("/heartbeat", handler.ClearHeartbeat)
 	group.GET("/trail/{id}/summary", handler.TrailSummary)
 	group.POST("/reports", handler.CreateReport)
 	group.POST("/reports/{id}/vote", handler.VoteReport)
@@ -342,25 +346,138 @@ func toSosAlertDto(rec *core.Record, callerDeviceHash string, respondingDevices 
 	}
 }
 
-func countActiveHikers30m(app core.App, trailID string, now time.Time) (int, error) {
+func distanceToCoordsCorridorMeters(lat, lon float64, coords [][]float64) float64 {
+	if len(coords) == 0 {
+		return math.Inf(1)
+	}
+	if len(coords) == 1 {
+		return util.HaversineDistanceMeters(lat, lon, coords[0][0], coords[0][1])
+	}
+
+	const metersPerDegLat = 111132.92
+	cosLat := math.Max(0.1, math.Cos(lat*math.Pi/180.0))
+	metersPerDegLon := metersPerDegLat * cosLat
+
+	minDistSq := math.Inf(1)
+	for i := 0; i < len(coords)-1; i++ {
+		ax := (coords[i][1] - lon) * metersPerDegLon
+		ay := (coords[i][0] - lat) * metersPerDegLat
+		bx := (coords[i+1][1] - lon) * metersPerDegLon
+		by := (coords[i+1][0] - lat) * metersPerDegLat
+
+		dx := bx - ax
+		dy := by - ay
+		segLenSq := dx*dx + dy*dy
+		var t float64
+		if segLenSq > 1e-9 {
+			t = -(ax*dx + ay*dy) / segLenSq
+			if t < 0 {
+				t = 0
+			} else if t > 1 {
+				t = 1
+			}
+		}
+		px := ax + t*dx
+		py := ay + t*dy
+		dSq := px*px + py*py
+		if dSq < minDistSq {
+			minDistSq = dSq
+		}
+	}
+	return math.Sqrt(minDistSq)
+}
+
+func resolveTrailOrRefCorridor(app core.App, trailID string, refLat, refLon float64, hasRefCoords bool) [][]float64 {
 	trailID = strings.TrimSpace(trailID)
-	if trailID == "" {
+	if trailID != "" {
+		if trailRec, err := app.FindRecordById("trails", trailID); err == nil && trailRec != nil {
+			if poly := strings.TrimSpace(trailRec.GetString("polyline")); poly != "" {
+				if coords, _, decErr := polyline.DecodeCoords([]byte(poly)); decErr == nil && len(coords) > 0 {
+					return coords
+				}
+			}
+			tLat := trailRec.GetFloat("lat")
+			tLon := trailRec.GetFloat("lon")
+			if tLat != 0 || tLon != 0 {
+				return [][]float64{{tLat, tLon}}
+			}
+		}
+	}
+	if hasRefCoords {
+		return [][]float64{{refLat, refLon}}
+	}
+	return nil
+}
+
+// countActiveNearbyUsers counts OTHER distinct devices (`device_hash != callerDeviceHash`)
+// that currently have the app open (`last_seen >= now - 2 min`) AND have live GPS location
+// inside the 2 km corridor of the target trail / reference location.
+func countActiveNearbyUsers(
+	app core.App,
+	trailID string,
+	refLat, refLon float64,
+	hasRefCoords bool,
+	callerDeviceHash string,
+	now time.Time,
+) (int, error) {
+	corridor := resolveTrailOrRefCorridor(app, trailID, refLat, refLon, hasRefCoords)
+	if len(corridor) == 0 {
 		return 0, nil
 	}
-	cutoff := toPBDateTime(now.Add(-presenceWindow)).String()
-	var row struct {
-		Count int `db:"cnt"`
+
+	minLat, maxLat := corridor[0][0], corridor[0][0]
+	minLon, maxLon := corridor[0][1], corridor[0][1]
+	for _, c := range corridor[1:] {
+		if c[0] < minLat {
+			minLat = c[0]
+		}
+		if c[0] > maxLat {
+			maxLat = c[0]
+		}
+		if c[1] < minLon {
+			minLon = c[1]
+		}
+		if c[1] > maxLon {
+			maxLon = c[1]
+		}
 	}
-	err := app.DB().NewQuery(
-		"SELECT COUNT(DISTINCT device_hash) AS cnt FROM trail_presence WHERE trail_id = {:trailId} AND last_seen >= {:cutoff}",
-	).Bind(dbx.Params{
-		"trailId": trailID,
-		"cutoff":  cutoff,
-	}).One(&row)
+	// ~2 km margin with generous latitude/longitude buffer for fast SQL pre-filtering
+	const latPad = 0.03
+	const lonPad = 0.05
+
+	cutoff := toPBDateTime(now.Add(-livePresenceWindow)).String()
+	records, err := app.FindRecordsByFilter(
+		"trail_presence",
+		"last_seen >= {:cutoff} && lat >= {:minLat} && lat <= {:maxLat} && lon >= {:minLon} && lon <= {:maxLon}",
+		"",
+		500,
+		0,
+		dbx.Params{
+			"cutoff": cutoff,
+			"minLat": minLat - latPad,
+			"maxLat": maxLat + latPad,
+			"minLon": minLon - lonPad,
+			"maxLon": maxLon + lonPad,
+		},
+	)
 	if err != nil {
 		return 0, err
 	}
-	return row.Count, nil
+
+	seenDevices := make(map[string]bool)
+	for _, rec := range records {
+		dh := strings.TrimSpace(rec.GetString("device_hash"))
+		if dh == "" || (callerDeviceHash != "" && dh == callerDeviceHash) || seenDevices[dh] {
+			continue
+		}
+		pLat := rec.GetFloat("lat")
+		pLon := rec.GetFloat("lon")
+		if distanceToCoordsCorridorMeters(pLat, pLon, corridor) <= presenceAreaRadiusMeters {
+			seenDevices[dh] = true
+		}
+	}
+
+	return len(seenDevices), nil
 }
 
 func isReportVisibleAt(rec *core.Record, now time.Time) bool {
@@ -553,7 +670,7 @@ func (h *TrailLiveHandler) Heartbeat(e *core.RequestEvent) error {
 		}
 	}
 
-	activeHikers, err := countActiveHikers30m(e.App, trailID, now)
+	activeHikers, err := countActiveNearbyUsers(e.App, trailID, *req.Lat, *req.Lon, true, deviceHash, now)
 	if err != nil {
 		return err
 	}
@@ -575,6 +692,22 @@ func (h *TrailLiveHandler) Heartbeat(e *core.RequestEvent) error {
 	})
 }
 
+// ClearHeartbeat handles DELETE /live/heartbeat when a client closes or backgrounds
+// the app so its active presence disappears immediately.
+func (h *TrailLiveHandler) ClearHeartbeat(e *core.RequestEvent) error {
+	if err := verifyLiveInternalSecret(e); err != nil {
+		return err
+	}
+	deviceHash, err := requireDeviceHash(e)
+	if err != nil {
+		return err
+	}
+	if rec, findErr := e.App.FindFirstRecordByData("trail_presence", "device_hash", deviceHash); findErr == nil && rec != nil {
+		_ = e.App.Delete(rec)
+	}
+	return e.JSON(http.StatusOK, map[string]any{"ok": true})
+}
+
 // TrailSummary handles GET /live/trail/{id}/summary.
 func (h *TrailLiveHandler) TrailSummary(e *core.RequestEvent) error {
 	if err := verifyLiveInternalSecret(e); err != nil {
@@ -587,17 +720,32 @@ func (h *TrailLiveHandler) TrailSummary(e *core.RequestEvent) error {
 	callerDeviceHash := readDeviceHash(e.Request, false)
 	now := h.nowUTC()
 
-	activeHikers, err := countActiveHikers30m(e.App, trailID, now)
+	var refLat, refLon float64
+	hasRefCoords := false
+	q := e.Request.URL.Query()
+	latRaw := strings.TrimSpace(q.Get("lat"))
+	lonRaw := strings.TrimSpace(q.Get("lon"))
+	if latRaw != "" && lonRaw != "" {
+		parsedLat, errLat := strconv.ParseFloat(latRaw, 64)
+		parsedLon, errLon := strconv.ParseFloat(lonRaw, 64)
+		if errLat == nil && errLon == nil && validateLatLon(&parsedLat, &parsedLon) == nil {
+			refLat = parsedLat
+			refLon = parsedLon
+			hasRefCoords = true
+		}
+	}
+
+	activeHikers, err := countActiveNearbyUsers(e.App, trailID, refLat, refLon, hasRefCoords, callerDeviceHash, now)
 	if err != nil {
 		return err
 	}
 
-	reports, err := queryVisibleReports(e.App, trailID, 0, 0, false, now)
+	reports, err := queryVisibleReports(e.App, trailID, refLat, refLon, hasRefCoords, now)
 	if err != nil {
 		return err
 	}
 
-	sosAlerts, err := queryActiveSosAlerts(e.App, trailID, 0, 0, false, callerDeviceHash, now)
+	sosAlerts, err := queryActiveSosAlerts(e.App, trailID, refLat, refLon, hasRefCoords, callerDeviceHash, now)
 	if err != nil {
 		return err
 	}

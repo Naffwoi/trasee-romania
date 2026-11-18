@@ -27,6 +27,7 @@
     import { TrailLayer } from "#lib/vendor/maplibre-layer-manager/trail-layer.ts";
     import { StyleSwitcherControl } from "#lib/vendor/maplibre-style-switcher/style-switcher-control.ts";
     import { UserLocationControl } from "#lib/vendor/maplibre-user-location/user-location-control.ts";
+    import { clearHeartbeat, sendHeartbeat } from "#lib/live/live_client.ts";
     import type { Feature, FeatureCollection, GeoJSON } from "geojson";
     import * as M from "maplibre-gl";
     import "maplibre-gl/dist/maplibre-gl.css";
@@ -1195,6 +1196,25 @@
     }
 
     let geolocateControl: UserLocationControl | undefined;
+    let mapPresencePos: { lat: number; lon: number } | null = null;
+    let lastMapHeartbeatAt = 0;
+    let mapPresenceTimer: ReturnType<typeof setInterval> | null = null;
+    let removePresenceListeners: (() => void) | null = null;
+
+    function maybeSendMapPresenceHeartbeat(force = false) {
+        if (!mapPresencePos) return;
+        if (typeof document !== "undefined" && document.visibilityState !== "visible") return;
+        const now = Date.now();
+        if (!force && now - lastMapHeartbeatAt < 40_000) return;
+        lastMapHeartbeatAt = now;
+        const singleTrailId = trails.length === 1 ? (trails[0]?.id ?? "") : "";
+        void sendHeartbeat({
+            trailId: singleTrailId,
+            lat: mapPresencePos.lat,
+            lon: mapPresencePos.lon,
+            inNavigation: false,
+        });
+    }
 
     onMount(async () => {
         const initialState = {
@@ -1258,7 +1278,17 @@
         elevationMarker.setOpacity("0");
 
         let img = new Image(20, 20);
-        img.onload = () => map!.addImage("direction-caret", img);
+        const ensureDirectionCaretImage = () => {
+            if (!map || !img.complete || img.naturalWidth <= 0) return;
+            try {
+                if (!map.style || !map.hasImage("direction-caret")) {
+                    map.addImage("direction-caret", img);
+                }
+            } catch {
+                // Ignore transient style swap race
+            }
+        };
+        img.onload = ensureDirectionCaretImage;
         img.src = directionCaret;
 
         const switcherControl = new StyleSwitcherControl({
@@ -1284,6 +1314,10 @@
                 enableHighAccuracy: true,
                 animate: fitBounds == "animate",
                 onError: onlocationerror,
+                onPositionUpdate: (fix) => {
+                    mapPresencePos = { lat: fix.latitude, lon: fix.longitude };
+                    maybeSendMapPresenceHeartbeat(false);
+                },
                 labels: {
                     locateMe: $_("locate-me"),
                     followNorthUp: $_("follow-north-up"),
@@ -1293,6 +1327,51 @@
                 },
             });
             map.addControl(geolocateControl);
+
+            // If user already granted geolocation permission and has the app open, share anonymous area presence
+            if (typeof navigator !== "undefined" && navigator.permissions?.query && navigator.geolocation) {
+                void navigator.permissions
+                    .query({ name: "geolocation" })
+                    .then((perm) => {
+                        if (perm.state === "granted") {
+                            navigator.geolocation.getCurrentPosition(
+                                (pos) => {
+                                    mapPresencePos = {
+                                        lat: pos.coords.latitude,
+                                        lon: pos.coords.longitude,
+                                    };
+                                    maybeSendMapPresenceHeartbeat(true);
+                                },
+                                () => {},
+                                { enableHighAccuracy: false, maximumAge: 30_000, timeout: 8_000 },
+                            );
+                        }
+                    })
+                    .catch(() => {});
+            }
+
+            mapPresenceTimer = setInterval(() => {
+                maybeSendMapPresenceHeartbeat(false);
+            }, 45_000);
+
+            const onPageHide = () => {
+                if (mapPresencePos) {
+                    void clearHeartbeat();
+                }
+            };
+            const onVisibility = () => {
+                if (document.visibilityState === "hidden" && mapPresencePos) {
+                    void clearHeartbeat();
+                } else if (document.visibilityState === "visible" && mapPresencePos) {
+                    maybeSendMapPresenceHeartbeat(true);
+                }
+            };
+            window.addEventListener("pagehide", onPageHide);
+            document.addEventListener("visibilitychange", onVisibility);
+            removePresenceListeners = () => {
+                window.removeEventListener("pagehide", onPageHide);
+                document.removeEventListener("visibilitychange", onVisibility);
+            };
         }
 
         if (showStyleSwitcher) {
@@ -1385,6 +1464,7 @@
         });
 
         map.on("style.load", () => {
+            ensureDirectionCaretImage();
             if (mapLoaded && clusterTrails) {
                 void addClusterLayer(clusterData);
                 void addPreviewLayer(previewData);
@@ -1470,6 +1550,12 @@
     }
 
     onDestroy(() => {
+        if (mapPresenceTimer) {
+            clearInterval(mapPresenceTimer);
+            mapPresenceTimer = null;
+        }
+        removePresenceListeners?.();
+        removePresenceListeners = null;
         ++clusterLayerRequest;
         ++previewLayerRequest;
         ++selectedRouteRequest;

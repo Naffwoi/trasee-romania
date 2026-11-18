@@ -46,7 +46,7 @@ Future<SosTriggerSubmission?> showSosTriggerDialog(
   );
 }
 
-/// Floating `🆘 Ajutor` emergency button for `NavigationScreen`.
+/// Circular icon-only emergency SOS button for `NavigationScreen` (Waze-style, non-aggressive).
 class SosFloatingButton extends StatelessWidget {
   const SosFloatingButton({
     super.key,
@@ -61,32 +61,18 @@ class SosFloatingButton extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final bg = isActive ? const Color(0xFFB91C1C) : const Color(0xFFDC2626);
-    return Material(
-      color: bg,
-      elevation: 4,
-      borderRadius: BorderRadius.circular(22),
-      child: InkWell(
-        key: const ValueKey('nav-sos-btn'),
-        onTap: onPressed,
-        borderRadius: BorderRadius.circular(22),
-        child: Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 11, vertical: 8),
-          child: Row(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              const Text('🆘', style: TextStyle(fontSize: 15)),
-              const SizedBox(width: 4),
-              Text(
-                isActive ? 'SOS' : (isRo ? 'Ajutor' : 'SOS'),
-                style: Theme.of(context).textTheme.labelMedium?.copyWith(
-                  color: Colors.white,
-                  fontWeight: FontWeight.w800,
-                ),
-              ),
-            ],
-          ),
-        ),
+    final surface = Theme.of(context).colorScheme.surface;
+    return IconButton(
+      key: const ValueKey('nav-sos-btn'),
+      tooltip: isRo ? 'SOS Urgență' : 'SOS Emergency',
+      onPressed: onPressed,
+      icon: Icon(
+        Icons.sos_rounded,
+        color: isActive ? Colors.white : const Color(0xFFDC2626),
+        size: 22,
+      ),
+      style: IconButton.styleFrom(
+        backgroundColor: isActive ? const Color(0xFFDC2626) : surface,
       ),
     );
   }
@@ -108,14 +94,10 @@ class SosTriggerDialog extends StatefulWidget {
 
 class _SosTriggerDialogState extends State<SosTriggerDialog> {
   SosReason _reason = SosReason.lost;
-  late final TextEditingController _nameController = TextEditingController(
-    text: widget.initialName,
-  );
   final TextEditingController _messageController = TextEditingController();
 
   @override
   void dispose() {
-    _nameController.dispose();
     _messageController.dispose();
     super.dispose();
   }
@@ -128,10 +110,10 @@ class _SosTriggerDialogState extends State<SosTriggerDialog> {
 
     return Padding(
       padding: EdgeInsets.only(
-        left: 20,
-        right: 20,
-        top: 12,
-        bottom: 20 + bottomInset,
+        left: 16,
+        right: 16,
+        top: 10,
+        bottom: 16 + bottomInset,
       ),
       child: SingleChildScrollView(
         child: Column(
@@ -140,106 +122,67 @@ class _SosTriggerDialogState extends State<SosTriggerDialog> {
           children: [
             Center(
               child: Container(
-                width: 40,
+                width: 36,
                 height: 4,
                 decoration: BoxDecoration(
-                  color: theme.colorScheme.onSurface.withValues(alpha: 0.25),
+                  color: theme.colorScheme.onSurface.withValues(alpha: 0.22),
                   borderRadius: BorderRadius.circular(2),
                 ),
               ),
             ),
-            const SizedBox(height: 12),
+            const SizedBox(height: 10),
             Row(
               children: [
-                const Text('🆘', style: TextStyle(fontSize: 24)),
-                const SizedBox(width: 10),
                 Expanded(
                   child: Text(
-                    isRo
-                        ? 'Solicită ajutor în apropiere'
-                        : 'Request nearby SOS help',
-                    style: theme.textTheme.titleLarge?.copyWith(
-                      fontWeight: FontWeight.bold,
+                    isRo ? 'SOS Urgență' : 'SOS Emergency',
+                    style: theme.textTheme.titleMedium?.copyWith(
+                      fontWeight: FontWeight.w800,
+                      color: const Color(0xFFDC2626),
                     ),
                   ),
                 ),
                 IconButton(
+                  visualDensity: VisualDensity.compact,
                   onPressed: () => Navigator.of(context).pop(),
-                  icon: const Icon(Icons.close),
+                  icon: const Icon(Icons.close, size: 20),
                 ),
               ],
             ),
             const SizedBox(height: 8),
-            // Official 112 & Salvamont reminder box.
-            Container(
-              padding: const EdgeInsets.all(12),
-              decoration: BoxDecoration(
-                color: const Color(0xFFFEF2F2),
-                borderRadius: BorderRadius.circular(14),
-                border: Border.all(
-                  color: const Color(0xFFDC2626).withValues(alpha: 0.5),
+            Row(
+              children: [
+                Expanded(
+                  child: FilledButton.icon(
+                    key: const ValueKey('sos-call-112-btn'),
+                    style: FilledButton.styleFrom(
+                      backgroundColor: const Color(0xFFB91C1C),
+                      foregroundColor: Colors.white,
+                    ),
+                    onPressed: () => _dialPhoneNumber('112'),
+                    icon: const Icon(Icons.phone_in_talk, size: 16),
+                    label: const Text('112'),
+                  ),
                 ),
-              ),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    isRo
-                        ? 'Pentru urgențe medicale sau pericol vital, sună imediat la 112 sau Salvamont!'
-                        : 'For life-threatening or medical emergencies, call 112 or Mountain Rescue immediately!',
-                    style: theme.textTheme.bodySmall?.copyWith(
-                      color: const Color(0xFF991B1B),
-                      fontWeight: FontWeight.w700,
+                const SizedBox(width: 8),
+                Expanded(
+                  child: OutlinedButton.icon(
+                    key: const ValueKey('sos-call-salvamont-btn'),
+                    style: OutlinedButton.styleFrom(
+                      foregroundColor: const Color(0xFF991B1B),
+                      side: const BorderSide(color: Color(0xFFDC2626)),
+                    ),
+                    onPressed: () => _dialPhoneNumber('0725826668'),
+                    icon: const Icon(Icons.terrain, size: 16),
+                    label: const Text(
+                      'Salvamont',
+                      overflow: TextOverflow.ellipsis,
                     ),
                   ),
-                  const SizedBox(height: 10),
-                  Row(
-                    children: [
-                      Expanded(
-                        child: FilledButton.icon(
-                          key: const ValueKey('sos-call-112-btn'),
-                          style: FilledButton.styleFrom(
-                            backgroundColor: const Color(0xFFB91C1C),
-                            foregroundColor: Colors.white,
-                            visualDensity: VisualDensity.compact,
-                          ),
-                          onPressed: () => _dialPhoneNumber('112'),
-                          icon: const Icon(Icons.phone_in_talk, size: 16),
-                          label: Text(isRo ? 'Sună 112' : 'Call 112'),
-                        ),
-                      ),
-                      const SizedBox(width: 8),
-                      Expanded(
-                        child: OutlinedButton.icon(
-                          key: const ValueKey('sos-call-salvamont-btn'),
-                          style: OutlinedButton.styleFrom(
-                            foregroundColor: const Color(0xFF991B1B),
-                            side: const BorderSide(color: Color(0xFFDC2626)),
-                            visualDensity: VisualDensity.compact,
-                          ),
-                          onPressed: () => _dialPhoneNumber('0725826668'),
-                          icon: const Icon(Icons.terrain, size: 16),
-                          label: const Text(
-                            'Salvamont',
-                            overflow: TextOverflow.ellipsis,
-                          ),
-                        ),
-                      ),
-                    ],
-                  ),
-                ],
-              ),
+                ),
+              ],
             ),
-            const SizedBox(height: 14),
-            Text(
-              isRo
-                  ? 'Motivul solicitării (trimis drumeților pe o rază de 5 km)'
-                  : 'Reason (broadcast to hikers within 5 km)',
-              style: theme.textTheme.labelLarge?.copyWith(
-                fontWeight: FontWeight.w700,
-              ),
-            ),
-            const SizedBox(height: 8),
+            const SizedBox(height: 12),
             Wrap(
               spacing: 8,
               runSpacing: 8,
@@ -253,44 +196,31 @@ class _SosTriggerDialogState extends State<SosTriggerDialog> {
                   ),
               ],
             ),
-            const SizedBox(height: 12),
-            TextField(
-              controller: _nameController,
-              maxLength: 40,
-              textInputAction: TextInputAction.next,
-              decoration: InputDecoration(
-                labelText: isRo ? 'Prenume / Nume (opțional)' : 'Name (optional)',
-                border: OutlineInputBorder(
-                  borderRadius: BorderRadius.circular(14),
-                ),
-              ),
-            ),
-            const SizedBox(height: 8),
+            const SizedBox(height: 10),
             TextField(
               controller: _messageController,
               maxLength: 200,
-              maxLines: 2,
-              minLines: 1,
+              maxLines: 1,
               textInputAction: TextInputAction.done,
+              style: theme.textTheme.bodySmall,
               decoration: InputDecoration(
-                labelText: isRo
-                    ? 'Ce s-a întâmplat / cu ce te pot ajuta?'
-                    : 'How can nearby hikers help?',
+                isDense: true,
+                counterText: '',
                 hintText: isRo
-                    ? 'Ex: gleznă luxată, am nevoie de sprijin sau apă'
-                    : 'E.g. sprained ankle, need water or support',
+                    ? 'Detalii scurte (opțional)...'
+                    : 'Short details (optional)...',
                 border: OutlineInputBorder(
-                  borderRadius: BorderRadius.circular(14),
+                  borderRadius: BorderRadius.circular(12),
                 ),
               ),
             ),
-            const SizedBox(height: 10),
-            FilledButton.icon(
+            const SizedBox(height: 12),
+            FilledButton(
               key: const ValueKey('sos-broadcast-submit-btn'),
               style: FilledButton.styleFrom(
                 backgroundColor: const Color(0xFFDC2626),
                 foregroundColor: Colors.white,
-                padding: const EdgeInsets.symmetric(vertical: 14),
+                padding: const EdgeInsets.symmetric(vertical: 13),
                 shape: RoundedRectangleBorder(
                   borderRadius: BorderRadius.circular(14),
                 ),
@@ -300,15 +230,12 @@ class _SosTriggerDialogState extends State<SosTriggerDialog> {
                   SosTriggerSubmission(
                     reason: _reason,
                     message: _messageController.text.trim(),
-                    requesterName: _nameController.text.trim(),
+                    requesterName: widget.initialName.trim(),
                   ),
                 );
               },
-              icon: const Icon(Icons.campaign_rounded),
-              label: Text(
-                isRo
-                    ? '🆘 Trimite SOS în rază de 5 km'
-                    : '🆘 Broadcast SOS within 5 km',
+              child: Text(
+                isRo ? 'Trimite SOS în zonă' : 'Send SOS nearby',
                 style: const TextStyle(fontWeight: FontWeight.bold),
               ),
             ),

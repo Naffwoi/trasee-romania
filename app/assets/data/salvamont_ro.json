@@ -1,0 +1,2540 @@
+{
+  "version": 1,
+  "generatedAt": "2026-11-18T14:33:56Z",
+  "emergency112": "112",
+  "nationalDispatchPhone": "+40725826668",
+  "nationalDispatchLabel": "0-SALVAMONT (0725 826 668)",
+  "services": {
+    "ro-ab-spj": {
+      "id": "ro-ab-spj",
+      "name": "Serviciul Public Județean Salvamont-Salvaspeo Alba",
+      "shortName": "Salvamont Alba",
+      "level": "county",
+      "countyCode": "AB",
+      "ansmrId": 20,
+      "primaryPhone": "+40731847949",
+      "secondaryPhones": [
+        "+40756636339"
+      ],
+      "phoneRoleRo": "Dispecerat / Informații județene",
+      "massifs": [
+        "Șureanu",
+        "Trascău",
+        "Bihor",
+        "Muntele Mare",
+        "Găina",
+        "Cindrel",
+        "Lotrului"
+      ],
+      "website": "https://www.salvamontalba.ro"
+    },
+    "ro-ar-spj": {
+      "id": "ro-ar-spj",
+      "name": "Compartimentul Salvamont-Salvaspeo Arad",
+      "shortName": "Salvamont Arad",
+      "level": "county",
+      "countyCode": "AR",
+      "ansmrId": 6,
+      "primaryPhone": "+40734889153",
+      "secondaryPhones": [
+        "+40372774849"
+      ],
+      "phoneRoleRo": "Informații / Baza Moneasa",
+      "massifs": [
+        "Codru-Moma",
+        "Zărand",
+        "Găina"
+      ]
+    },
+    "ro-ag-spj": {
+      "id": "ro-ag-spj",
+      "name": "Serviciul Public Județean Salvamont Argeș",
+      "shortName": "Salvamont Argeș",
+      "level": "county",
+      "countyCode": "AG",
+      "ansmrId": 4,
+      "primaryPhone": "+40248224488",
+      "secondaryPhones": [
+        "+40744501118",
+        "+40740870439",
+        "+40754959187",
+        "+40744501117"
+      ],
+      "phoneRoleRo": "Secretariat / Formații Câmpulung, Curtea de Argeș, Nucșoara",
+      "massifs": [
+        "Făgăraș",
+        "Iezer-Păpușa",
+        "Piatra Craiului",
+        "Leaota",
+        "Ghițu",
+        "Frunți"
+      ],
+      "website": "https://www.cjarges.ro/en/serviciul-public-judetean-salvamont"
+    },
+    "ro-bc-spj": {
+      "id": "ro-bc-spj",
+      "name": "Serviciul Public Județean Salvamont Bacău",
+      "shortName": "Salvamont Bacău",
+      "level": "county",
+      "countyCode": "BC",
+      "ansmrId": 7,
+      "primaryPhone": "+40731732200",
+      "secondaryPhones": [],
+      "phoneRoleRo": "Dispecerat / Informații județene",
+      "massifs": [
+        "Nemira",
+        "Tarcău-Goșman",
+        "Ciuc",
+        "Berzunți"
+      ]
+    },
+    "ro-bh-spj": {
+      "id": "ro-bh-spj",
+      "name": "Serviciul Public Județean Salvamont-Salvaspeo Bihor",
+      "shortName": "Salvamont Bihor",
+      "level": "county",
+      "countyCode": "BH",
+      "ansmrId": 8,
+      "primaryPhone": "+40359436022",
+      "secondaryPhones": [
+        "+40259467876"
+      ],
+      "phoneRoleRo": "Dispecerat / Informații județene",
+      "massifs": [
+        "Bihor",
+        "Vlădeasa",
+        "Pădurea Craiului",
+        "Codru-Moma",
+        "Șes"
+      ],
+      "website": "https://www.salvamontbihor.ro"
+    },
+    "ro-bn-spj": {
+      "id": "ro-bn-spj",
+      "name": "Serviciul Public Județean Salvamont Bistrița-Năsăud",
+      "shortName": "Salvamont Bistrița-Năsăud",
+      "level": "county",
+      "countyCode": "BN",
+      "ansmrId": 9,
+      "primaryPhone": "+40726686789",
+      "secondaryPhones": [],
+      "phoneRoleRo": "Dispecerat / Informații județene",
+      "massifs": [
+        "Rodnei",
+        "Călimani",
+        "Bârgăului",
+        "Țibleș",
+        "Suhard"
+      ]
+    },
+    "ro-bv-spj": {
+      "id": "ro-bv-spj",
+      "name": "Serviciul Public Județean Salvamont Brașov",
+      "shortName": "Salvamont Brașov (Județean)",
+      "level": "county",
+      "countyCode": "BV",
+      "ansmrId": 12,
+      "primaryPhone": "+40755272768",
+      "secondaryPhones": [
+        "+40736628948",
+        "+40722737912",
+        "+40734889160"
+      ],
+      "phoneRoleRo": "Dispecerat județean / Formații Predeal & Victoria",
+      "massifs": [
+        "Bucegi",
+        "Făgăraș",
+        "Ciucaș",
+        "Piatra Mare",
+        "Perșani",
+        "Fitifoi"
+      ],
+      "website": "https://www.spjsalvamontbrasov.ro"
+    },
+    "ro-cs-spj": {
+      "id": "ro-cs-spj",
+      "name": "Serviciul Public Județean Salvamont-Salvaspeo Caraș-Severin",
+      "shortName": "Salvamont Caraș-Severin",
+      "level": "county",
+      "countyCode": "CS",
+      "ansmrId": 19,
+      "primaryPhone": "+40744559868",
+      "secondaryPhones": [
+        "+40728970559",
+        "+40724629517",
+        "+40728970558"
+      ],
+      "phoneRoleRo": "Dispecerat / Formații Semenic, Muntele Mic-Țarcu, Herculane",
+      "massifs": [
+        "Semenic",
+        "Țarcu",
+        "Muntele Mic",
+        "Godeanu",
+        "Cernei",
+        "Mehedinți",
+        "Poiana Ruscă",
+        "Almăjului",
+        "Aninei"
+      ]
+    },
+    "ro-cj-spj": {
+      "id": "ro-cj-spj",
+      "name": "Serviciul Public Județean Salvamont-Salvaspeo Cluj",
+      "shortName": "Salvamont Cluj",
+      "level": "county",
+      "countyCode": "CJ",
+      "ansmrId": 25,
+      "primaryPhone": "+40371493333",
+      "secondaryPhones": [
+        "+40755145126",
+        "+40750732124"
+      ],
+      "phoneRoleRo": "Dispecerat județean / Băișoara & Vlădeasa",
+      "massifs": [
+        "Vlădeasa",
+        "Muntele Mare",
+        "Gilău",
+        "Trascău",
+        "Cheile Turzii",
+        "Bihor"
+      ],
+      "website": "https://www.salvamontcluj.ro"
+    },
+    "ro-cv-spj": {
+      "id": "ro-cv-spj",
+      "name": "Serviciul Public Județean Salvamont Covasna",
+      "shortName": "Salvamont Covasna",
+      "level": "county",
+      "countyCode": "CV",
+      "ansmrId": 22,
+      "primaryPhone": "+40799800028",
+      "secondaryPhones": [],
+      "phoneRoleRo": "Dispecerat / Informații județene",
+      "massifs": [
+        "Bodoc",
+        "Baraolt",
+        "Nemira",
+        "Brețcu-Oituz",
+        "Întorsurii",
+        "Ciomatu",
+        "Perșani",
+        "Penteleu",
+        "Podu Calului"
+      ],
+      "website": "https://www.salvamontcovasna.ro"
+    },
+    "ro-db-spj": {
+      "id": "ro-db-spj",
+      "name": "Serviciul Public Județean Salvamont-Salvaspeo Dâmbovița",
+      "shortName": "Salvamont Dâmbovița",
+      "level": "county",
+      "countyCode": "DB",
+      "ansmrId": 10,
+      "primaryPhone": "+40374871808",
+      "secondaryPhones": [
+        "+40726194166",
+        "+40726686685"
+      ],
+      "phoneRoleRo": "Dispecerat / Baza Peștera-Padina & Zănoaga",
+      "massifs": [
+        "Bucegi",
+        "Leaota"
+      ],
+      "website": "https://www.salvamontdb.ro"
+    },
+    "ro-gj-spj": {
+      "id": "ro-gj-spj",
+      "name": "Serviciul Public Județean Salvamont-Salvaspeo Gorj",
+      "shortName": "Salvamont Gorj",
+      "level": "county",
+      "countyCode": "GJ",
+      "ansmrId": 11,
+      "primaryPhone": "+40253221555",
+      "secondaryPhones": [
+        "+40734889139",
+        "+40253222555"
+      ],
+      "phoneRoleRo": "Dispecerat Târgu Jiu / Baza Rânca",
+      "massifs": [
+        "Parâng",
+        "Vâlcan",
+        "Godeanu",
+        "Căpățânii",
+        "Mehedinți"
+      ],
+      "website": "https://www.salvamontgorj.ro"
+    },
+    "ro-hr-spj": {
+      "id": "ro-hr-spj",
+      "name": "Serviciul Public Județean Salvamont-Salvaspeo Harghita",
+      "shortName": "Salvamont Harghita",
+      "level": "county",
+      "countyCode": "HR",
+      "ansmrId": 21,
+      "primaryPhone": "+40266207786",
+      "secondaryPhones": [
+        "+40772220786",
+        "+40744526530",
+        "+40741131020",
+        "+40744683384"
+      ],
+      "phoneRoleRo": "Dispecerat / Formații Mădăraș, Toplița, Gheorgheni, Odorhei",
+      "massifs": [
+        "Harghita",
+        "Hășmaș",
+        "Ciuc",
+        "Giurgeu",
+        "Gurghiu",
+        "Călimani",
+        "Cheile Bicazului"
+      ],
+      "website": "https://www.salvamontharghita.ro"
+    },
+    "ro-hd-spj": {
+      "id": "ro-hd-spj",
+      "name": "Serviciul Public Județean Salvamont-Salvaspeo Hunedoara",
+      "shortName": "Salvamont Hunedoara",
+      "level": "county",
+      "countyCode": "HD",
+      "ansmrId": 42,
+      "primaryPhone": "+40354407457",
+      "secondaryPhones": [],
+      "phoneRoleRo": "Dispecerat județean (Retezat, Parâng, Șureanu, Vâlcan)",
+      "massifs": [
+        "Retezat",
+        "Parâng",
+        "Șureanu",
+        "Vâlcan",
+        "Godeanu",
+        "Poiana Ruscă",
+        "Metaliferi"
+      ],
+      "website": "https://www.salvamonthd.ro"
+    },
+    "ro-mm-spj": {
+      "id": "ro-mm-spj",
+      "name": "Serviciul Public Județean Salvamont Maramureș",
+      "shortName": "Salvamont Maramureș",
+      "level": "county",
+      "countyCode": "MM",
+      "ansmrId": 13,
+      "primaryPhone": "+40362803501",
+      "secondaryPhones": [
+        "+40372463880",
+        "+40745258432",
+        "+40262342322"
+      ],
+      "phoneRoleRo": "Dispecerat județean / Formațiile Borșa, Cavnic, Vișeu",
+      "massifs": [
+        "Rodnei",
+        "Maramureșului",
+        "Gutâi",
+        "Țibleș",
+        "Lăpuș"
+      ],
+      "website": "https://www.salvamontmaramures.ro"
+    },
+    "ro-mh-spj": {
+      "id": "ro-mh-spj",
+      "name": "Serviciul Public Județean Salvamont-Salvaspeo Mehedinți",
+      "shortName": "Salvamont Mehedinți",
+      "level": "county",
+      "countyCode": "MH",
+      "ansmrId": 29,
+      "primaryPhone": "+40771020571",
+      "secondaryPhones": [
+        "+40754574246"
+      ],
+      "phoneRoleRo": "Dispecerat / Informații județene",
+      "massifs": [
+        "Mehedinți",
+        "Cazanele Dunării",
+        "Almăjului"
+      ]
+    },
+    "ro-ms-spj": {
+      "id": "ro-ms-spj",
+      "name": "Serviciul Public Județean Salvamont-Salvaspeo Mureș",
+      "shortName": "Salvamont Mureș",
+      "level": "county",
+      "countyCode": "MS",
+      "ansmrId": 14,
+      "primaryPhone": "+40728289442",
+      "secondaryPhones": [
+        "+40365430940"
+      ],
+      "phoneRoleRo": "Dispecerat 24/7 / Sediu Târgu Mureș",
+      "massifs": [
+        "Călimani",
+        "Gurghiu"
+      ],
+      "website": "https://salvamontms.ro"
+    },
+    "ro-nt-spj": {
+      "id": "ro-nt-spj",
+      "name": "Serviciul Public Județean Salvamont-Salvaspeo Neamț",
+      "shortName": "Salvamont Neamț",
+      "level": "county",
+      "countyCode": "NT",
+      "ansmrId": 15,
+      "primaryPhone": "+40372780106",
+      "secondaryPhones": [
+        "+40734889137"
+      ],
+      "phoneRoleRo": "Dispecerat Durău / Baza Dochia Ceahlău",
+      "massifs": [
+        "Ceahlău",
+        "Cheile Bicazului",
+        "Hășmaș",
+        "Bistriței",
+        "Stânișoarei",
+        "Tazlău"
+      ],
+      "website": "https://www.salvamontneamt.ro"
+    },
+    "ro-ph-spj": {
+      "id": "ro-ph-spj",
+      "name": "Serviciul Public Județean Salvamont Prahova",
+      "shortName": "Salvamont Prahova",
+      "level": "county",
+      "countyCode": "PH",
+      "ansmrId": 16,
+      "primaryPhone": "+40244311922",
+      "secondaryPhones": [
+        "+40722140858",
+        "+40734889132",
+        "+40732021820"
+      ],
+      "phoneRoleRo": "Dispecerat Cota 1400 / Cheia-Ciucaș, Azuga, Platoul Bucegi",
+      "massifs": [
+        "Bucegi",
+        "Ciucaș",
+        "Baiului",
+        "Grohotiș",
+        "Siriu"
+      ],
+      "website": "https://www.salvamontprahova.ro"
+    },
+    "ro-sm-spj": {
+      "id": "ro-sm-spj",
+      "name": "Serviciul Public Județean Salvamont Satu Mare",
+      "shortName": "Salvamont Satu Mare",
+      "level": "county",
+      "countyCode": "SM",
+      "ansmrId": 28,
+      "primaryPhone": "+40721774177",
+      "secondaryPhones": [],
+      "phoneRoleRo": "Dispecerat / Baza Luna Șes (Oaș)",
+      "massifs": [
+        "Oașului",
+        "Gutâi"
+      ]
+    },
+    "ro-sb-spj": {
+      "id": "ro-sb-spj",
+      "name": "Serviciul Public Județean Salvamont Sibiu",
+      "shortName": "Salvamont Sibiu",
+      "level": "county",
+      "countyCode": "SB",
+      "ansmrId": 26,
+      "primaryPhone": "+40269216477",
+      "secondaryPhones": [
+        "+40745140144"
+      ],
+      "phoneRoleRo": "Dispecerat județean (Bâlea Lac, Negoiu, Păltiniș)",
+      "massifs": [
+        "Făgăraș",
+        "Cindrel",
+        "Lotrului"
+      ],
+      "website": "https://www.salvamontsibiu.ro"
+    },
+    "ro-sv-spj": {
+      "id": "ro-sv-spj",
+      "name": "Serviciul Public Județean Salvamont Suceava",
+      "shortName": "Salvamont Suceava",
+      "level": "county",
+      "countyCode": "SV",
+      "ansmrId": 18,
+      "primaryPhone": "+40745313052",
+      "secondaryPhones": [
+        "+40724212857"
+      ],
+      "phoneRoleRo": "Dispecerat județean / Câmpulung Moldovenesc & Rarău",
+      "massifs": [
+        "Rarău",
+        "Giumalău",
+        "Călimani",
+        "Suhard",
+        "Obcinele Bucovinei",
+        "Bistriței",
+        "Stânișoarei"
+      ]
+    },
+    "ro-tm-spj": {
+      "id": "ro-tm-spj",
+      "name": "Serviciul Public Județean Salvamont Timiș",
+      "shortName": "Salvamont Timiș",
+      "level": "county",
+      "countyCode": "TM",
+      "ansmrId": 63,
+      "primaryPhone": "+40725826668",
+      "secondaryPhones": [],
+      "phoneRoleRo": "Preluat prin Dispeceratul Național 0-SALVAMONT",
+      "massifs": [
+        "Poiana Ruscă"
+      ]
+    },
+    "ro-vl-spj": {
+      "id": "ro-vl-spj",
+      "name": "Serviciul Public Județean Salvamont-Salvaspeo Vâlcea",
+      "shortName": "Salvamont Vâlcea",
+      "level": "county",
+      "countyCode": "VL",
+      "ansmrId": 17,
+      "primaryPhone": "+40744696112",
+      "secondaryPhones": [
+        "+40250732901"
+      ],
+      "phoneRoleRo": "Dispecerat / Informații județene",
+      "massifs": [
+        "Căpățânii",
+        "Cozia",
+        "Buila-Vânturarița",
+        "Lotrului",
+        "Latoriței",
+        "Parâng",
+        "Făgăraș"
+      ]
+    },
+    "ro-vn-spj": {
+      "id": "ro-vn-spj",
+      "name": "Serviciul Public Județean Salvamont Vrancea",
+      "shortName": "Salvamont Vrancea",
+      "level": "county",
+      "countyCode": "VN",
+      "ansmrId": 27,
+      "primaryPhone": "+40738407080",
+      "secondaryPhones": [],
+      "phoneRoleRo": "Dispecerat 24/7 (Lepșa, Soveja, Munții Vrancei)",
+      "massifs": [
+        "Vrancei"
+      ],
+      "website": "https://www.salvamontvrancea.ro"
+    },
+    "ro-bv-poiana": {
+      "id": "ro-bv-poiana",
+      "name": "Serviciul Public Local Salvamont Poiana Brașov",
+      "shortName": "Salvamont Poiana Brașov",
+      "level": "local",
+      "countyCode": "BV",
+      "ansmrId": 3,
+      "primaryPhone": "+40726686693",
+      "secondaryPhones": [
+        "+40368103194"
+      ],
+      "phoneRoleRo": "Dispecerat local Postăvarul & Tâmpa",
+      "massifs": [
+        "Postăvarul",
+        "Tâmpa"
+      ]
+    },
+    "ro-bv-bran": {
+      "id": "ro-bv-bran",
+      "name": "Serviciul Public Local Salvamont Bran",
+      "shortName": "Salvamont Bran",
+      "level": "local",
+      "countyCode": "BV",
+      "ansmrId": 31,
+      "primaryPhone": "+40723350697",
+      "secondaryPhones": [],
+      "phoneRoleRo": "Formația locală Bran (Mălăiești, Țigănești, Ciubotea)",
+      "massifs": [
+        "Bucegi",
+        "Leaota"
+      ]
+    },
+    "ro-bv-rasnov": {
+      "id": "ro-bv-rasnov",
+      "name": "Serviciul Public Salvamont Râșnov",
+      "shortName": "Salvamont Râșnov",
+      "level": "local",
+      "countyCode": "BV",
+      "ansmrId": 36,
+      "primaryPhone": "+40741074884",
+      "secondaryPhones": [],
+      "phoneRoleRo": "Formația locală Râșnov",
+      "massifs": [
+        "Bucegi",
+        "Postăvarul"
+      ]
+    },
+    "ro-bv-zarnesti": {
+      "id": "ro-bv-zarnesti",
+      "name": "Serviciul Public Local Salvamont Zărnești",
+      "shortName": "Salvamont Zărnești",
+      "level": "local",
+      "countyCode": "BV",
+      "ansmrId": 39,
+      "primaryPhone": "+40733008323",
+      "secondaryPhones": [],
+      "phoneRoleRo": "Formația locală Piatra Craiului (Zărnești / Plaiul Foii)",
+      "massifs": [
+        "Piatra Craiului",
+        "Făgăraș"
+      ],
+      "website": "https://www.salvamontzarnesti.ro"
+    },
+    "ro-bv-sacele": {
+      "id": "ro-bv-sacele",
+      "name": "Serviciul Public Local Salvamont Săcele",
+      "shortName": "Salvamont Săcele",
+      "level": "local",
+      "countyCode": "BV",
+      "ansmrId": 59,
+      "primaryPhone": "+40722652584",
+      "secondaryPhones": [
+        "+40751358679"
+      ],
+      "phoneRoleRo": "Formația locală Piatra Mare & Ciucaș Vest",
+      "massifs": [
+        "Piatra Mare",
+        "Ciucaș"
+      ]
+    },
+    "ro-ph-sinaia": {
+      "id": "ro-ph-sinaia",
+      "name": "Serviciul Public Local Salvamont Sinaia",
+      "shortName": "Salvamont Sinaia",
+      "level": "local",
+      "countyCode": "PH",
+      "ansmrId": 40,
+      "primaryPhone": "+40732313131",
+      "secondaryPhones": [
+        "+40244311922"
+      ],
+      "phoneRoleRo": "Dispecerat local Sinaia (Cota 1400 / Cota 2000)",
+      "massifs": [
+        "Bucegi",
+        "Baiului"
+      ]
+    },
+    "ro-ph-busteni": {
+      "id": "ro-ph-busteni",
+      "name": "Serviciul Public Local Salvamont Bușteni",
+      "shortName": "Salvamont Bușteni",
+      "level": "local",
+      "countyCode": "PH",
+      "ansmrId": 64,
+      "primaryPhone": "+40728770627",
+      "secondaryPhones": [
+        "+40720205584"
+      ],
+      "phoneRoleRo": "Urgențe & Informații Bușteni (Jepi, Caraiman, Babele, Omu)",
+      "massifs": [
+        "Bucegi",
+        "Baiului"
+      ]
+    },
+    "ro-sb-cisnadie": {
+      "id": "ro-sb-cisnadie",
+      "name": "Serviciul Public Local Salvamont Cisnădie",
+      "shortName": "Salvamont Cisnădie",
+      "level": "local",
+      "countyCode": "SB",
+      "ansmrId": 57,
+      "primaryPhone": "+40740421865",
+      "secondaryPhones": [],
+      "phoneRoleRo": "Formația locală Cindrel Est / Măgura Cisnădiei",
+      "massifs": [
+        "Cindrel"
+      ]
+    },
+    "ro-vl-brezoi": {
+      "id": "ro-vl-brezoi",
+      "name": "Serviciul Public Local Salvamont Brezoi",
+      "shortName": "Salvamont Brezoi",
+      "level": "local",
+      "countyCode": "VL",
+      "ansmrId": 56,
+      "primaryPhone": "+40720374141",
+      "secondaryPhones": [
+        "+40250778470"
+      ],
+      "phoneRoleRo": "Formația locală Brezoi (Cozia, Lotrului, Narățu)",
+      "massifs": [
+        "Cozia",
+        "Lotrului",
+        "Căpățânii"
+      ]
+    },
+    "ro-vl-olanesti": {
+      "id": "ro-vl-olanesti",
+      "name": "Serviciul Public Local Salvamont Olănești",
+      "shortName": "Salvamont Olănești",
+      "level": "local",
+      "countyCode": "VL",
+      "ansmrId": 58,
+      "primaryPhone": "+40768508376",
+      "secondaryPhones": [],
+      "phoneRoleRo": "Formația locală Buila-Vânturarița & Căpățânii",
+      "massifs": [
+        "Buila-Vânturarița",
+        "Căpățânii"
+      ]
+    },
+    "ro-vl-voineasa": {
+      "id": "ro-vl-voineasa",
+      "name": "Serviciul Public Local Salvamont Voineasa",
+      "shortName": "Salvamont Voineasa",
+      "level": "local",
+      "countyCode": "VL",
+      "ansmrId": 60,
+      "primaryPhone": "+40768508376",
+      "secondaryPhones": [
+        "+40744696112"
+      ],
+      "phoneRoleRo": "Formația locală Voineasa / Transalpina-Vidra",
+      "massifs": [
+        "Lotrului",
+        "Latoriței",
+        "Parâng"
+      ]
+    },
+    "ro-hd-lupeni": {
+      "id": "ro-hd-lupeni",
+      "name": "Serviciul Public Local Salvamont Lupeni",
+      "shortName": "Salvamont Lupeni (Straja)",
+      "level": "local",
+      "countyCode": "HD",
+      "ansmrId": 45,
+      "primaryPhone": "+40734889147",
+      "secondaryPhones": [],
+      "phoneRoleRo": "Centrul Operațional Straja / Vâlcan",
+      "massifs": [
+        "Vâlcan",
+        "Retezat"
+      ]
+    },
+    "ro-hd-petrosani": {
+      "id": "ro-hd-petrosani",
+      "name": "Serviciul Public Local Salvamont Petroșani",
+      "shortName": "Salvamont Petroșani",
+      "level": "local",
+      "countyCode": "HD",
+      "ansmrId": 46,
+      "primaryPhone": "+40734339741",
+      "secondaryPhones": [],
+      "phoneRoleRo": "Formația locală Masivul Parâng & Șureanu Sud",
+      "massifs": [
+        "Parâng",
+        "Șureanu"
+      ]
+    },
+    "ro-hd-uricani": {
+      "id": "ro-hd-uricani",
+      "name": "Serviciul Public Local Salvamont Uricani",
+      "shortName": "Salvamont Uricani",
+      "level": "local",
+      "countyCode": "HD",
+      "ansmrId": 44,
+      "primaryPhone": "+40722262071",
+      "secondaryPhones": [
+        "+40254511101"
+      ],
+      "phoneRoleRo": "Formația locală Retezatul Mic / Buta / Câmpu lui Neag",
+      "massifs": [
+        "Retezat",
+        "Vâlcan"
+      ]
+    },
+    "ro-bn-rodna": {
+      "id": "ro-bn-rodna",
+      "name": "Serviciul Public Local Salvamont Rodna",
+      "shortName": "Salvamont Rodna",
+      "level": "local",
+      "countyCode": "BN",
+      "ansmrId": 61,
+      "primaryPhone": "+40742474874",
+      "secondaryPhones": [],
+      "phoneRoleRo": "Formația locală Munții Rodnei Sud (Valea Vinului, Ineu)",
+      "massifs": [
+        "Rodnei"
+      ]
+    },
+    "ro-sv-vatra-dornei": {
+      "id": "ro-sv-vatra-dornei",
+      "name": "Serviciul Public Local Salvamont Vatra Dornei",
+      "shortName": "Salvamont Vatra Dornei",
+      "level": "local",
+      "countyCode": "SV",
+      "ansmrId": 41,
+      "primaryPhone": "+40726686687",
+      "secondaryPhones": [
+        "+40230372767"
+      ],
+      "phoneRoleRo": "Formația locală Țara Dornelor (Călimani, Suhard, Giumalău)",
+      "massifs": [
+        "Suhard",
+        "Giumalău",
+        "Călimani",
+        "Bistriței"
+      ]
+    },
+    "ro-bz-jandarmerie": {
+      "id": "ro-bz-jandarmerie",
+      "name": "Postul de Jandarmi Montan Nehoiu (Munții Buzăului)",
+      "shortName": "Jandarmeria Montană Nehoiu",
+      "level": "gendarmerie_info",
+      "countyCode": "BZ",
+      "ansmrId": null,
+      "primaryPhone": "+40238554347",
+      "secondaryPhones": [],
+      "phoneRoleRo": "Suport montan Munții Siriului / Penteleu (județ fără SPJ Salvamont)",
+      "massifs": [
+        "Siriu",
+        "Penteleu",
+        "Podu Calului"
+      ]
+    }
+  },
+  "points": [
+    {
+      "id": "baza-salvamont-arieseni-ab",
+      "name": "Baza Salvamont Alba – Vârtop / Arieșeni",
+      "kind": "base",
+      "permanence": "24_7",
+      "lat": 46.50416,
+      "lon": 22.6981,
+      "ele": 1140,
+      "massif": "Munții Bihor",
+      "countyCode": "AB",
+      "serviceId": "ro-ab-spj",
+      "osmIds": [
+        "way/883726267"
+      ],
+      "source": "osm+ansmr"
+    },
+    {
+      "id": "baza-salvamont-rimetea-trascau",
+      "name": "Baza Salvamont Rimetea (Piatra Secuiului)",
+      "kind": "base",
+      "permanence": "24_7",
+      "lat": 46.45178,
+      "lon": 23.5724,
+      "ele": 545,
+      "massif": "Munții Trascău",
+      "countyCode": "AB",
+      "serviceId": "ro-ab-spj",
+      "osmIds": [
+        "way/998001016"
+      ],
+      "source": "osm+ansmr"
+    },
+    {
+      "id": "baza-salvamont-sureanu-luncile-prigoanei",
+      "name": "Baza Salvamont Șureanu (Poarta Raiului)",
+      "kind": "base",
+      "permanence": "24_7",
+      "lat": 45.57503,
+      "lon": 23.5124,
+      "ele": 1650,
+      "massif": "Munții Șureanu",
+      "countyCode": "AB",
+      "serviceId": "ro-ab-spj",
+      "osmIds": [],
+      "source": "ansmr_curated"
+    },
+    {
+      "id": "baza-salvamont-cota-2000-transfagarasan-ag",
+      "name": "Baza Salvamont Cota 2000 Transfăgărășan (Capra)",
+      "kind": "base",
+      "permanence": "24_7",
+      "lat": 45.59022,
+      "lon": 24.62577,
+      "ele": 1980,
+      "massif": "Munții Făgăraș",
+      "countyCode": "AG",
+      "serviceId": "ro-ag-spj",
+      "osmIds": [
+        "way/230446502"
+      ],
+      "source": "osm+ansmr",
+      "directBasePhone": "+40744501118"
+    },
+    {
+      "id": "baza-salvamont-voina-iezer",
+      "name": "Baza Salvamont Voina (Iezer-Păpușa)",
+      "kind": "base",
+      "permanence": "24_7",
+      "lat": 45.4423,
+      "lon": 25.04471,
+      "ele": 970,
+      "massif": "Masivul Iezer-Păpușa",
+      "countyCode": "AG",
+      "serviceId": "ro-ag-spj",
+      "osmIds": [
+        "way/1429216687"
+      ],
+      "source": "osm+ansmr",
+      "directBasePhone": "+40756471711"
+    },
+    {
+      "id": "baza-salvamont-brusturet-pc",
+      "name": "Post Salvamont Brusturet (Dâmbovicioara)",
+      "kind": "post",
+      "permanence": "seasonal",
+      "lat": 45.47187,
+      "lon": 25.22519,
+      "ele": 995,
+      "massif": "Masivul Piatra Craiului",
+      "countyCode": "AG",
+      "serviceId": "ro-ag-spj",
+      "osmIds": [
+        "node/13739607582"
+      ],
+      "source": "osm+ansmr",
+      "directBasePhone": "+40740870439"
+    },
+    {
+      "id": "refugiul-salvamont-arges-node-2149854986",
+      "name": "Refugiul Salvamont (Argeș)",
+      "kind": "refuge",
+      "permanence": "shelter_unmanned",
+      "lat": 45.58315,
+      "lon": 24.6296,
+      "ele": 1546,
+      "massif": "Munții Făgăraș",
+      "countyCode": "AG",
+      "serviceId": "ro-ag-spj",
+      "osmIds": [
+        "node/2149854986"
+      ],
+      "source": "osm+ansmr"
+    },
+    {
+      "id": "refugiu-salvamont-fereastra-zmeilor",
+      "name": "Refugiul Salvamont Fereastra Zmeilor",
+      "kind": "refuge",
+      "permanence": "shelter_unmanned",
+      "lat": 45.59716,
+      "lon": 24.65065,
+      "ele": 2175,
+      "massif": "Munții Făgăraș",
+      "countyCode": "AG",
+      "serviceId": "ro-ag-spj",
+      "osmIds": [
+        "node/6697813420"
+      ],
+      "source": "osm+ansmr"
+    },
+    {
+      "id": "baza-salvamont-moneasa-ar",
+      "name": "Baza Salvamont-Salvaspeo Moneasa",
+      "kind": "base",
+      "permanence": "24_7",
+      "lat": 46.46419,
+      "lon": 22.26335,
+      "ele": 295,
+      "massif": "Munții Codru-Moma",
+      "countyCode": "AR",
+      "serviceId": "ro-ar-spj",
+      "osmIds": [
+        "way/1474958578"
+      ],
+      "source": "osm+ansmr"
+    },
+    {
+      "id": "baza-salvamont-slanic-moldova-bc",
+      "name": "Baza Salvamont Slănic-Moldova (Nemira)",
+      "kind": "base",
+      "permanence": "24_7",
+      "lat": 46.20008,
+      "lon": 26.42391,
+      "ele": 530,
+      "massif": "Munții Nemira",
+      "countyCode": "BC",
+      "serviceId": "ro-bc-spj",
+      "osmIds": [
+        "node/11102037659"
+      ],
+      "source": "osm+ansmr"
+    },
+    {
+      "id": "baza-salvamont-padis-bh",
+      "name": "Baza Salvamont Padiș",
+      "kind": "base",
+      "permanence": "24_7",
+      "lat": 46.59793,
+      "lon": 22.73194,
+      "ele": 1280,
+      "massif": "Munții Bihor (Padiș)",
+      "countyCode": "BH",
+      "serviceId": "ro-bh-spj",
+      "osmIds": [
+        "way/1047848814"
+      ],
+      "source": "osm+ansmr"
+    },
+    {
+      "id": "baza-salvamont-stana-de-vale-bh",
+      "name": "Baza Salvamont Stâna de Vale",
+      "kind": "base",
+      "permanence": "24_7",
+      "lat": 46.69209,
+      "lon": 22.62443,
+      "ele": 1105,
+      "massif": "Masivul Vlădeasa",
+      "countyCode": "BH",
+      "serviceId": "ro-bh-spj",
+      "osmIds": [
+        "way/1013015260"
+      ],
+      "source": "osm+ansmr"
+    },
+    {
+      "id": "baza-salvamont-glavoi-bh",
+      "name": "Baza Salvamont-Salvaspeo Glăvoi",
+      "kind": "base",
+      "permanence": "24_7",
+      "lat": 46.57774,
+      "lon": 22.70443,
+      "ele": 1085,
+      "massif": "Munții Bihor (Padiș)",
+      "countyCode": "BH",
+      "serviceId": "ro-bh-spj",
+      "osmIds": [
+        "node/11292538119",
+        "way/301242103",
+        "way/301242104",
+        "way/1163803257"
+      ],
+      "source": "osm+ansmr"
+    },
+    {
+      "id": "baza-salvamont-vartop-bh",
+      "name": "Baza Salvamont-Salvaspeo Vârtop",
+      "kind": "base",
+      "permanence": "24_7",
+      "lat": 46.51156,
+      "lon": 22.67241,
+      "ele": 1165,
+      "massif": "Munții Bihor",
+      "countyCode": "BH",
+      "serviceId": "ro-bh-spj",
+      "osmIds": [
+        "way/453763682"
+      ],
+      "source": "osm+ansmr"
+    },
+    {
+      "id": "baza-salvamont-suncuius-bh",
+      "name": "Baza Salvamont-Salvaspeo Șuncuiuș",
+      "kind": "base",
+      "permanence": "24_7",
+      "lat": 46.93341,
+      "lon": 22.54868,
+      "ele": 315,
+      "massif": "Munții Pădurea Craiului",
+      "countyCode": "BH",
+      "serviceId": "ro-bh-spj",
+      "osmIds": [
+        "way/861336944"
+      ],
+      "source": "osm+ansmr"
+    },
+    {
+      "id": "salvamont-salvaspeo-bihor-node-4511353499",
+      "name": "Salvamont - Salvaspeo Bihor",
+      "kind": "base",
+      "permanence": "24_7",
+      "lat": 46.53461,
+      "lon": 22.45562,
+      "ele": 250,
+      "massif": "Munții Bihor",
+      "countyCode": "BH",
+      "serviceId": "ro-bh-spj",
+      "osmIds": [
+        "node/4511353499"
+      ],
+      "source": "osm+ansmr"
+    },
+    {
+      "id": "salvamont-stana-de-vale-way-453784289",
+      "name": "Salvamont Stâna de Vale",
+      "kind": "base",
+      "permanence": "24_7",
+      "lat": 46.69057,
+      "lon": 22.61805,
+      "ele": 1087,
+      "massif": "Munții Bihor",
+      "countyCode": "BH",
+      "serviceId": "ro-bh-spj",
+      "osmIds": [
+        "way/453784289"
+      ],
+      "source": "osm+ansmr"
+    },
+    {
+      "id": "baza-salvamont-valea-vinului-rodna",
+      "name": "Baza Salvamont Rodna (Valea Vinului)",
+      "kind": "base",
+      "permanence": "24_7",
+      "lat": 47.4695,
+      "lon": 24.8468,
+      "ele": 730,
+      "massif": "Munții Rodnei",
+      "countyCode": "BN",
+      "serviceId": "ro-bn-rodna",
+      "osmIds": [],
+      "source": "ansmr_curated",
+      "backupCountyServiceId": "ro-bn-spj"
+    },
+    {
+      "id": "baza-salvamont-colibita-tihuta-bn",
+      "name": "Post Salvamont Piatra Fântânele / Colibița",
+      "kind": "post",
+      "permanence": "24_7",
+      "lat": 47.2411,
+      "lon": 25.0112,
+      "ele": 1195,
+      "massif": "Munții Bârgăului / Călimani",
+      "countyCode": "BN",
+      "serviceId": "ro-bn-spj",
+      "osmIds": [],
+      "source": "ansmr_curated"
+    },
+    {
+      "id": "refugiu-salvamont-bistricior-calimani",
+      "name": "Refugiul Salvamont Bistricior",
+      "kind": "refuge",
+      "permanence": "shelter_unmanned",
+      "lat": 47.13652,
+      "lon": 25.04877,
+      "ele": 1656,
+      "massif": "Munții Călimani",
+      "countyCode": "BN",
+      "serviceId": "ro-bn-spj",
+      "osmIds": [
+        "node/3442760039",
+        "node/9017853414"
+      ],
+      "source": "osm+ansmr"
+    },
+    {
+      "id": "baza-salvamont-piatra-mare-sacele",
+      "name": "Baza Salvamont Piatra Mare (Dâmbu Morii)",
+      "kind": "base",
+      "permanence": "24_7",
+      "lat": 45.55473,
+      "lon": 25.65358,
+      "ele": 715,
+      "massif": "Masivul Piatra Mare",
+      "countyCode": "BV",
+      "serviceId": "ro-bv-sacele",
+      "osmIds": [
+        "way/1219512910"
+      ],
+      "source": "osm+ansmr",
+      "backupCountyServiceId": "ro-bv-spj"
+    },
+    {
+      "id": "baza-salvamont-poiana-brasov-bradul",
+      "name": "Baza Salvamont Poiana Brașov (Postăvarul)",
+      "kind": "base",
+      "permanence": "24_7",
+      "lat": 45.5696,
+      "lon": 25.56133,
+      "ele": 1705,
+      "massif": "Masivul Postăvarul",
+      "countyCode": "BV",
+      "serviceId": "ro-bv-poiana",
+      "osmIds": [
+        "way/855191229"
+      ],
+      "source": "osm+ansmr",
+      "backupCountyServiceId": "ro-bv-spj"
+    },
+    {
+      "id": "post-salvamont-predeal-clabucet",
+      "name": "Baza Salvamont Predeal (Clăbucet)",
+      "kind": "base",
+      "permanence": "24_7",
+      "lat": 45.4981,
+      "lon": 25.5734,
+      "ele": 1055,
+      "massif": "Munții Baiului / Piatra Mare",
+      "countyCode": "BV",
+      "serviceId": "ro-bv-spj",
+      "osmIds": [],
+      "source": "ansmr_curated",
+      "directBasePhone": "+40734889160"
+    },
+    {
+      "id": "baza-salvamont-victoria-fagaras",
+      "name": "Baza Salvamont Victoria (Sâmbăta)",
+      "kind": "base",
+      "permanence": "24_7",
+      "lat": 45.6422,
+      "lon": 24.7931,
+      "ele": 690,
+      "massif": "Munții Făgăraș",
+      "countyCode": "BV",
+      "serviceId": "ro-bv-spj",
+      "osmIds": [],
+      "source": "ansmr_curated",
+      "directBasePhone": "+40722737912"
+    },
+    {
+      "id": "baza-salvamont-zarnesti-plaiul-foii",
+      "name": "Baza Salvamont Zărnești / Plaiul Foii",
+      "kind": "base",
+      "permanence": "24_7",
+      "lat": 45.52255,
+      "lon": 25.27388,
+      "ele": 845,
+      "massif": "Masivul Piatra Craiului",
+      "countyCode": "BV",
+      "serviceId": "ro-bv-zarnesti",
+      "osmIds": [
+        "node/5736430778"
+      ],
+      "source": "osm+ansmr",
+      "backupCountyServiceId": "ro-bv-spj"
+    },
+    {
+      "id": "dispecerat-national-ansmr-brasov",
+      "name": "Dispeceratul Național Salvamont A.N.S.M.R.",
+      "kind": "dispatch_hq",
+      "permanence": "24_7",
+      "lat": 45.62807,
+      "lon": 25.61712,
+      "ele": 595,
+      "massif": "Depresiunea Brașovului",
+      "countyCode": "BV",
+      "serviceId": "ro-bv-spj",
+      "osmIds": [
+        "node/10637320958"
+      ],
+      "source": "osm+ansmr",
+      "directBasePhone": "+40725826668"
+    },
+    {
+      "id": "post-salvamont-zarnesti-way-204157799",
+      "name": "Post Salvamont (Zărnești)",
+      "kind": "base",
+      "permanence": "24_7",
+      "lat": 45.54839,
+      "lon": 25.2569,
+      "ele": 1422,
+      "massif": "Munții Piatra Craiului",
+      "countyCode": "BV",
+      "serviceId": "ro-bv-zarnesti",
+      "osmIds": [
+        "way/204157799"
+      ],
+      "source": "osm+ansmr",
+      "backupCountyServiceId": "ro-bv-spj"
+    },
+    {
+      "id": "refugiu-salvamont-ciubotea-bran",
+      "name": "Post Salvamont Bran–Ciubotea (Poarta)",
+      "kind": "post",
+      "permanence": "24_7",
+      "lat": 45.46972,
+      "lon": 25.4002,
+      "ele": 910,
+      "massif": "Munții Bucegi",
+      "countyCode": "BV",
+      "serviceId": "ro-bv-bran",
+      "osmIds": [
+        "node/4585074395"
+      ],
+      "source": "osm+ansmr",
+      "backupCountyServiceId": "ro-bv-spj"
+    },
+    {
+      "id": "refugiu-salvamont-malaiesti",
+      "name": "Refugiul Salvamont Mălăiești",
+      "kind": "post",
+      "permanence": "seasonal",
+      "lat": 45.46546,
+      "lon": 25.45311,
+      "ele": 1720,
+      "massif": "Munții Bucegi",
+      "countyCode": "BV",
+      "serviceId": "ro-bv-bran",
+      "osmIds": [
+        "way/242073753"
+      ],
+      "source": "osm+ansmr",
+      "backupCountyServiceId": "ro-bv-spj"
+    },
+    {
+      "id": "salvamont-bran-zanoaga-node-9896884413",
+      "name": "Salvamont Bran-Zanoaga",
+      "kind": "base",
+      "permanence": "24_7",
+      "lat": 45.48728,
+      "lon": 25.38776,
+      "ele": 947,
+      "massif": "Munții Bucegi",
+      "countyCode": "BV",
+      "serviceId": "ro-bv-bran",
+      "osmIds": [
+        "node/9896884413"
+      ],
+      "source": "osm+ansmr",
+      "backupCountyServiceId": "ro-bv-spj"
+    },
+    {
+      "id": "baza-salvamont-baisoara-cj",
+      "name": "Baza Salvamont Muntele Băișorii",
+      "kind": "base",
+      "permanence": "24_7",
+      "lat": 46.53706,
+      "lon": 23.31203,
+      "ele": 1365,
+      "massif": "Muntele Mare – Gilău",
+      "countyCode": "CJ",
+      "serviceId": "ro-cj-spj",
+      "osmIds": [
+        "way/463262904"
+      ],
+      "source": "osm+ansmr"
+    },
+    {
+      "id": "baza-salvamont-vladeasa-cj",
+      "name": "Baza Salvamont Vlădeasa (Cabana Vlădeasa)",
+      "kind": "base",
+      "permanence": "24_7",
+      "lat": 46.78047,
+      "lon": 22.81206,
+      "ele": 1415,
+      "massif": "Masivul Vlădeasa",
+      "countyCode": "CJ",
+      "serviceId": "ro-cj-spj",
+      "osmIds": [
+        "way/409285811"
+      ],
+      "source": "osm+ansmr",
+      "directBasePhone": "+40750732124"
+    },
+    {
+      "id": "baza-salvamont-cheile-turzii-cj",
+      "name": "Baza Salvamont-Salvaspeo Cheile Turzii",
+      "kind": "base",
+      "permanence": "24_7",
+      "lat": 46.56094,
+      "lon": 23.69025,
+      "ele": 440,
+      "massif": "Munții Trascău (Cheile Turzii)",
+      "countyCode": "CJ",
+      "serviceId": "ro-cj-spj",
+      "osmIds": [
+        "node/5840178948"
+      ],
+      "source": "osm+ansmr"
+    },
+    {
+      "id": "post-salvamont-cluj-way-301228612",
+      "name": "Post Salvamont (Cluj)",
+      "kind": "base",
+      "permanence": "24_7",
+      "lat": 46.65018,
+      "lon": 22.85891,
+      "ele": 1029,
+      "massif": "Munții Vlădeasa",
+      "countyCode": "CJ",
+      "serviceId": "ro-cj-spj",
+      "osmIds": [
+        "way/301228612"
+      ],
+      "source": "osm+ansmr"
+    },
+    {
+      "id": "baza-salvamont-rachitele-cj",
+      "name": "Post Salvamont Răchițele (Vălul Miresei)",
+      "kind": "post",
+      "permanence": "seasonal",
+      "lat": 46.71049,
+      "lon": 22.82561,
+      "ele": 995,
+      "massif": "Masivul Vlădeasa",
+      "countyCode": "CJ",
+      "serviceId": "ro-cj-spj",
+      "osmIds": [
+        "way/415221785"
+      ],
+      "source": "osm+ansmr"
+    },
+    {
+      "id": "salvamont-cluj-node-6504679085",
+      "name": "Salvamont Cluj",
+      "kind": "base",
+      "permanence": "24_7",
+      "lat": 46.67896,
+      "lon": 23.01796,
+      "ele": 1151,
+      "massif": "Munții Vlădeasa",
+      "countyCode": "CJ",
+      "serviceId": "ro-cj-spj",
+      "osmIds": [
+        "node/6504679085"
+      ],
+      "source": "osm+ansmr"
+    },
+    {
+      "id": "baza-salvamont-herculane-cs",
+      "name": "Baza Salvamont Băile Herculane (Valea Cernei)",
+      "kind": "base",
+      "permanence": "24_7",
+      "lat": 44.8895,
+      "lon": 22.4241,
+      "ele": 185,
+      "massif": "Munții Cernei / Mehedinți",
+      "countyCode": "CS",
+      "serviceId": "ro-cs-spj",
+      "osmIds": [],
+      "source": "ansmr_curated",
+      "directBasePhone": "+40728970558"
+    },
+    {
+      "id": "baza-salvamont-muntele-mic-cs",
+      "name": "Baza Salvamont Muntele Mic",
+      "kind": "base",
+      "permanence": "24_7",
+      "lat": 45.3652,
+      "lon": 22.4694,
+      "ele": 1530,
+      "massif": "Munții Țarcu – Muntele Mic",
+      "countyCode": "CS",
+      "serviceId": "ro-cs-spj",
+      "osmIds": [],
+      "source": "ansmr_curated",
+      "directBasePhone": "+40724629517"
+    },
+    {
+      "id": "baza-salvamont-semenic-cs",
+      "name": "Baza Salvamont Semenic",
+      "kind": "base",
+      "permanence": "24_7",
+      "lat": 45.18166,
+      "lon": 22.05692,
+      "ele": 1410,
+      "massif": "Munții Semenic",
+      "countyCode": "CS",
+      "serviceId": "ro-cs-spj",
+      "osmIds": [
+        "way/284789688"
+      ],
+      "source": "osm+ansmr",
+      "directBasePhone": "+40728970559"
+    },
+    {
+      "id": "refugiu-saua-scheiului-tarcu",
+      "name": "Refugiul Salvamont Șaua Șcheiului",
+      "kind": "refuge",
+      "permanence": "shelter_unmanned",
+      "lat": 45.29807,
+      "lon": 22.59205,
+      "ele": 1820,
+      "massif": "Munții Țarcu",
+      "countyCode": "CS",
+      "serviceId": "ro-cs-spj",
+      "osmIds": [
+        "node/12520169143"
+      ],
+      "source": "osm+ansmr"
+    },
+    {
+      "id": "baza-salvamont-sugas-bai-cv",
+      "name": "Baza Salvamont Șugaș Băi (Covasna)",
+      "kind": "base",
+      "permanence": "24_7",
+      "lat": 45.8812,
+      "lon": 25.7145,
+      "ele": 755,
+      "massif": "Munții Baraolt / Bodoc",
+      "countyCode": "CV",
+      "serviceId": "ro-cv-spj",
+      "osmIds": [],
+      "source": "ansmr_curated"
+    },
+    {
+      "id": "baza-salvamont-pestera-db",
+      "name": "Baza Salvamont Peștera",
+      "kind": "base",
+      "permanence": "24_7",
+      "lat": 45.39786,
+      "lon": 25.44141,
+      "ele": 1610,
+      "massif": "Munții Bucegi",
+      "countyCode": "DB",
+      "serviceId": "ro-db-spj",
+      "osmIds": [
+        "way/1217678319"
+      ],
+      "source": "osm+ansmr",
+      "directBasePhone": "+40726194166"
+    },
+    {
+      "id": "baza-salvamont-zanoaga-db",
+      "name": "Baza Salvamont Zănoaga",
+      "kind": "base",
+      "permanence": "24_7",
+      "lat": 45.3306,
+      "lon": 25.42909,
+      "ele": 1400,
+      "massif": "Munții Bucegi",
+      "countyCode": "DB",
+      "serviceId": "ro-db-spj",
+      "osmIds": [
+        "way/338322683"
+      ],
+      "source": "osm+ansmr"
+    },
+    {
+      "id": "baza-salvamont-padina-db",
+      "name": "Post Salvamont Padina",
+      "kind": "post",
+      "permanence": "seasonal",
+      "lat": 45.38369,
+      "lon": 25.43247,
+      "ele": 1510,
+      "massif": "Munții Bucegi",
+      "countyCode": "DB",
+      "serviceId": "ro-db-spj",
+      "osmIds": [
+        "way/183745583",
+        "way/241892045"
+      ],
+      "source": "osm+ansmr"
+    },
+    {
+      "id": "baza-salvamont-ranca-gj",
+      "name": "Baza Salvamont Rânca (Parâng)",
+      "kind": "base",
+      "permanence": "24_7",
+      "lat": 45.29462,
+      "lon": 23.68387,
+      "ele": 1615,
+      "massif": "Munții Parâng",
+      "countyCode": "GJ",
+      "serviceId": "ro-gj-spj",
+      "osmIds": [
+        "way/278011675"
+      ],
+      "source": "osm+ansmr",
+      "directBasePhone": "+40734889139"
+    },
+    {
+      "id": "salvamont-gorj-way-216944839",
+      "name": "Salvamont Gorj",
+      "kind": "base",
+      "permanence": "24_7",
+      "lat": 45.19284,
+      "lon": 23.75412,
+      "ele": 614,
+      "massif": "Munții Parâng",
+      "countyCode": "GJ",
+      "serviceId": "ro-gj-spj",
+      "osmIds": [
+        "way/216944839"
+      ],
+      "source": "osm+ansmr"
+    },
+    {
+      "id": "statia-salvamont-gorj-node-959645812",
+      "name": "Stația SALVAMONT Gorj",
+      "kind": "base",
+      "permanence": "24_7",
+      "lat": 45.19398,
+      "lon": 23.79035,
+      "ele": 625,
+      "massif": "Munții Parâng",
+      "countyCode": "GJ",
+      "serviceId": "ro-gj-spj",
+      "osmIds": [
+        "node/959645812"
+      ],
+      "source": "osm+ansmr"
+    },
+    {
+      "id": "baza-salvamont-parang-petrosani",
+      "name": "Baza Salvamont Parâng (Rusu – Petroșani)",
+      "kind": "base",
+      "permanence": "24_7",
+      "lat": 45.3845,
+      "lon": 23.47152,
+      "ele": 1690,
+      "massif": "Munții Parâng",
+      "countyCode": "HD",
+      "serviceId": "ro-hd-petrosani",
+      "osmIds": [
+        "node/4679572504"
+      ],
+      "source": "osm+ansmr",
+      "backupCountyServiceId": "ro-hd-spj"
+    },
+    {
+      "id": "baza-salvamont-pietrele-retezat",
+      "name": "Baza Salvamont Pietrele (Retezat)",
+      "kind": "base",
+      "permanence": "24_7",
+      "lat": 45.40693,
+      "lon": 22.87974,
+      "ele": 1480,
+      "massif": "Munții Retezat",
+      "countyCode": "HD",
+      "serviceId": "ro-hd-spj",
+      "osmIds": [
+        "way/957203279"
+      ],
+      "source": "osm+ansmr"
+    },
+    {
+      "id": "baza-salvamont-straja-lupeni",
+      "name": "Baza Salvamont Straja",
+      "kind": "base",
+      "permanence": "24_7",
+      "lat": 45.32123,
+      "lon": 23.23679,
+      "ele": 1445,
+      "massif": "Munții Vâlcan",
+      "countyCode": "HD",
+      "serviceId": "ro-hd-lupeni",
+      "osmIds": [
+        "way/323292496"
+      ],
+      "source": "osm+ansmr",
+      "backupCountyServiceId": "ro-hd-spj"
+    },
+    {
+      "id": "post-salvamont-hunedoara-way-1224904818",
+      "name": "Post Salvamont (Hunedoara)",
+      "kind": "base",
+      "permanence": "24_7",
+      "lat": 45.57503,
+      "lon": 23.139,
+      "ele": 734,
+      "massif": "Munții Retezat",
+      "countyCode": "HD",
+      "serviceId": "ro-hd-spj",
+      "osmIds": [
+        "way/1224904818"
+      ],
+      "source": "osm+ansmr"
+    },
+    {
+      "id": "baza-salvamont-rausor-retezat",
+      "name": "Post Salvamont Râușor",
+      "kind": "post",
+      "permanence": "24_7",
+      "lat": 45.41798,
+      "lon": 22.84408,
+      "ele": 1220,
+      "massif": "Munții Retezat",
+      "countyCode": "HD",
+      "serviceId": "ro-hd-spj",
+      "osmIds": [
+        "way/437438681"
+      ],
+      "source": "osm+ansmr"
+    },
+    {
+      "id": "post-salvamont-bucura-retezat",
+      "name": "Refugiul Salvamont Bucura",
+      "kind": "post",
+      "permanence": "seasonal",
+      "lat": 45.35862,
+      "lon": 22.8771,
+      "ele": 2045,
+      "massif": "Munții Retezat",
+      "countyCode": "HD",
+      "serviceId": "ro-hd-spj",
+      "osmIds": [
+        "way/740819887"
+      ],
+      "source": "osm+ansmr"
+    },
+    {
+      "id": "post-salvamont-buta-uricani",
+      "name": "Refugiul Salvamont Buta",
+      "kind": "post",
+      "permanence": "24_7",
+      "lat": 45.32005,
+      "lon": 22.90431,
+      "ele": 1580,
+      "massif": "Munții Retezat",
+      "countyCode": "HD",
+      "serviceId": "ro-hd-uricani",
+      "osmIds": [
+        "way/675050510"
+      ],
+      "source": "osm+ansmr",
+      "backupCountyServiceId": "ro-hd-spj"
+    },
+    {
+      "id": "post-salvamont-poiana-pelegii",
+      "name": "Refugiul Salvamont Poiana Pelegii",
+      "kind": "post",
+      "permanence": "seasonal",
+      "lat": 45.34029,
+      "lon": 22.89345,
+      "ele": 1630,
+      "massif": "Munții Retezat",
+      "countyCode": "HD",
+      "serviceId": "ro-hd-spj",
+      "osmIds": [
+        "node/3543080964"
+      ],
+      "source": "osm+ansmr"
+    },
+    {
+      "id": "refugiu-salvamont-zanoaga-retezat",
+      "name": "Refugiul Salvamont Zănoaga (Retezat)",
+      "kind": "refuge",
+      "permanence": "shelter_unmanned",
+      "lat": 45.34501,
+      "lon": 22.82308,
+      "ele": 1997,
+      "massif": "Munții Retezat",
+      "countyCode": "HD",
+      "serviceId": "ro-hd-spj",
+      "osmIds": [
+        "node/2800377759"
+      ],
+      "source": "osm+ansmr"
+    },
+    {
+      "id": "baza-salvamont-harghita-madaras",
+      "name": "Baza Salvamont Harghita Mădăraș",
+      "kind": "base",
+      "permanence": "24_7",
+      "lat": 46.43923,
+      "lon": 25.58271,
+      "ele": 1665,
+      "massif": "Munții Harghita",
+      "countyCode": "HR",
+      "serviceId": "ro-hr-spj",
+      "osmIds": [
+        "way/292544988"
+      ],
+      "source": "osm+ansmr"
+    },
+    {
+      "id": "baza-salvamont-harghita-bai",
+      "name": "Baza Salvamont Harghita-Băi",
+      "kind": "base",
+      "permanence": "24_7",
+      "lat": 46.38539,
+      "lon": 25.63529,
+      "ele": 1350,
+      "massif": "Munții Harghita",
+      "countyCode": "HR",
+      "serviceId": "ro-hr-spj",
+      "osmIds": [
+        "way/1136277552"
+      ],
+      "source": "osm+ansmr"
+    },
+    {
+      "id": "baza-salvamont-lacu-rosu-hasmas",
+      "name": "Baza Salvamont Lacu Roșu / Cheile Bicazului",
+      "kind": "base",
+      "permanence": "24_7",
+      "lat": 46.7909,
+      "lon": 25.7876,
+      "ele": 985,
+      "massif": "Munții Hășmaș – Cheile Bicazului",
+      "countyCode": "HR",
+      "serviceId": "ro-hr-spj",
+      "osmIds": [],
+      "source": "ansmr_curated",
+      "directBasePhone": "+40741131020"
+    },
+    {
+      "id": "post-salvamont-toplita-hr",
+      "name": "Baza Salvamont Toplița",
+      "kind": "base",
+      "permanence": "24_7",
+      "lat": 46.9248,
+      "lon": 25.3315,
+      "ele": 690,
+      "massif": "Munții Călimani / Giurgeu",
+      "countyCode": "HR",
+      "serviceId": "ro-hr-spj",
+      "osmIds": [],
+      "source": "ansmr_curated",
+      "directBasePhone": "+40744526530"
+    },
+    {
+      "id": "hegyi-mened-khely-node-6654605861",
+      "name": "Hegyi menedékhely",
+      "kind": "refuge",
+      "permanence": "shelter_unmanned",
+      "lat": 46.43263,
+      "lon": 25.61413,
+      "ele": 1601,
+      "massif": "Munții Harghita",
+      "countyCode": "HR",
+      "serviceId": "ro-hr-spj",
+      "osmIds": [
+        "node/6654605861"
+      ],
+      "source": "osm+ansmr"
+    },
+    {
+      "id": "hirtelen-pusztai-mened-kh-z-node-9872692719",
+      "name": "Hirtelen pusztai menedékház",
+      "kind": "refuge",
+      "permanence": "shelter_unmanned",
+      "lat": 46.31559,
+      "lon": 25.72678,
+      "ele": 1147,
+      "massif": "Munții Harghita",
+      "countyCode": "HR",
+      "serviceId": "ro-hr-spj",
+      "osmIds": [
+        "node/9872692719"
+      ],
+      "source": "osm+ansmr"
+    },
+    {
+      "id": "post-salvamont-harghita-node-12323487052",
+      "name": "Post Salvamont (Harghita)",
+      "kind": "base",
+      "permanence": "24_7",
+      "lat": 46.21449,
+      "lon": 25.5485,
+      "ele": 586,
+      "massif": "Munții Harghita",
+      "countyCode": "HR",
+      "serviceId": "ro-hr-spj",
+      "osmIds": [
+        "node/12323487052"
+      ],
+      "source": "osm+ansmr"
+    },
+    {
+      "id": "post-salvamont-harghita-way-269483171",
+      "name": "Post Salvamont (Harghita)",
+      "kind": "base",
+      "permanence": "24_7",
+      "lat": 46.98197,
+      "lon": 25.40678,
+      "ele": 747,
+      "massif": "Munții Harghita",
+      "countyCode": "HR",
+      "serviceId": "ro-hr-spj",
+      "osmIds": [
+        "way/269483171"
+      ],
+      "source": "osm+ansmr"
+    },
+    {
+      "id": "refugiu-montan-vf-viscolul-way-1342728337",
+      "name": "Refugiu montan Vf. Viscolul",
+      "kind": "refuge",
+      "permanence": "shelter_unmanned",
+      "lat": 46.42626,
+      "lon": 26.00454,
+      "ele": 1442,
+      "massif": "Munții Harghita",
+      "countyCode": "HR",
+      "serviceId": "ro-hr-spj",
+      "osmIds": [
+        "way/1342728337"
+      ],
+      "source": "osm+ansmr"
+    },
+    {
+      "id": "baza-salvamont-mehedinti-balota",
+      "name": "Baza Salvamont Mehedinți (Ponoarele / Cazane)",
+      "kind": "base",
+      "permanence": "24_7",
+      "lat": 44.81184,
+      "lon": 22.52046,
+      "ele": 480,
+      "massif": "Munții Mehedinți",
+      "countyCode": "MH",
+      "serviceId": "ro-mh-spj",
+      "osmIds": [
+        "node/2796391609"
+      ],
+      "source": "osm+ansmr"
+    },
+    {
+      "id": "baza-salvamont-borsa-complex-mm",
+      "name": "Baza Salvamont Borșa (Complex Turistic)",
+      "kind": "base",
+      "permanence": "24_7",
+      "lat": 47.60082,
+      "lon": 24.79987,
+      "ele": 845,
+      "massif": "Munții Rodnei",
+      "countyCode": "MM",
+      "serviceId": "ro-mm-spj",
+      "osmIds": [
+        "node/7491508877"
+      ],
+      "source": "osm+ansmr",
+      "directBasePhone": "+40745258432"
+    },
+    {
+      "id": "baza-salvamont-mogosa-gutai-mm",
+      "name": "Baza Salvamont Mogoșa / Izvoare (Gutâi)",
+      "kind": "base",
+      "permanence": "24_7",
+      "lat": 47.6745,
+      "lon": 23.7761,
+      "ele": 735,
+      "massif": "Munții Gutâi",
+      "countyCode": "MM",
+      "serviceId": "ro-mm-spj",
+      "osmIds": [],
+      "source": "ansmr_curated"
+    },
+    {
+      "id": "cabana-paltinul-way-1014114752",
+      "name": "Cabana Paltinul",
+      "kind": "base",
+      "permanence": "24_7",
+      "lat": 47.87604,
+      "lon": 24.30742,
+      "ele": 605,
+      "massif": "Munții Rodnei",
+      "countyCode": "MM",
+      "serviceId": "ro-mm-spj",
+      "osmIds": [
+        "way/1014114752"
+      ],
+      "source": "osm+ansmr"
+    },
+    {
+      "id": "post-salvamont-maramures-node-5515030628",
+      "name": "Post Salvamont (Maramureș)",
+      "kind": "base",
+      "permanence": "24_7",
+      "lat": 47.60245,
+      "lon": 24.64937,
+      "ele": 1773,
+      "massif": "Munții Rodnei",
+      "countyCode": "MM",
+      "serviceId": "ro-mm-spj",
+      "osmIds": [
+        "node/5515030628"
+      ],
+      "source": "osm+ansmr"
+    },
+    {
+      "id": "post-salvamont-maramures-node-7491508876",
+      "name": "Post Salvamont (Maramureș)",
+      "kind": "base",
+      "permanence": "24_7",
+      "lat": 47.65636,
+      "lon": 24.6579,
+      "ele": 650,
+      "massif": "Munții Rodnei",
+      "countyCode": "MM",
+      "serviceId": "ro-mm-spj",
+      "osmIds": [
+        "node/7491508876"
+      ],
+      "source": "osm+ansmr"
+    },
+    {
+      "id": "post-salvamont-maramures-way-713432845",
+      "name": "Post Salvamont (Maramureș)",
+      "kind": "base",
+      "permanence": "24_7",
+      "lat": 47.75215,
+      "lon": 23.71788,
+      "ele": 928,
+      "massif": "Munții Rodnei",
+      "countyCode": "MM",
+      "serviceId": "ro-mm-spj",
+      "osmIds": [
+        "way/713432845"
+      ],
+      "source": "osm+ansmr"
+    },
+    {
+      "id": "baza-salvamont-cavnic-mm",
+      "name": "Post Salvamont Cavnic",
+      "kind": "post",
+      "permanence": "24_7",
+      "lat": 47.6982,
+      "lon": 23.8891,
+      "ele": 950,
+      "massif": "Munții Gutâi / Lăpuș",
+      "countyCode": "MM",
+      "serviceId": "ro-mm-spj",
+      "osmIds": [],
+      "source": "ansmr_curated"
+    },
+    {
+      "id": "post-salvamont-prislop-mm",
+      "name": "Post Salvamont Pasul Prislop",
+      "kind": "post",
+      "permanence": "24_7",
+      "lat": 47.60531,
+      "lon": 24.84375,
+      "ele": 1413,
+      "massif": "Munții Rodnei / Maramureșului",
+      "countyCode": "MM",
+      "serviceId": "ro-mm-spj",
+      "osmIds": [
+        "node/7491508878"
+      ],
+      "source": "osm+ansmr",
+      "directBasePhone": "+40745258432"
+    },
+    {
+      "id": "post-salvamont-mures-way-1249268810",
+      "name": "Post Salvamont (Mureș)",
+      "kind": "base",
+      "permanence": "24_7",
+      "lat": 47.09713,
+      "lon": 25.2701,
+      "ele": 1743,
+      "massif": "Munții Călimani",
+      "countyCode": "MS",
+      "serviceId": "ro-ms-spj",
+      "osmIds": [
+        "way/1249268810"
+      ],
+      "source": "osm+ansmr"
+    },
+    {
+      "id": "refugiul-fundul-porcului-node-9253325270",
+      "name": "Refugiul Fundul Porcului",
+      "kind": "refuge",
+      "permanence": "shelter_unmanned",
+      "lat": 47.08716,
+      "lon": 24.93852,
+      "ele": 1525,
+      "massif": "Munții Călimani",
+      "countyCode": "MS",
+      "serviceId": "ro-ms-spj",
+      "osmIds": [
+        "node/9253325270"
+      ],
+      "source": "osm+ansmr"
+    },
+    {
+      "id": "refugiul-poiana-lunga-node-5950738049",
+      "name": "Refugiul Poiana Lungă",
+      "kind": "refuge",
+      "permanence": "shelter_unmanned",
+      "lat": 47.11111,
+      "lon": 25.00789,
+      "ele": 1350,
+      "massif": "Munții Călimani",
+      "countyCode": "MS",
+      "serviceId": "ro-ms-spj",
+      "osmIds": [
+        "node/5950738049"
+      ],
+      "source": "osm+ansmr"
+    },
+    {
+      "id": "refugiu-curmatura-tihului-ms",
+      "name": "Refugiul Salvamont Curmătura Tihului",
+      "kind": "refuge",
+      "permanence": "shelter_unmanned",
+      "lat": 47.11956,
+      "lon": 25.11017,
+      "ele": 1520,
+      "massif": "Munții Călimani",
+      "countyCode": "MS",
+      "serviceId": "ro-ms-spj",
+      "osmIds": [
+        "node/5950807513"
+      ],
+      "source": "osm+ansmr"
+    },
+    {
+      "id": "refugiu-saca-mare-gurghiu-ms",
+      "name": "Refugiul Salvamont Saca Mare (Gurghiu)",
+      "kind": "refuge",
+      "permanence": "shelter_unmanned",
+      "lat": 46.68269,
+      "lon": 25.22079,
+      "ele": 1725,
+      "massif": "Munții Gurghiu",
+      "countyCode": "MS",
+      "serviceId": "ro-ms-spj",
+      "osmIds": [
+        "node/11546206738"
+      ],
+      "source": "osm+ansmr"
+    },
+    {
+      "id": "refugiu-stancile-rusca-ms",
+      "name": "Refugiul Salvamont Stâncile Rusca",
+      "kind": "refuge",
+      "permanence": "shelter_unmanned",
+      "lat": 47.11324,
+      "lon": 25.14327,
+      "ele": 1880,
+      "massif": "Munții Călimani",
+      "countyCode": "MS",
+      "serviceId": "ro-ms-spj",
+      "osmIds": [
+        "node/5950807512"
+      ],
+      "source": "osm+ansmr"
+    },
+    {
+      "id": "refugiu-saua-negoiu-calimani-ms",
+      "name": "Refugiul Salvamont Șaua Negoiu (Călimani)",
+      "kind": "refuge",
+      "permanence": "shelter_unmanned",
+      "lat": 47.10819,
+      "lon": 25.20721,
+      "ele": 1625,
+      "massif": "Munții Călimani",
+      "countyCode": "MS",
+      "serviceId": "ro-ms-spj",
+      "osmIds": [
+        "node/5950807514"
+      ],
+      "source": "osm+ansmr"
+    },
+    {
+      "id": "refugiul-sz-nt-hegy-node-13376652859",
+      "name": "Refugiul Szántóhegy",
+      "kind": "refuge",
+      "permanence": "shelter_unmanned",
+      "lat": 46.69194,
+      "lon": 25.29333,
+      "ele": 1615,
+      "massif": "Munții Călimani",
+      "countyCode": "MS",
+      "serviceId": "ro-ms-spj",
+      "osmIds": [
+        "node/13376652859"
+      ],
+      "source": "osm+ansmr"
+    },
+    {
+      "id": "refugiul-somly-node-4827628531",
+      "name": "refugiul Somlyó",
+      "kind": "refuge",
+      "permanence": "shelter_unmanned",
+      "lat": 46.58618,
+      "lon": 25.39231,
+      "ele": 1450,
+      "massif": "Munții Călimani",
+      "countyCode": "MS",
+      "serviceId": "ro-ms-spj",
+      "osmIds": [
+        "node/4827628531"
+      ],
+      "source": "osm+ansmr"
+    },
+    {
+      "id": "post-salvamont-dochia-ceahlau",
+      "name": "Baza Salvamont Cabana Dochia (Ceahlău)",
+      "kind": "base",
+      "permanence": "24_7",
+      "lat": 46.9665,
+      "lon": 25.9502,
+      "ele": 1750,
+      "massif": "Masivul Ceahlău",
+      "countyCode": "NT",
+      "serviceId": "ro-nt-spj",
+      "osmIds": [],
+      "source": "ansmr_curated"
+    },
+    {
+      "id": "baza-salvamont-durau-ceahlau",
+      "name": "Baza Salvamont Durău (Masivul Ceahlău)",
+      "kind": "base",
+      "permanence": "24_7",
+      "lat": 46.99757,
+      "lon": 25.9264,
+      "ele": 800,
+      "massif": "Masivul Ceahlău",
+      "countyCode": "NT",
+      "serviceId": "ro-nt-spj",
+      "osmIds": [
+        "way/269804713"
+      ],
+      "source": "osm+ansmr"
+    },
+    {
+      "id": "baza-salvamont-babele",
+      "name": "Baza Salvamont Babele (Platoul Bucegi)",
+      "kind": "base",
+      "permanence": "24_7",
+      "lat": 45.41331,
+      "lon": 25.47037,
+      "ele": 2206,
+      "massif": "Munții Bucegi",
+      "countyCode": "PH",
+      "serviceId": "ro-ph-busteni",
+      "osmIds": [
+        "way/230823900"
+      ],
+      "source": "osm+ansmr",
+      "backupCountyServiceId": "ro-ph-spj"
+    },
+    {
+      "id": "baza-salvamont-busteni-oras",
+      "name": "Baza Salvamont Bușteni (Telecabină)",
+      "kind": "base",
+      "permanence": "24_7",
+      "lat": 45.40956,
+      "lon": 25.53244,
+      "ele": 885,
+      "massif": "Munții Bucegi",
+      "countyCode": "PH",
+      "serviceId": "ro-ph-busteni",
+      "osmIds": [
+        "node/4760510021"
+      ],
+      "source": "osm+ansmr",
+      "backupCountyServiceId": "ro-ph-spj"
+    },
+    {
+      "id": "baza-salvamont-cheia-ciucas",
+      "name": "Baza Salvamont Cheia (Muntele Roșu)",
+      "kind": "base",
+      "permanence": "24_7",
+      "lat": 45.48987,
+      "lon": 25.94494,
+      "ele": 1265,
+      "massif": "Masivul Ciucaș",
+      "countyCode": "PH",
+      "serviceId": "ro-ph-spj",
+      "osmIds": [
+        "way/365280587"
+      ],
+      "source": "osm+ansmr",
+      "directBasePhone": "+40722140858"
+    },
+    {
+      "id": "baza-salvamont-cota-1400-sinaia",
+      "name": "Baza Salvamont Cota 1400 Sinaia",
+      "kind": "base",
+      "permanence": "24_7",
+      "lat": 45.35529,
+      "lon": 25.51823,
+      "ele": 1395,
+      "massif": "Munții Bucegi",
+      "countyCode": "PH",
+      "serviceId": "ro-ph-spj",
+      "osmIds": [
+        "way/242389723"
+      ],
+      "source": "osm+ansmr",
+      "directBasePhone": "+40244311922"
+    },
+    {
+      "id": "baza-salvamont-cota-2000-sinaia",
+      "name": "Baza Salvamont Cota 2000 (Miorița)",
+      "kind": "base",
+      "permanence": "24_7",
+      "lat": 45.35963,
+      "lon": 25.49507,
+      "ele": 1995,
+      "massif": "Munții Bucegi",
+      "countyCode": "PH",
+      "serviceId": "ro-ph-sinaia",
+      "osmIds": [
+        "way/240289818"
+      ],
+      "source": "osm+ansmr",
+      "backupCountyServiceId": "ro-ph-spj"
+    },
+    {
+      "id": "baza-salvamont-piatra-arsa",
+      "name": "Baza Salvamont Piatra Arsă",
+      "kind": "base",
+      "permanence": "24_7",
+      "lat": 45.38215,
+      "lon": 25.4854,
+      "ele": 1950,
+      "massif": "Munții Bucegi",
+      "countyCode": "PH",
+      "serviceId": "ro-ph-spj",
+      "osmIds": [],
+      "source": "ansmr_curated"
+    },
+    {
+      "id": "post-salvamont-busteni-node-1365714420",
+      "name": "Post Salvamont (Bușteni)",
+      "kind": "base",
+      "permanence": "24_7",
+      "lat": 45.41974,
+      "lon": 25.52445,
+      "ele": 992,
+      "massif": "Munții Bucegi",
+      "countyCode": "PH",
+      "serviceId": "ro-ph-busteni",
+      "osmIds": [
+        "node/1365714420"
+      ],
+      "source": "osm+ansmr",
+      "backupCountyServiceId": "ro-ph-spj"
+    },
+    {
+      "id": "baza-salvamont-azuga-sorica",
+      "name": "Post Salvamont Azuga (Sorica)",
+      "kind": "post",
+      "permanence": "24_7",
+      "lat": 45.4426,
+      "lon": 25.5651,
+      "ele": 965,
+      "massif": "Munții Baiului",
+      "countyCode": "PH",
+      "serviceId": "ro-ph-spj",
+      "osmIds": [],
+      "source": "ansmr_curated",
+      "directBasePhone": "+40734889132"
+    },
+    {
+      "id": "refugiul-salvamont-node-1365642900",
+      "name": "Refugiul Salvamont",
+      "kind": "base",
+      "permanence": "24_7",
+      "lat": 45.40792,
+      "lon": 25.5107,
+      "ele": 1270,
+      "massif": "Munții Bucegi",
+      "countyCode": "PH",
+      "serviceId": "ro-ph-busteni",
+      "osmIds": [
+        "node/1365642900"
+      ],
+      "source": "osm+ansmr",
+      "backupCountyServiceId": "ro-ph-spj"
+    },
+    {
+      "id": "baza-salvamont-balea-lac",
+      "name": "Baza Salvamont Bâlea Lac „Toma Boerescu”",
+      "kind": "base",
+      "permanence": "24_7",
+      "lat": 45.6048,
+      "lon": 24.61408,
+      "ele": 2040,
+      "massif": "Munții Făgăraș",
+      "countyCode": "SB",
+      "serviceId": "ro-sb-spj",
+      "osmIds": [
+        "node/11032096215",
+        "way/265907404"
+      ],
+      "source": "osm+ansmr"
+    },
+    {
+      "id": "baza-salvamont-paltinis-sb",
+      "name": "Baza Salvamont Păltiniș",
+      "kind": "base",
+      "permanence": "24_7",
+      "lat": 45.6529,
+      "lon": 23.93311,
+      "ele": 1440,
+      "massif": "Munții Cindrel",
+      "countyCode": "SB",
+      "serviceId": "ro-sb-spj",
+      "osmIds": [
+        "way/1246245035"
+      ],
+      "source": "osm+ansmr",
+      "directBasePhone": "+40269216477"
+    },
+    {
+      "id": "post-salvamont-arena-platos",
+      "name": "Punct Salvamont Arena Platoș",
+      "kind": "post",
+      "permanence": "seasonal",
+      "lat": 45.67473,
+      "lon": 23.93563,
+      "ele": 1390,
+      "massif": "Munții Cindrel",
+      "countyCode": "SB",
+      "serviceId": "ro-sb-spj",
+      "osmIds": [
+        "way/1246245824"
+      ],
+      "source": "osm+ansmr"
+    },
+    {
+      "id": "post-salvamont-negoiu",
+      "name": "Punct Salvamont Cabana Negoiu",
+      "kind": "post",
+      "permanence": "seasonal",
+      "lat": 45.60412,
+      "lon": 24.52905,
+      "ele": 1546,
+      "massif": "Munții Făgăraș",
+      "countyCode": "SB",
+      "serviceId": "ro-sb-spj",
+      "osmIds": [
+        "node/11586278993"
+      ],
+      "source": "osm+ansmr"
+    },
+    {
+      "id": "refugiu-salvamont-portita-avrigului",
+      "name": "Refugiul Salvamont Portița Avrigului",
+      "kind": "refuge",
+      "permanence": "shelter_unmanned",
+      "lat": 45.58005,
+      "lon": 24.47587,
+      "ele": 2175,
+      "massif": "Munții Făgăraș",
+      "countyCode": "SB",
+      "serviceId": "ro-sb-spj",
+      "osmIds": [
+        "node/11288916215"
+      ],
+      "source": "osm+ansmr"
+    },
+    {
+      "id": "baza-salvamont-luna-ses-sm",
+      "name": "Baza Salvamont Luna Șes (Pietroasa)",
+      "kind": "base",
+      "permanence": "24_7",
+      "lat": 47.8481,
+      "lon": 23.4628,
+      "ele": 650,
+      "massif": "Munții Oașului / Gutâi",
+      "countyCode": "SM",
+      "serviceId": "ro-sm-spj",
+      "osmIds": [],
+      "source": "ansmr_curated"
+    },
+    {
+      "id": "post-salvamont-satu-mare-node-12916778518",
+      "name": "Post Salvamont (Satu Mare)",
+      "kind": "base",
+      "permanence": "24_7",
+      "lat": 48.01883,
+      "lon": 23.16673,
+      "ele": 176,
+      "massif": "Munții Oașului",
+      "countyCode": "SM",
+      "serviceId": "ro-sm-spj",
+      "osmIds": [
+        "node/12916778518"
+      ],
+      "source": "osm+ansmr"
+    },
+    {
+      "id": "baza-salvamont-rarau-sv",
+      "name": "Baza Salvamont Rarău",
+      "kind": "base",
+      "permanence": "24_7",
+      "lat": 47.4514,
+      "lon": 25.56336,
+      "ele": 1520,
+      "massif": "Masivul Rarău",
+      "countyCode": "SV",
+      "serviceId": "ro-sv-spj",
+      "osmIds": [
+        "node/8506578387"
+      ],
+      "source": "osm+ansmr",
+      "directBasePhone": "+40724212857"
+    },
+    {
+      "id": "baza-salvamont-vatra-dornei-sv",
+      "name": "Baza Salvamont Vatra Dornei",
+      "kind": "base",
+      "permanence": "24_7",
+      "lat": 47.34652,
+      "lon": 25.35659,
+      "ele": 805,
+      "massif": "Munții Suhard / Giumalău / Călimani",
+      "countyCode": "SV",
+      "serviceId": "ro-sv-vatra-dornei",
+      "osmIds": [],
+      "source": "ansmr_curated",
+      "backupCountyServiceId": "ro-sv-spj"
+    },
+    {
+      "id": "post-salvamont-gura-humorului-soimul",
+      "name": "Post Salvamont Șoimul (Gura Humorului)",
+      "kind": "post",
+      "permanence": "seasonal",
+      "lat": 47.54198,
+      "lon": 25.88882,
+      "ele": 495,
+      "massif": "Obcinele Bucovinei",
+      "countyCode": "SV",
+      "serviceId": "ro-sv-spj",
+      "osmIds": [
+        "node/12103789144"
+      ],
+      "source": "osm+ansmr"
+    },
+    {
+      "id": "baza-salvamont-brezoi-vl",
+      "name": "Baza Salvamont Brezoi (Cozia / Lotru)",
+      "kind": "base",
+      "permanence": "24_7",
+      "lat": 45.34536,
+      "lon": 24.2409,
+      "ele": 340,
+      "massif": "Masivul Cozia / Lotrului",
+      "countyCode": "VL",
+      "serviceId": "ro-vl-brezoi",
+      "osmIds": [
+        "node/14165610869",
+        "way/283660350"
+      ],
+      "source": "osm+ansmr",
+      "backupCountyServiceId": "ro-vl-spj"
+    },
+    {
+      "id": "baza-salvamont-voineasa-transalpina",
+      "name": "Baza Salvamont Voineasa (Vidra / Transalpina)",
+      "kind": "base",
+      "permanence": "24_7",
+      "lat": 45.40081,
+      "lon": 23.69584,
+      "ele": 1355,
+      "massif": "Munții Lotrului / Parâng",
+      "countyCode": "VL",
+      "serviceId": "ro-vl-voineasa",
+      "osmIds": [
+        "way/1242742629"
+      ],
+      "source": "osm+ansmr",
+      "backupCountyServiceId": "ro-vl-spj"
+    },
+    {
+      "id": "baza-salvamont-cozia-stana-turnu",
+      "name": "Post Salvamont Cozia",
+      "kind": "post",
+      "permanence": "24_7",
+      "lat": 45.3088,
+      "lon": 24.3365,
+      "ele": 1565,
+      "massif": "Masivul Cozia",
+      "countyCode": "VL",
+      "serviceId": "ro-vl-spj",
+      "osmIds": [],
+      "source": "ansmr_curated"
+    },
+    {
+      "id": "baza-salvamont-lepsa-vrancea",
+      "name": "Baza Salvamont Lepșa (Cheile Tișiței)",
+      "kind": "base",
+      "permanence": "24_7",
+      "lat": 45.9467,
+      "lon": 26.5789,
+      "ele": 585,
+      "massif": "Munții Vrancei",
+      "countyCode": "VN",
+      "serviceId": "ro-vn-spj",
+      "osmIds": [],
+      "source": "ansmr_curated"
+    }
+  ]
+}

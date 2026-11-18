@@ -13,8 +13,18 @@ void main() {
         '2026:11:18 13:15:00',
       );
       source.exif.exifIfd['OffsetTimeOriginal'] = img.IfdValueAscii('+02:00');
-      source.exif.gpsIfd.latitude = 45.4458;
-      source.exif.gpsIfd.longitude = 25.4563;
+      source.exif.gpsIfd[0x0001] = img.IfdValueAscii('N');
+      source.exif.gpsIfd[0x0002] = img.IfdValueRational.list([
+        img.Rational(45, 1),
+        img.Rational(26, 1),
+        img.Rational(4488, 100),
+      ]);
+      source.exif.gpsIfd[0x0003] = img.IfdValueAscii('E');
+      source.exif.gpsIfd[0x0004] = img.IfdValueRational.list([
+        img.Rational(25, 1),
+        img.Rational(27, 1),
+        img.Rational(2268, 100),
+      ]);
 
       final dirtyJpg = img.encodeJpg(source, quality: 90);
       final preTags = await readExifFromBytes(dirtyJpg);

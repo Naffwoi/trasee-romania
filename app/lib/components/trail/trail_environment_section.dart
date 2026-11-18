@@ -184,7 +184,7 @@ class _StatTile extends StatelessWidget {
 }
 
 class _AlertBadge extends StatelessWidget {
-  final IconData icon;
+  final FaIconData icon;
   final String text;
   final bool danger;
   const _AlertBadge({

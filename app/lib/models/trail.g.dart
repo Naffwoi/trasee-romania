@@ -92,6 +92,11 @@ _Trail _$TrailFromJson(Map<String, dynamic> json) => _Trail(
       : TrailExpand.fromJson(json['expand'] as Map<String, dynamic>),
   description: json['description'] as String? ?? "",
   author: json['author'] as String? ?? "000000000000000",
+  trainAccessible: json['train_accessible'] as bool? ?? false,
+  railStationName: json['rail_station_name'] as String? ?? '',
+  railStationDistanceM:
+      (json['rail_station_distance_m'] as num?)?.toDouble() ?? 0,
+  isWaterGorge: json['is_water_gorge'] as bool? ?? false,
   isLocal: json['isLocal'] as bool? ?? false,
   localPhotos:
       (json['localPhotos'] as List<dynamic>?)
@@ -135,6 +140,10 @@ Map<String, dynamic> _$TrailToJson(_Trail instance) => <String, dynamic>{
   'expand': instance.expand,
   'description': instance.description,
   'author': instance.author,
+  'train_accessible': instance.trainAccessible,
+  'rail_station_name': instance.railStationName,
+  'rail_station_distance_m': instance.railStationDistanceM,
+  'is_water_gorge': instance.isWaterGorge,
   'isLocal': instance.isLocal,
   'localPhotos': instance.localPhotos,
 };

@@ -14,16 +14,8 @@ part of 'map_style_json_provider.dart';
 /// resolves from the network when reachable and from its persisted copy when
 /// not — so this provider never blocks on connectivity.
 ///
-/// Watches [themeModeProvider] so the provider re-runs on theme change,
-/// enabling a live theme swap.
-///
-/// The assets embed three unique sentinel tokens (`__TILE_URL__`,
-/// `__GLYPH_URL__`, `__SPRITE_URL__`); a plain [String.replaceAll] on each is
-/// lossless because the tokens never collide with legitimate style content.
-/// The three sentinels are always filled with the real operator values, even
-/// though the composed style is subsequently rewritten to loopback URLs by
-/// `rewriteStyleForProxy` — the operator values are exactly what the proxy
-/// redirects a cache miss to.
+/// Watches [themeModeProvider] and base/overlay settings so the provider
+/// re-runs on theme or layer changes.
 
 @ProviderFor(mapStyleJson)
 final mapStyleJsonProvider = MapStyleJsonProvider._();
@@ -34,16 +26,8 @@ final mapStyleJsonProvider = MapStyleJsonProvider._();
 /// resolves from the network when reachable and from its persisted copy when
 /// not — so this provider never blocks on connectivity.
 ///
-/// Watches [themeModeProvider] so the provider re-runs on theme change,
-/// enabling a live theme swap.
-///
-/// The assets embed three unique sentinel tokens (`__TILE_URL__`,
-/// `__GLYPH_URL__`, `__SPRITE_URL__`); a plain [String.replaceAll] on each is
-/// lossless because the tokens never collide with legitimate style content.
-/// The three sentinels are always filled with the real operator values, even
-/// though the composed style is subsequently rewritten to loopback URLs by
-/// `rewriteStyleForProxy` — the operator values are exactly what the proxy
-/// redirects a cache miss to.
+/// Watches [themeModeProvider] and base/overlay settings so the provider
+/// re-runs on theme or layer changes.
 
 final class MapStyleJsonProvider
     extends $FunctionalProvider<AsyncValue<String>, String, FutureOr<String>>
@@ -54,16 +38,8 @@ final class MapStyleJsonProvider
   /// resolves from the network when reachable and from its persisted copy when
   /// not — so this provider never blocks on connectivity.
   ///
-  /// Watches [themeModeProvider] so the provider re-runs on theme change,
-  /// enabling a live theme swap.
-  ///
-  /// The assets embed three unique sentinel tokens (`__TILE_URL__`,
-  /// `__GLYPH_URL__`, `__SPRITE_URL__`); a plain [String.replaceAll] on each is
-  /// lossless because the tokens never collide with legitimate style content.
-  /// The three sentinels are always filled with the real operator values, even
-  /// though the composed style is subsequently rewritten to loopback URLs by
-  /// `rewriteStyleForProxy` — the operator values are exactly what the proxy
-  /// redirects a cache miss to.
+  /// Watches [themeModeProvider] and base/overlay settings so the provider
+  /// re-runs on theme or layer changes.
   MapStyleJsonProvider._()
     : super(
         from: null,
@@ -89,4 +65,4 @@ final class MapStyleJsonProvider
   }
 }
 
-String _$mapStyleJsonHash() => r'153afd3e727c8270d857c1d1ec0d874cbb8a6bab';
+String _$mapStyleJsonHash() => r'541f9e4daae9da194cc5c6ab4f2c0a35ced22657';

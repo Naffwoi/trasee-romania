@@ -355,8 +355,10 @@ class TileProxyServer {
         ? 'slope:$z/$x/$y'
         : 'shade:$z/$x/$y:${az.round()}:${alt.round()}';
 
-    var png = _generatedPngLru.remove(cacheKey);
-    if (png != null) {
+    final cached = _generatedPngLru.remove(cacheKey);
+    final Uint8List png;
+    if (cached != null) {
+      png = cached;
       _generatedPngLru[cacheKey] = png;
     } else {
       final scale = 1 << (z - 12);

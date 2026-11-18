@@ -143,12 +143,12 @@ final expeditionBatteryModeProvider = Provider<bool>((ref) {
 
 @Riverpod(keepAlive: true)
 bool showSalvamontLayer(Ref ref) =>
-    ref.watch(localSettingsProvider.select((s) => s.showSalvamontLayer));
+    ref.watch(localSettingsProvider).showSalvamontLayer;
 
 @Riverpod(keepAlive: true)
 bool showAvalancheSlope(Ref ref) =>
-    ref.watch(localSettingsProvider.select((s) => s.showAvalancheSlope));
+    ref.watch(localSettingsProvider).showAvalancheSlope;
 
 @Riverpod(keepAlive: true)
 bool showSolarShadows(Ref ref) =>
-    ref.watch(localSettingsProvider.select((s) => s.showSolarShadows));
+    ref.watch(localSettingsProvider).showSolarShadows;

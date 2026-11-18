@@ -2588,9 +2588,10 @@ class _NavigationScreenState extends ConsumerState<NavigationScreen>
         ? null
         : resolveNearestSalvamont(
             salvamontDs,
-            lat: pos.lat,
-            lon: pos.lon,
-            ele: _lastKnownAltitudeM,
+            pos.lat,
+            pos.lon,
+            userEle: _lastKnownAltitudeM,
+            localeCode: _localeCode,
           );
     final submission = await showSosTriggerDialog(
       context,
@@ -3498,7 +3499,7 @@ class _NavigationScreenState extends ConsumerState<NavigationScreen>
             userPos: cur,
             userEleM: _lastKnownAltitudeM,
             targetPos: targetGeo,
-            targetEleM: target.ele?.toDouble(),
+            targetEleM: target.ele.toDouble(),
             referencePoints: _navTrackPoints,
             sampler: _demGrid.sampleElevation,
             mode: _offTrailMode,
@@ -3515,7 +3516,7 @@ class _NavigationScreenState extends ConsumerState<NavigationScreen>
       userPos: pos,
       userEleM: _lastKnownAltitudeM,
       targetPos: targetGeo,
-      targetEleM: target.ele?.toDouble(),
+      targetEleM: target.ele.toDouble(),
       referencePoints: _navTrackPoints,
       sampler: _demGrid.sampleElevation,
       mode: _offTrailMode,

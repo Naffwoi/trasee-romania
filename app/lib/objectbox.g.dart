@@ -787,7 +787,7 @@ final _entities = <obx_int.ModelEntity>[
   obx_int.ModelEntity(
     id: const obx_int.IdUid(8, 5734302023385580278),
     name: 'LocalSettingsEntity',
-    lastPropertyId: const obx_int.IdUid(10, 6452254148793560149),
+    lastPropertyId: const obx_int.IdUid(15, 6680969442463424996),
     flags: 0,
     properties: <obx_int.ModelProperty>[
       obx_int.ModelProperty(
@@ -842,6 +842,36 @@ final _entities = <obx_int.ModelEntity>[
         id: const obx_int.IdUid(10, 6452254148793560149),
         name: 'expeditionBatteryMode',
         type: 1,
+        flags: 0,
+      ),
+      obx_int.ModelProperty(
+        id: const obx_int.IdUid(11, 26348959591366343),
+        name: 'showSalvamontLayer',
+        type: 1,
+        flags: 0,
+      ),
+      obx_int.ModelProperty(
+        id: const obx_int.IdUid(12, 9197510804475238185),
+        name: 'showAvalancheSlope',
+        type: 1,
+        flags: 0,
+      ),
+      obx_int.ModelProperty(
+        id: const obx_int.IdUid(13, 8309649314729136914),
+        name: 'showSolarShadows',
+        type: 1,
+        flags: 0,
+      ),
+      obx_int.ModelProperty(
+        id: const obx_int.IdUid(14, 8419573922568244083),
+        name: 'mapBaseStyle',
+        type: 9,
+        flags: 0,
+      ),
+      obx_int.ModelProperty(
+        id: const obx_int.IdUid(15, 6680969442463424996),
+        name: 'mapOverlaysJson',
+        type: 9,
         flags: 0,
       ),
     ],
@@ -2231,7 +2261,9 @@ obx_int.ModelDefinition getObjectBoxModel() {
         final recentServersJsonOffset = fbb.writeString(
           object.recentServersJson,
         );
-        fbb.startTable(11);
+        final mapBaseStyleOffset = fbb.writeString(object.mapBaseStyle);
+        final mapOverlaysJsonOffset = fbb.writeString(object.mapOverlaysJson);
+        fbb.startTable(16);
         fbb.addInt64(0, object.obxId);
         fbb.addOffset(1, themeModeOffset);
         fbb.addBool(3, object.backgroundLocationAsked);
@@ -2241,6 +2273,11 @@ obx_int.ModelDefinition getObjectBoxModel() {
         fbb.addOffset(7, demTileTemplateOffset);
         fbb.addOffset(8, recentServersJsonOffset);
         fbb.addBool(9, object.expeditionBatteryMode);
+        fbb.addBool(10, object.showSalvamontLayer);
+        fbb.addBool(11, object.showAvalancheSlope);
+        fbb.addBool(12, object.showSolarShadows);
+        fbb.addOffset(13, mapBaseStyleOffset);
+        fbb.addOffset(14, mapOverlaysJsonOffset);
         fbb.finish(fbb.endTable());
         return object.obxId;
       },
@@ -2279,6 +2316,29 @@ obx_int.ModelDefinition getObjectBoxModel() {
           22,
           false,
         );
+        final showSalvamontLayerParam = const fb.BoolReader().vTableGet(
+          buffer,
+          rootOffset,
+          24,
+          false,
+        );
+        final showAvalancheSlopeParam = const fb.BoolReader().vTableGet(
+          buffer,
+          rootOffset,
+          26,
+          false,
+        );
+        final showSolarShadowsParam = const fb.BoolReader().vTableGet(
+          buffer,
+          rootOffset,
+          28,
+          false,
+        );
+        final mapBaseStyleParam = const fb.StringReader(asciiOptimization: true)
+            .vTableGet(buffer, rootOffset, 30, '');
+        final mapOverlaysJsonParam = const fb.StringReader(
+          asciiOptimization: true,
+        ).vTableGet(buffer, rootOffset, 32, '');
         final object = LocalSettingsEntity(
           themeMode: themeModeParam,
           backgroundLocationAsked: backgroundLocationAskedParam,
@@ -2288,6 +2348,11 @@ obx_int.ModelDefinition getObjectBoxModel() {
           demTileTemplate: demTileTemplateParam,
           recentServersJson: recentServersJsonParam,
           expeditionBatteryMode: expeditionBatteryModeParam,
+          showSalvamontLayer: showSalvamontLayerParam,
+          showAvalancheSlope: showAvalancheSlopeParam,
+          showSolarShadows: showSolarShadowsParam,
+          mapBaseStyle: mapBaseStyleParam,
+          mapOverlaysJson: mapOverlaysJsonParam,
         )..obxId = const fb.Int64Reader().vTableGet(buffer, rootOffset, 4, 0);
 
         return object;
@@ -3415,6 +3480,31 @@ class LocalSettingsEntity_ {
   /// See [LocalSettingsEntity.expeditionBatteryMode].
   static final expeditionBatteryMode =
       obx.QueryBooleanProperty<LocalSettingsEntity>(_entities[6].properties[8]);
+
+  /// See [LocalSettingsEntity.showSalvamontLayer].
+  static final showSalvamontLayer =
+      obx.QueryBooleanProperty<LocalSettingsEntity>(_entities[6].properties[9]);
+
+  /// See [LocalSettingsEntity.showAvalancheSlope].
+  static final showAvalancheSlope =
+      obx.QueryBooleanProperty<LocalSettingsEntity>(
+        _entities[6].properties[10],
+      );
+
+  /// See [LocalSettingsEntity.showSolarShadows].
+  static final showSolarShadows = obx.QueryBooleanProperty<LocalSettingsEntity>(
+    _entities[6].properties[11],
+  );
+
+  /// See [LocalSettingsEntity.mapBaseStyle].
+  static final mapBaseStyle = obx.QueryStringProperty<LocalSettingsEntity>(
+    _entities[6].properties[12],
+  );
+
+  /// See [LocalSettingsEntity.mapOverlaysJson].
+  static final mapOverlaysJson = obx.QueryStringProperty<LocalSettingsEntity>(
+    _entities[6].properties[13],
+  );
 }
 
 /// [SubcategoryEntity] entity fields to define ObjectBox queries.

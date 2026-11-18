@@ -52,10 +52,9 @@ Future<String?> _resolveRainViewerTemplate() async {
 @Riverpod(keepAlive: true)
 Future<String> mapStyleJson(Ref ref) async {
   final mode = ref.watch(themeModeProvider);
-  final baseMode = ref.watch(localSettingsProvider.select((s) => s.mapBaseStyle));
-  final overlaysRaw = ref.watch(
-    localSettingsProvider.select((s) => s.mapOverlaysJson),
-  );
+  final settings = ref.watch(localSettingsProvider);
+  final baseMode = settings.mapBaseStyle;
+  final overlaysRaw = settings.mapOverlaysJson;
   final sources = await ref.watch(mapStyleSourcesProvider.future);
   final brightness = effectiveBrightness(mode);
   final assetPath = brightness == Brightness.dark

@@ -20,7 +20,7 @@ Future<void> showMapLayersSheet(BuildContext context) {
 class MapLayersSheet extends ConsumerWidget {
   const MapLayersSheet({super.key});
 
-  static const _baseOptions = <(String, String, IconData)>[
+  static const _baseOptions = <(String, String, FaIconData)>[
     ('default', 'Hartă Vectorială', FontAwesomeIcons.map),
     ('esri_satellite', 'Satelit (Esri HD)', FontAwesomeIcons.satellite),
     ('sentinel2_cloudless', 'Sentinel-2 Fără Nori', FontAwesomeIcons.globe),

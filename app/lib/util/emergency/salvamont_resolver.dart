@@ -197,7 +197,7 @@ NearestSalvamontResolution resolveNearestSalvamont(
       : null;
 
   final activeServices = <ResolvedSalvamontService>[];
-  if (isMountainZone && primary != null) {
+  if (isMountainZone) {
     final d1 = math.max(1.0, primary.distanceM);
     final seen = <String>{primary.service.id};
     activeServices.add(

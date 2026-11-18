@@ -46,6 +46,11 @@ _TrailSearchResult _$TrailSearchResultFromJson(
   iri: json['iri'] as String?,
   gpx: json['gpx'] as String,
   geo: GeoLocation.fromJson(json['_geo'] as Map<String, dynamic>),
+  trainAccessible: json['train_accessible'] as bool? ?? false,
+  railStationName: json['rail_station_name'] as String? ?? '',
+  railStationDistanceM:
+      (json['rail_station_distance_m'] as num?)?.toDouble() ?? 0,
+  isWaterGorge: json['is_water_gorge'] as bool? ?? false,
 );
 
 Map<String, dynamic> _$TrailSearchResultToJson(_TrailSearchResult instance) =>
@@ -79,6 +84,10 @@ Map<String, dynamic> _$TrailSearchResultToJson(_TrailSearchResult instance) =>
       'iri': instance.iri,
       'gpx': instance.gpx,
       '_geo': instance.geo,
+      'train_accessible': instance.trainAccessible,
+      'rail_station_name': instance.railStationName,
+      'rail_station_distance_m': instance.railStationDistanceM,
+      'is_water_gorge': instance.isWaterGorge,
     };
 
 _ListSearchResult _$ListSearchResultFromJson(Map<String, dynamic> json) =>

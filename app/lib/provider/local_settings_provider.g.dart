@@ -42,7 +42,7 @@ final class LocalSettingsNotifierProvider
 }
 
 String _$localSettingsNotifierHash() =>
-    r'7ff2df6aee14d13ef9fa0f1b85d8be408facfe46';
+    r'b12bf21a1e9da9e8b309ff051348480f9c45b320';
 
 abstract class _$LocalSettingsNotifier extends $Notifier<LocalSettingsEntity> {
   LocalSettingsEntity build();
@@ -183,3 +183,128 @@ final class UnitProvider extends $FunctionalProvider<String, String, String>
 }
 
 String _$unitHash() => r'61cb2b8e04879730d2520f184f8c89b7c5d086a9';
+
+@ProviderFor(showSalvamontLayer)
+final showSalvamontLayerProvider = ShowSalvamontLayerProvider._();
+
+final class ShowSalvamontLayerProvider
+    extends $FunctionalProvider<bool, bool, bool>
+    with $Provider<bool> {
+  ShowSalvamontLayerProvider._()
+    : super(
+        from: null,
+        argument: null,
+        retry: null,
+        name: r'showSalvamontLayerProvider',
+        isAutoDispose: false,
+        dependencies: null,
+        $allTransitiveDependencies: null,
+      );
+
+  @override
+  String debugGetCreateSourceHash() => _$showSalvamontLayerHash();
+
+  @$internal
+  @override
+  $ProviderElement<bool> $createElement($ProviderPointer pointer) =>
+      $ProviderElement(pointer);
+
+  @override
+  bool create(Ref ref) {
+    return showSalvamontLayer(ref);
+  }
+
+  /// {@macro riverpod.override_with_value}
+  Override overrideWithValue(bool value) {
+    return $ProviderOverride(
+      origin: this,
+      providerOverride: $SyncValueProvider<bool>(value),
+    );
+  }
+}
+
+String _$showSalvamontLayerHash() =>
+    r'd4693575446b68a647ed6fffbe0fc252a986b7a9';
+
+@ProviderFor(showAvalancheSlope)
+final showAvalancheSlopeProvider = ShowAvalancheSlopeProvider._();
+
+final class ShowAvalancheSlopeProvider
+    extends $FunctionalProvider<bool, bool, bool>
+    with $Provider<bool> {
+  ShowAvalancheSlopeProvider._()
+    : super(
+        from: null,
+        argument: null,
+        retry: null,
+        name: r'showAvalancheSlopeProvider',
+        isAutoDispose: false,
+        dependencies: null,
+        $allTransitiveDependencies: null,
+      );
+
+  @override
+  String debugGetCreateSourceHash() => _$showAvalancheSlopeHash();
+
+  @$internal
+  @override
+  $ProviderElement<bool> $createElement($ProviderPointer pointer) =>
+      $ProviderElement(pointer);
+
+  @override
+  bool create(Ref ref) {
+    return showAvalancheSlope(ref);
+  }
+
+  /// {@macro riverpod.override_with_value}
+  Override overrideWithValue(bool value) {
+    return $ProviderOverride(
+      origin: this,
+      providerOverride: $SyncValueProvider<bool>(value),
+    );
+  }
+}
+
+String _$showAvalancheSlopeHash() =>
+    r'57e56f759fc350824d89476875f0417741d92176';
+
+@ProviderFor(showSolarShadows)
+final showSolarShadowsProvider = ShowSolarShadowsProvider._();
+
+final class ShowSolarShadowsProvider
+    extends $FunctionalProvider<bool, bool, bool>
+    with $Provider<bool> {
+  ShowSolarShadowsProvider._()
+    : super(
+        from: null,
+        argument: null,
+        retry: null,
+        name: r'showSolarShadowsProvider',
+        isAutoDispose: false,
+        dependencies: null,
+        $allTransitiveDependencies: null,
+      );
+
+  @override
+  String debugGetCreateSourceHash() => _$showSolarShadowsHash();
+
+  @$internal
+  @override
+  $ProviderElement<bool> $createElement($ProviderPointer pointer) =>
+      $ProviderElement(pointer);
+
+  @override
+  bool create(Ref ref) {
+    return showSolarShadows(ref);
+  }
+
+  /// {@macro riverpod.override_with_value}
+  Override overrideWithValue(bool value) {
+    return $ProviderOverride(
+      origin: this,
+      providerOverride: $SyncValueProvider<bool>(value),
+    );
+  }
+}
+
+String _$showSolarShadowsHash() => r'cf96b0fd0113db8041a4f64bf4e06470f878686c';

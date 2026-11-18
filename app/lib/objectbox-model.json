@@ -643,7 +643,7 @@
     },
     {
       "id": "8:5734302023385580278",
-      "lastPropertyId": "10:6452254148793560149",
+      "lastPropertyId": "15:6680969442463424996",
       "name": "LocalSettingsEntity",
       "properties": [
         {
@@ -691,6 +691,31 @@
           "id": "10:6452254148793560149",
           "name": "expeditionBatteryMode",
           "type": 1
+        },
+        {
+          "id": "11:26348959591366343",
+          "name": "showSalvamontLayer",
+          "type": 1
+        },
+        {
+          "id": "12:9197510804475238185",
+          "name": "showAvalancheSlope",
+          "type": 1
+        },
+        {
+          "id": "13:8309649314729136914",
+          "name": "showSolarShadows",
+          "type": 1
+        },
+        {
+          "id": "14:8419573922568244083",
+          "name": "mapBaseStyle",
+          "type": 9
+        },
+        {
+          "id": "15:6680969442463424996",
+          "name": "mapOverlaysJson",
+          "type": 9
         }
       ],
       "relations": []

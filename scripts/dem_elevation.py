@@ -11,11 +11,19 @@ import struct
 import urllib.error
 import urllib.request
 
-try:
-    import certifi
-    _SSL_CONTEXT = ssl.create_default_context(cafile=certifi.where())
-except ImportError:
-    _SSL_CONTEXT = ssl.create_default_context()
+def _make_ssl_context() -> ssl.SSLContext:
+    try:
+        import certifi
+
+        return ssl.create_default_context(cafile=certifi.where())
+    except ImportError:
+        for ca_path in ("/etc/ssl/cert.pem", "/etc/ssl/certs/ca-certificates.crt"):
+            if Path(ca_path).exists():
+                return ssl.create_default_context(cafile=ca_path)
+        return ssl.create_default_context()
+
+
+_SSL_CONTEXT = _make_ssl_context()
 
 SKADI_URL_TEMPLATE = (
     "https://s3.amazonaws.com/elevation-tiles-prod/skadi/"

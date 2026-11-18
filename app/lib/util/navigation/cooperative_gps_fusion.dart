@@ -156,10 +156,6 @@ class CooperativeGpsFusion {
       );
     }
 
-    if (selfFix == null) {
-      return null;
-    }
-
     final selfAcc = (selfFix.accuracy.isFinite && selfFix.accuracy > 0.0)
         ? selfFix.accuracy
         : 15.0;

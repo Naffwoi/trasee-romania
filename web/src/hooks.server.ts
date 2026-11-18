@@ -1,5 +1,5 @@
 import { MEILI_URL, ORIGIN } from '$app/env/private'
-import { PUBLIC_DISABLE_SIGNUP, PUBLIC_POCKETBASE_URL } from '$app/env/public'
+import { PUBLIC_DISABLE_SIGNUP, PUBLIC_POCKETBASE_URL, PUBLIC_PRIVATE_INSTANCE } from '$app/env/public'
 import type { Settings } from '#lib/models/settings.ts'
 
 import PocketBase, { ClientResponseError } from 'pocketbase'
@@ -21,6 +21,25 @@ const HEALTH_PATH = "/api/v1/health";
 // Budget for all PocketBase calls the auth hook makes for one request. Without
 // it a hung PocketBase holds the request for undici's 300 s headers timeout.
 const AUTH_BACKEND_TIMEOUT_MS = 10_000;
+
+export type FastPathKind = "live_stateless" | "live_optional_actor" | "public_file" | null;
+
+export function classifyFastPathRequest(
+  pathname: string,
+  method: string,
+  privateInstance: boolean,
+): FastPathKind {
+  if (pathname === "/api/v1/live" || pathname.startsWith("/api/v1/live/")) {
+    if (pathname === "/api/v1/live/reports" && method.toUpperCase() === "POST") {
+      return "live_optional_actor";
+    }
+    return "live_stateless";
+  }
+  if (!privateInstance && pathname.startsWith("/api/v1/files/")) {
+    return "public_file";
+  }
+  return null;
+}
 
 // adapter-node no longer applies ORIGIN to event.url, which otherwise
 // defaults to https behind a plain-http deployment.
@@ -103,6 +122,60 @@ const auth: Handle = async ({ event, resolve }) => {
   if (url.pathname === HEALTH_PATH) {
     event.locals.pb = pb
     return resolve(event)
+  }
+
+  const fastPath = classifyFastPathRequest(
+    url.pathname,
+    event.request.method,
+    PUBLIC_PRIVATE_INSTANCE === "true",
+  );
+  if (fastPath === "live_stateless" || fastPath === "public_file") {
+    event.locals.pb = pb;
+    return resolve(event);
+  }
+  if (fastPath === "live_optional_actor") {
+    event.locals.pb = pb;
+    const hasCookieOrAuth =
+      event.request.headers.has("Authorization") ||
+      (event.request.headers.get("cookie") ?? "").includes("pb_auth=");
+    if (hasCookieOrAuth) {
+      const actorSignal = AbortSignal.timeout(AUTH_BACKEND_TIMEOUT_MS);
+      const actorFetch: typeof fetch = (input, init) =>
+        settleOnAbort(event.fetch(input, init), actorSignal);
+      try {
+        if (event.request.headers.has("Authorization")) {
+          const apiToken = (event.request.headers.get("Authorization") ?? "").replace("Bearer ", "");
+          if (apiToken.startsWith("wanderer_key")) {
+            const authData = await pb.send("/auth/token", {
+              method: "POST",
+              body: JSON.stringify({ api_token: apiToken }),
+              fetch: actorFetch,
+              requestKey: null,
+              signal: actorSignal,
+            });
+            pb.authStore.save(authData.token, authData.record);
+          }
+        } else {
+          pb.authStore.loadFromCookie(event.request.headers.get("cookie") || "");
+          if (pb.authStore.isValid) {
+            await pb.collection("users").authRefresh({ requestKey: null, signal: actorSignal });
+          }
+        }
+        if (pb.authStore.record) {
+          const actorRec = await pb
+            .collection("activitypub_actors")
+            .getFirstListItem(`is_local=1&&user='${pb.authStore.record.id}'`, {
+              requestKey: null,
+              signal: actorSignal,
+            });
+          event.locals.user = pb.authStore.record;
+          event.locals.user.actor = actorRec?.id;
+        }
+      } catch {
+        // Best-effort optional attribution on /api/v1/live/reports
+      }
+    }
+    return resolve(event);
   }
 
   // requestKey: null on the calls below is required: the SDK's auto-cancellation

@@ -73,9 +73,23 @@ export async function GET(event: RequestEvent) {
 
     let fileURL = event.locals.pb.buildURL(parts.join("/") + '?' + new URLSearchParams(safeSearchParams.data));
 
+    const upstreamHeaders: Record<string, string> = {};
+    for (const hName of ["range", "if-range", "if-none-match", "if-modified-since", "cookie", "authorization"]) {
+        const val = event.request.headers.get(hName);
+        if (val) {
+            upstreamHeaders[hName] = val;
+        }
+    }
+
     try {
-        const r = await event.fetch(fileURL)
-        return new Response(r.body, { headers: r.headers });
+        const r = await event.fetch(fileURL, {
+            method: event.request.method,
+            headers: upstreamHeaders,
+        });
+        return new Response(r.status === 304 ? null : r.body, {
+            status: r.status,
+            headers: r.headers,
+        });
     } catch (e: any) {
         throw error(500, e.message);
     }

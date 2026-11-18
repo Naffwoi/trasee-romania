@@ -295,7 +295,7 @@ export class OfflinePeakFinder {
 
 			let occluded = false;
 			let anyDemSample = false;
-			const stopDistM = distM - 90;
+			const stopDistM = Math.max(0, distM - Math.min(350, Math.max(120, distM * 0.085)));
 			let s = 40;
 			while (s < stopDistM) {
 				const z = dem.sampleElevation(

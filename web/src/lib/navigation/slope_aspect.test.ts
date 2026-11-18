@@ -30,7 +30,7 @@ function buildInclinedPlaneTile(
 describe("Horn 3x3 Avalanche Slope & Scanline Cast-Shadow Renderer", () => {
 	it("recovers exact 38 deg slope at 45.5N with Mercator cos(lat) correction and maps to Crimson Red", () => {
 		const tx = 2337;
-		const ty = 1468;
+		const ty = 1466;
 		const dem = new DemTileGrid();
 		dem.putDecodedTileForTest(tx, ty, {
 			width: 512,
@@ -74,7 +74,7 @@ describe("Horn 3x3 Avalanche Slope & Scanline Cast-Shadow Renderer", () => {
 
 	it("sweeps cast shadows downwind behind a 600 m ridge in < 35 ms", () => {
 		const tx = 2337;
-		const ty = 1468;
+		const ty = 1466;
 		const elevations = new Float32Array(512 * 512).fill(1000);
 		for (let r = 0; r < 512; r++) {
 			for (let c = 380; c <= 390; c++) {

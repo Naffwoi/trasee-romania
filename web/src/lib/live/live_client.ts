@@ -31,9 +31,9 @@ export interface TrailReportDto {
 	lon: number;
 	ele: number;
 	alongTrackM: number;
-	photoUrl: string | null;
-	photoThumbUrl: string | null;
-	photoVerified: boolean;
+	photoUrl?: string | null;
+	photoThumbUrl?: string | null;
+	photoVerified?: boolean;
 	confirmCount: number;
 	dismissCount: number;
 	createdAt: string;

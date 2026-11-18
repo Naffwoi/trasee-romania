@@ -172,6 +172,7 @@ export function renderCastShadowTileRgba(
 	}
 
 	const srcW = baseTile.width;
+	const srcH = baseTile.height;
 	const decimate = Math.max(1, Math.round(srcW / outSize));
 	const pad = outSize;
 	const gridN = outSize * 2;
@@ -182,13 +183,49 @@ export function renderCastShadowTileRgba(
 	const padOffsetCol = sunDirX >= 0 ? 0 : -pad;
 	const padOffsetRow = sunDirY >= 0 ? 0 : -pad;
 
+	const dxTile = sunDirX >= 0 ? 1 : -1;
+	const dyTile = sunDirY >= 0 ? 1 : -1;
+	const nxX = ((win.z12X + dxTile) % 4096 + 4096) % 4096;
+	const nyY = win.z12Y + dyTile;
+	const baseData = baseTile.elevationsTenths;
+	const tileXNeighbor = dem.getDecodedTile(nxX, win.z12Y);
+	const tileYNeighbor = nyY >= 0 && nyY < 4096 ? dem.getDecodedTile(win.z12X, nyY) : undefined;
+	const tileXYNeighbor = nyY >= 0 && nyY < 4096 ? dem.getDecodedTile(nxX, nyY) : undefined;
+
 	const elevGrid = new Float32Array(gridN * gridN);
 	for (let gr = 0; gr < gridN; gr++) {
 		const srcRow = (gr + padOffsetRow) * decimate;
+		const inNeighborY = srcRow < 0 || srcRow >= srcH;
+		const localY = inNeighborY ? (srcRow < 0 ? srcRow + srcH : srcRow - srcH) : srcRow;
+		const clampY = srcRow < 0 ? 0 : srcRow >= srcH ? srcH - 1 : srcRow;
+		const rowOffsetOut = gr * gridN;
+
 		for (let gc = 0; gc < gridN; gc++) {
 			const srcCol = (gc + padOffsetCol) * decimate;
-			elevGrid[gr * gridN + gc] =
-				dem.samplePixelStitched(win.z12X, win.z12Y, srcCol, srcRow) ?? 0;
+			const inNeighborX = srcCol < 0 || srcCol >= srcW;
+			const localX = inNeighborX ? (srcCol < 0 ? srcCol + srcW : srcCol - srcW) : srcCol;
+			const clampX = srcCol < 0 ? 0 : srcCol >= srcW ? srcW - 1 : srcCol;
+
+			let tenths: number;
+			if (!inNeighborX && !inNeighborY) {
+				tenths = baseData[srcRow * srcW + srcCol];
+			} else if (inNeighborX && !inNeighborY) {
+				tenths =
+					tileXNeighbor && localX < tileXNeighbor.width && srcRow < tileXNeighbor.height
+						? tileXNeighbor.elevationsTenths[srcRow * tileXNeighbor.width + localX]
+						: baseData[srcRow * srcW + clampX];
+			} else if (!inNeighborX && inNeighborY) {
+				tenths =
+					tileYNeighbor && srcCol < tileYNeighbor.width && localY < tileYNeighbor.height
+						? tileYNeighbor.elevationsTenths[localY * tileYNeighbor.width + srcCol]
+						: baseData[clampY * srcW + srcCol];
+			} else {
+				tenths =
+					tileXYNeighbor && localX < tileXYNeighbor.width && localY < tileXYNeighbor.height
+						? tileXYNeighbor.elevationsTenths[localY * tileXYNeighbor.width + localX]
+						: baseData[clampY * srcW + clampX];
+			}
+			elevGrid[rowOffsetOut + gc] = tenths * 0.1;
 		}
 	}
 

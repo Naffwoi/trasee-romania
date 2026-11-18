@@ -50,7 +50,10 @@
     import ShareInfo from "../share_info.svelte";
     import SummitLogTable from "../summit_log/summit_log_table.svelte";
     import MapWithElevationMaplibre from "./map_with_elevation_maplibre.svelte";
+    import TrailEnvironmentCard from "./trail_environment_card.svelte";
+    import TrailSalvamontCard from "./trail_salvamont_card.svelte";
     import TrailTimeline from "./trail_timeline.svelte";
+    import TrailheadStreetPreview from "./trailhead_street_preview.svelte";
     import {
         summit_logs_create,
         summit_logs_delete,
@@ -833,6 +836,25 @@
         </section>
     </div>
     <section class="trail-info-panel-content px-8">
+        {#if trail.train_accessible && trail.rail_station_name}
+            <div class="mt-3">
+                <span
+                    data-testid="trail-info-rail-badge"
+                    class="inline-flex items-center gap-1.5 rounded-full bg-content/[0.07] px-3 py-1 text-xs font-semibold text-content/85"
+                >
+                    <i class="fa fa-train text-[11px]" aria-hidden="true"></i>
+                    <span>
+                        Gara {trail.rail_station_name}
+                        {#if trail.rail_station_distance_m !== undefined}
+                            ({Math.round(trail.rail_station_distance_m)} m)
+                        {/if}
+                    </span>
+                </span>
+            </div>
+        {/if}
+        <TrailSalvamontCard {trail} />
+        <TrailEnvironmentCard trailId={trail.id ?? ""} maxElevationM={trail.max_ele ?? null} />
+        <TrailheadStreetPreview lat={trail.lat} lon={trail.lon} />
         <div
             class="grid grid-cols-1 my-4 gap-8"
             class:xl:grid-cols-[1fr_18rem]={mode == "overview"}

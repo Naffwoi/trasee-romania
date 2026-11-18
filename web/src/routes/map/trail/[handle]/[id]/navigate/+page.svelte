@@ -50,9 +50,18 @@
     } from "#lib/live/report_markers.ts";
     import GPX from "#lib/models/gpx/gpx.ts";
     import type { Trail } from "#lib/models/trail.ts";
+    import PeakFinderSheet from "#lib/components/navigation/peak_finder_sheet.svelte";
+    import SlopeLegendPill from "#lib/components/map/slope_legend_pill.svelte";
+    import SolarTimeScrubber from "#lib/components/map/solar_time_scrubber.svelte";
+    import {
+        registerTerrainIntelProtocols,
+        setTerrainShadeSunVector,
+    } from "#lib/map/terrain_intel_protocol.ts";
     import {
         bearingDegrees,
+        computeDirectRescueRoute,
         computeHybridOffTrailReroute,
+        computeTrailSolarForecast,
         computeValhallaAccessRoute,
         EtaCalculator,
         extractMapLibreObstacles,
@@ -60,9 +69,11 @@
         FAR_PREVIEW_THRESHOLD_METERS,
         findCoLocatedPeerIds,
         fuseCooperativeGps,
+        getSunPosition,
         GpsPaceCoaster,
         haversineMeters,
         NavTerrainClient,
+        OfflinePeakFinder,
         parseGpxXmlFastToPackedTrack,
         reverseTrackPoints,
         RouteMapMatcher,
@@ -71,6 +82,7 @@
         type DirectRescueRouteResult,
         type EtaSnapshot,
         type GpsSignalState,
+        type HorizonPanorama,
         type NavManeuver,
         type NavMatchResult,
         type NavTrackPoint,
@@ -78,6 +90,7 @@
         type OffTrailMode,
         type OffTrailPoint,
         type OffTrailRerouteResult,
+        type PeakEntryDto,
         type PeerGpsObservation,
     } from "#lib/navigation/index.ts";
     import { PwaPowerGovernor } from "#lib/navigation/pwa_power_governor.ts";
@@ -89,7 +102,10 @@
     import { LocationPuckMarker } from "#lib/vendor/maplibre-user-location/location-puck-marker.ts";
     import { baseMapStyles } from "#lib/vendor/maplibre-layer-manager/layers.ts";
     import { LayerManager } from "#lib/vendor/maplibre-layer-manager/maplibre-layer-manager.ts";
-    import { OverlayLayer } from "#lib/vendor/maplibre-layer-manager/overlay-layer.ts";
+    import { SalvamontLayer } from "#lib/vendor/maplibre-layer-manager/salvamont-layer.ts";
+    import type { SalvamontPoint } from "#lib/emergency/salvamont_resolver.ts";
+    import type { GsmSignalRecommendation } from "#lib/emergency/gsm_viewshed.ts";
+    import { DemTileGrid } from "#lib/navigation/dem_tile_grid.ts";
     import { StyleSwitcherControl } from "#lib/vendor/maplibre-style-switcher/style-switcher-control.ts";
     import type { FeatureCollection } from "geojson";
     import * as M from "maplibre-gl";
@@ -131,6 +147,7 @@
     const SRC_REJOIN = "nav-rejoin-point";
     const SRC_RESCUE = "nav-sos-rescue";
     const SRC_ACCESS = "nav-access-route";
+    const SRC_GSM_LOS = "nav-gsm-los";
 
     const LAYER_WALKED = "nav-trail-walked";
     const LAYER_UPCOMING_CASING = "nav-trail-upcoming-casing";
@@ -143,6 +160,7 @@
     const LAYER_RESCUE_LINE = "nav-sos-rescue-line";
     const LAYER_ACCESS_CASING = "nav-access-casing";
     const LAYER_ACCESS_LINE = "nav-access-line";
+    const LAYER_GSM_LOS = "nav-gsm-los-line";
 
     let { data }: Props = $props();
     const trail = $derived(data.trail);
@@ -230,6 +248,54 @@
     let snoozedReportIds = $state<Record<string, boolean>>({});
     let activeRescueSosId = $state<string | null>(null);
     let activeRescueRoute = $state<DirectRescueRouteResult | null>(null);
+    let activeSalvamontTarget = $state<SalvamontPoint | null>(null);
+    let activeSignalTarget = $state<GsmSignalRecommendation | null>(null);
+    let navSalvamontLayer: SalvamontLayer | null = null;
+    const demTileGrid = new DemTileGrid();
+    const sharedDemSampler: Pick<DemTileGrid, "sampleElevation"> = {
+        sampleElevation: (lat, lon) =>
+            customDemSampler
+                ? customDemSampler(lat, lon)
+                : (terrainClient?.sampleElevationSync(lat, lon) ?? demTileGrid.sampleElevation(lat, lon)),
+    };
+    let peakFinderOpen = $state(false);
+    let simulatedTimeMs = $state<number | null>(null);
+    let demEpoch = $state(0);
+    let activeOverlays = $state({ avalancheSlope: false, solarShadows: false });
+    const peakFinder = new OfflinePeakFinder();
+    let currentPanorama = $state<HorizonPanorama | null>(null);
+
+    const solarForecast = $derived.by(() => {
+        void demEpoch;
+        void etaSnapshot;
+        if (!etaCalc || activePoints.length < 2) return null;
+        return computeTrailSolarForecast({
+            points: activePoints,
+            etaCalc,
+            dem: sharedDemSampler,
+            alongTrackM: alongTrackMeters,
+            nowMs: simulatedTimeMs ?? Date.now(),
+            offTrailExtra: reroute
+                ? {
+                      distanceM: reroute.distanceM,
+                      durationSec: reroute.estimatedSeconds,
+                      ascentM: reroute.ascentM,
+                      rejoinAlongTrackM: reroute.rejoinAlongTrackM,
+                  }
+                : null,
+        });
+    });
+
+    function refreshSolarShadowsRasterUrl(tsMs: number) {
+        if (!map) return;
+        const center = map.getCenter();
+        const sun = getSunPosition(tsMs, center.lat, center.lng);
+        const q = setTerrainShadeSunVector(sun.azimuthDeg, sun.altitudeDeg);
+        const src = map.getSource("solarShadows") as
+            | (M.RasterTileSource & { setTiles?: (t: string[]) => void })
+            | undefined;
+        src?.setTiles?.([`terrain-shade://{z}/{x}/{y}?${q}`]);
+    }
     let pushSubscribed = $state(false);
     let pushSupported = $state(false);
     let bottomSheetWrapEl = $state<HTMLDivElement | null>(null);
@@ -657,10 +723,24 @@
                 SRC_REJOIN,
                 SRC_RESCUE,
                 SRC_ACCESS,
+                SRC_GSM_LOS,
             ]) {
                 if (!map.getSource(srcId)) {
                     map.addSource(srcId, { type: "geojson", data: EMPTY_FC });
                 }
+            }
+            if (!map.getLayer(LAYER_GSM_LOS)) {
+                map.addLayer({
+                    id: LAYER_GSM_LOS,
+                    type: "line",
+                    source: SRC_GSM_LOS,
+                    layout: { "line-cap": "round", "line-join": "round" },
+                    paint: {
+                        "line-color": "#0284c7",
+                        "line-width": 3,
+                        "line-dasharray": [2, 2],
+                    },
+                });
             }
 
             if (!map.getLayer(LAYER_WALKED)) {
@@ -943,6 +1023,30 @@
             syncOffTrailLayers(reroute);
             syncAccessRouteLayers(accessRoutePoints);
             syncRescueLayers(activeRescueRoute);
+            const losSrc = map.getSource(SRC_GSM_LOS) as M.GeoJSONSource | undefined;
+            if (losSrc) {
+                const origin = liveUserPos ?? activePoints[0] ?? null;
+                if (activeSignalTarget && origin) {
+                    losSrc.setData({
+                        type: "FeatureCollection",
+                        features: [
+                            {
+                                type: "Feature",
+                                properties: {},
+                                geometry: {
+                                    type: "LineString",
+                                    coordinates: [
+                                        [origin.lon, origin.lat],
+                                        [activeSignalTarget.targetLon, activeSignalTarget.targetLat],
+                                    ],
+                                },
+                            },
+                        ],
+                    });
+                } else {
+                    losSrc.setData(EMPTY_FC);
+                }
+            }
         } catch {
             // Ignore transient map teardown
         }
@@ -1201,6 +1305,45 @@
         });
     }
 
+    async function computeRescueRouteToSalvamont(
+        point: SalvamontPoint,
+    ): Promise<DirectRescueRouteResult | null> {
+        const origin = getEffectiveResponderOrigin();
+        if (!origin) return null;
+        lastRescueCalcPos = { lat: origin.lat, lon: origin.lon };
+        if (terrainClient) {
+            return terrainClient.computeRescueRoute({
+                fromLat: origin.lat,
+                fromLon: origin.lon,
+                fromEle: origin.ele,
+                targetLat: point.lat,
+                targetLon: point.lon,
+                targetEle: point.ele > 0 ? point.ele : 0,
+                mode: offTrailMode,
+                locale: activeLocaleCode(),
+            });
+        }
+        return computeDirectRescueRoute({
+            fromLat: origin.lat,
+            fromLon: origin.lon,
+            fromEle: origin.ele,
+            targetLat: point.lat,
+            targetLon: point.lon,
+            targetEle: point.ele > 0 ? point.ele : 0,
+            trailPoints: activePoints,
+            sampler: activeSampler,
+            mode: offTrailMode,
+            locale: activeLocaleCode(),
+        });
+    }
+
+    async function handleRouteToSalvamont(point: SalvamontPoint) {
+        activeRescueSosId = null;
+        activeSalvamontTarget = point;
+        activeRescueRoute = await computeRescueRouteToSalvamont(point);
+        syncNavGeoJson();
+    }
+
     function ingestSosListWithTone(incomingList: SosAlertDto[]) {
         for (const s of incomingList) {
             if (!s.isMine && s.status === "active" && !alertedSosIds.has(s.id)) {
@@ -1234,9 +1377,20 @@
         }
     }
 
+    function handleShowSignalTarget(rec: GsmSignalRecommendation) {
+        activeSignalTarget = rec;
+        syncNavGeoJson();
+        if (map && rec.status === "climb_recommended") {
+            map.easeTo({ center: [rec.targetLon, rec.targetLat], duration: 400 });
+        }
+    }
+
     async function handleSubmitReport(payload: {
         category: TrailReportCategory;
         note: string;
+        photoBlob?: Blob | null;
+        photoFilename?: string;
+        photoVerified?: boolean;
     }) {
         const origin = getEffectiveResponderOrigin();
         if (!origin) return;
@@ -1255,6 +1409,9 @@
                 lon: origin.lon,
                 ele: origin.ele,
                 alongTrackM: forwardAlongM,
+                photoBlob: payload.photoBlob,
+                photoFilename: payload.photoFilename,
+                photoVerified: payload.photoVerified,
             });
             if (created) {
                 votedReportMap = { ...votedReportMap, [created.id]: "confirm" };
@@ -2127,13 +2284,40 @@
                 attributionControl: false,
             });
 
-            const navLayerManager = new LayerManager(map);
+            registerTerrainIntelProtocols(demTileGrid);
+            const navLayerManager = new LayerManager(map, {
+                salvamontOptions: {
+                    getUserContext: () =>
+                        liveUserPos
+                            ? { lat: liveUserPos.lat, lon: liveUserPos.lon, ele: userEle, mode: "user_gps" }
+                            : activePoints[0]
+                              ? { lat: activePoints[0].lat, lon: activePoints[0].lon, ele: activePoints[0].ele, mode: "trail" }
+                              : null,
+                    onRouteToPoint: handleRouteToSalvamont,
+                    locale: activeLocaleCode(),
+                },
+            });
+            activeOverlays = {
+                avalancheSlope: Boolean(navLayerManager.state.overlays.avalancheSlope),
+                solarShadows: Boolean(navLayerManager.state.overlays.solarShadows),
+            };
             const switcherControl = new StyleSwitcherControl({
                 styles: baseMapStyles,
                 onchange: (nextState) => {
                     const prevBase = navLayerManager.state.base;
                     if (nextState.base !== prevBase) {
                         styleReady = false;
+                    }
+                    activeOverlays = {
+                        avalancheSlope: Boolean(nextState.overlays.avalancheSlope),
+                        solarShadows: Boolean(nextState.overlays.solarShadows),
+                    };
+                    if (nextState.overlays.solarShadows) {
+                        const center = map?.getCenter();
+                        if (center) {
+                            const sun = getSunPosition(simulatedTimeMs ?? Date.now(), center.lat, center.lng);
+                            setTerrainShadeSunVector(sun.azimuthDeg, sun.altitudeDeg);
+                        }
                     }
                     navLayerManager.update(JSON.parse(JSON.stringify(nextState)));
                 },
@@ -2149,10 +2333,23 @@
 
             const onStyleReady = () => {
                 styleReady = true;
-                for (const [ovName, active] of Object.entries(navLayerManager.state.overlays)) {
-                    if (active && !navLayerManager.layers[ovName]) {
-                        navLayerManager.addLayer(ovName, new OverlayLayer(ovName));
+                navLayerManager.syncActiveOverlays({ skipSalvamont: true });
+                if (map && navLayerManager.state.overlays.salvamont) {
+                    if (!navSalvamontLayer) {
+                        navSalvamontLayer = new SalvamontLayer(map, {
+                            getUserContext: () =>
+                                liveUserPos
+                                    ? { lat: liveUserPos.lat, lon: liveUserPos.lon, ele: userEle, mode: "user_gps" }
+                                    : activePoints[0]
+                                      ? { lat: activePoints[0].lat, lon: activePoints[0].lon, ele: activePoints[0].ele, mode: "trail" }
+                                      : null,
+                            onRouteToPoint: handleRouteToSalvamont,
+                            locale: activeLocaleCode(),
+                        });
+                    } else {
+                        navSalvamontLayer.ensureImagesLoaded();
                     }
+                    navLayerManager.addLayer("salvamont", navSalvamontLayer);
                 }
                 routeSourceDirty = true;
                 lastPaintedProgressRatio = -1;
@@ -2454,6 +2651,7 @@
                 ) => {
                     customDemSampler = sampler;
                     terrainClient?.setCustomDemSampler(sampler);
+                    demEpoch++;
                     if (latestFix && matchResult?.isOffTrail && !isFarPreview) {
                         recomputeRerouteForFix(latestFix, matchResult, true);
                     }
@@ -2467,6 +2665,27 @@
                         }
                     }
                     syncNavGeoJson();
+                },
+                setSimulatedTimeMs: (ms: number | null) => {
+                    simulatedTimeMs = ms;
+                    if (activeOverlays.solarShadows) {
+                        refreshSolarShadowsRasterUrl(ms ?? Date.now());
+                    }
+                },
+                injectPeaks: (peaks: PeakEntryDto[]) => {
+                    peakFinder.ingestPeaks(peaks);
+                    if (peakFinderOpen) {
+                        const pos = liveUserPos ?? {
+                            lat: activePoints[0]?.lat ?? 45.44,
+                            lon: activePoints[0]?.lon ?? 25.45,
+                        };
+                        currentPanorama = peakFinder.computePanorama(
+                            sharedDemSampler,
+                            pos.lat,
+                            pos.lon,
+                            userEle,
+                        );
+                    }
                 },
                 injectLiveState: (payload: {
                     activeHikers30m?: number;
@@ -2598,6 +2817,11 @@
             userLat={liveUserPos?.lat ?? null}
             userLon={liveUserPos?.lon ?? null}
             {userEle}
+            userAccuracy={effectiveAccuracyM}
+            demGrid={sharedDemSampler}
+            trailPoints={activePoints}
+            alongTrackM={alongTrackMeters}
+            onShowSignalTarget={handleShowSignalTarget}
             {activeRescueRoute}
             {activeRescueSosId}
             submitting={liveBusy}
@@ -2605,6 +2829,7 @@
             onResolveMySos={handleResolveMySos}
             onRespondSos={handleRespondSos}
             onCancelRespondSos={handleCancelRespondSos}
+            onRouteToSalvamont={handleRouteToSalvamont}
         />
 
         {#if nearbyPromptCandidate}
@@ -2660,6 +2885,40 @@
         class="fixed right-3 z-40 flex flex-col items-end gap-2 pointer-events-none transition-all duration-200"
         style="bottom: calc({floatingBottomPx}px + env(safe-area-inset-bottom, 0px));"
     >
+        <button
+            type="button"
+            data-testid="nav-peak-finder-btn"
+            onclick={() => {
+                const pos = liveUserPos ?? {
+                    lat: activePoints[0]?.lat ?? 45.44,
+                    lon: activePoints[0]?.lon ?? 25.45,
+                };
+                peakFinderOpen = true;
+                currentPanorama = peakFinder.computePanorama(
+                    sharedDemSampler,
+                    pos.lat,
+                    pos.lon,
+                    userEle,
+                );
+                void Promise.all([
+                    demTileGrid.prefetchRadius(pos.lat, pos.lon, 25_000, 36),
+                    peakFinder.ensureLoaded(pos.lat, pos.lon),
+                ]).then(() => {
+                    currentPanorama = peakFinder.computePanorama(
+                        sharedDemSampler,
+                        pos.lat,
+                        pos.lon,
+                        userEle,
+                    );
+                });
+            }}
+            aria-label="Ce vârf văd în față?"
+            title="Ce vârf văd în față?"
+            class="pointer-events-auto h-10 w-10 rounded-full bg-menu-background/94 backdrop-blur-md hover:bg-secondary-hover text-content/85 border border-input-border/60 shadow-md flex items-center justify-center cursor-pointer transition-colors"
+        >
+            <i class="fa-solid fa-mountain-sun text-sm" aria-hidden="true"></i>
+        </button>
+
         <button
             type="button"
             data-testid="nav-group-btn"
@@ -2735,6 +2994,8 @@
     <WazeReportSheet
         bind:open={reportSheetOpen}
         submitting={liveBusy}
+        userLat={liveUserPos?.lat ?? null}
+        userLon={liveUserPos?.lon ?? null}
         onSubmit={handleSubmitReport}
     />
 
@@ -2767,8 +3028,45 @@
             {accessRouteActive}
             onRequestAccessRoute={handleRequestAccessRoute}
             {groupMembers}
+            {solarForecast}
         />
     </div>
+
+    {#if activeOverlays.avalancheSlope || activeOverlays.solarShadows}
+        <div
+            class="fixed left-3 z-35 flex flex-col gap-2 pointer-events-none"
+            style="top: calc(5.25rem + env(safe-area-inset-top, 0px));"
+        >
+            {#if activeOverlays.avalancheSlope}
+                <SlopeLegendPill />
+            {/if}
+            {#if activeOverlays.solarShadows}
+                <SolarTimeScrubber
+                    lat={liveUserPos?.lat ?? activePoints[0]?.lat ?? 45.44}
+                    lon={liveUserPos?.lon ?? activePoints[0]?.lon ?? 25.45}
+                    simulatedTimeMs={simulatedTimeMs ?? Date.now()}
+                    onChange={(nextMs) => {
+                        simulatedTimeMs = nextMs;
+                        refreshSolarShadowsRasterUrl(nextMs);
+                    }}
+                />
+            {/if}
+        </div>
+    {/if}
+
+    <PeakFinderSheet
+        bind:open={peakFinderOpen}
+        panorama={currentPanorama}
+        compassHeadingDeg={deviceHeading}
+        finder={peakFinder}
+        nowMs={simulatedTimeMs ?? Date.now()}
+        onClose={() => (peakFinderOpen = false)}
+        onSelectPeakOnMap={(peak) => {
+            peakFinderOpen = false;
+            isFollowing = false;
+            map?.easeTo({ center: [peak.lon, peak.lat], zoom: 13.5, duration: 500 });
+        }}
+    />
 </main>
 
 <style>

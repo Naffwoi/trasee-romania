@@ -2,7 +2,7 @@
     import type { StyleSwitcherControlOptions } from "#lib/vendor/maplibre-style-switcher/style-switcher-control.ts";
     import { _ } from "svelte-i18n";
     import RadioGroup, { type RadioItem } from "../base/radio_group.svelte";
-    import { defaultMapState } from "#lib/vendor/maplibre-layer-manager/layers.ts";
+    import { defaultMapState, type OverlayName } from "#lib/vendor/maplibre-layer-manager/layers.ts";
     import { onDestroy, onMount, untrack } from "svelte";
 
     interface Props {
@@ -12,6 +12,11 @@
     let { settings }: Props = $props();
 
     let mapState = $state(untrack(() => settings.state));
+
+    const recentSatelliteDates: string[] = Array.from({ length: 7 }, (_, idx) => {
+        const d = new Date(Date.now() - (idx + 1) * 86_400_000);
+        return d.toISOString().slice(0, 10);
+    });
 
     let container: HTMLDivElement;
 
@@ -91,7 +96,7 @@
 
     <div
         data-testid="style-switcher-menu"
-        class="absolute right-0 top-full bg-menu-background text-content rounded-2xl px-4 py-3 mt-2 shadow-2xl border border-input-border/60 space-y-3 max-h-96 overflow-y-auto min-w-52 z-50"
+        class="absolute right-0 top-full bg-menu-background/94 backdrop-blur-md text-content rounded-2xl px-4 py-3 mt-2 shadow-[0_4px_20px_rgba(0,0,0,0.10)] border border-input-border/60 space-y-3 max-h-96 overflow-y-auto min-w-56 z-50"
         class:hidden={!showSwitcher}
     >
         <div class="flex items-center justify-between gap-2">
@@ -119,11 +124,12 @@
             >{$_("layer", { values: { n: 2 } })}</span
         >
         {#each Object.keys(defaultMapState.overlays) as overlay}
+            {@const ovKey = overlay as OverlayName}
             <div class="flex items-center mt-1.5 mb-2.5">
                 <input
                     id="{overlay}-layer-checkbox"
                     type="checkbox"
-                    bind:checked={mapState.overlays[overlay]}
+                    bind:checked={mapState.overlays[ovKey]}
                     class="w-4 h-4 bg-input-background accent-primary border-input-border focus:ring-input-ring focus:ring-2"
                     onchange={() => {
                         settings.onchange(mapState);
@@ -135,6 +141,28 @@
                 >
             </div>
         {/each}
+        {#if mapState.overlays.snowCover || mapState.overlays.dailySatellite}
+            <div class="pt-1 pb-2 space-y-1">
+                <label for="satellite-pass-date" class="block text-xs font-medium text-content/75">
+                    {$_("satellite-pass-date")}
+                </label>
+                <select
+                    id="satellite-pass-date"
+                    data-testid="satellite-pass-date-select"
+                    class="w-full rounded-lg border border-input-border bg-input-background px-2 py-1 text-xs text-content"
+                    value={mapState.satelliteDate ?? "default"}
+                    onchange={(e) => {
+                        mapState.satelliteDate = (e.currentTarget as HTMLSelectElement).value;
+                        settings.onchange(mapState);
+                    }}
+                >
+                    <option value="default">{$_("satellite-latest-pass")}</option>
+                    {#each recentSatelliteDates as iso (iso)}
+                        <option value={iso}>{iso}</option>
+                    {/each}
+                </select>
+            </div>
+        {/if}
         <hr class="border-input-border" />
         <p class="font-semibold whitespace-nowrap text-sm">{$_("pois")}</p>
         {#each Object.entries(defaultMapState.pois) as [category, pois]}

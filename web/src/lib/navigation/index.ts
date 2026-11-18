@@ -56,3 +56,32 @@ export {
 	type MapLibreFeatureQueryable,
 	type HybridOffTrailRerouteParams,
 } from "./hybrid_rejoin_router";
+export {
+	getSunPosition,
+	getSunTimes,
+	astroRefractionRad,
+	type SunPosition,
+	type SunTimes,
+} from "./sun_calc";
+export {
+	avalancheSlopeColorRgba,
+	sampleSlopeAndAspect,
+	renderAvalancheSlopeTileRgba,
+	renderCastShadowTileRgba,
+	type SlopeAspectSample,
+} from "./slope_aspect";
+export {
+	CURVATURE_REFRACTION_COEFF,
+	computeHorizonAngleDeg,
+	computeLocalRidgeSunset,
+	computeTrailSolarForecast,
+	type LightSafetyStatus,
+	type RidgeSunsetResult,
+	type TrailSolarForecast,
+} from "./ridge_sunset_calculator";
+export {
+	OfflinePeakFinder,
+	type PeakEntryDto,
+	type VisiblePeakResult,
+	type HorizonPanorama,
+} from "./peak_finder_engine";

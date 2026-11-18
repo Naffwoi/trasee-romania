@@ -63,6 +63,25 @@ function buildReportPopupDom(
 		root.appendChild(noteEl);
 	}
 
+	if (report.photoVerified) {
+		const badgeEl = document.createElement("div");
+		badgeEl.setAttribute("data-testid", "report-photo-verified-badge");
+		badgeEl.style.cssText =
+			"margin-top:5px;display:inline-block;padding:2px 7px;border-radius:9999px;background:rgba(16,185,129,0.14);color:#047857;font-size:10.5px;font-weight:700;";
+		badgeEl.textContent = "✓ Foto verificată la fața locului";
+		root.appendChild(badgeEl);
+	}
+
+	if (report.photoThumbUrl) {
+		const imgEl = document.createElement("img");
+		imgEl.src = report.photoThumbUrl;
+		imgEl.loading = "lazy";
+		imgEl.alt = meta.labelRo;
+		imgEl.style.cssText =
+			"margin-top:6px;width:100%;max-height:130px;object-fit:cover;border-radius:8px;border:1px solid #e2e8f0;";
+		root.appendChild(imgEl);
+	}
+
 	if (onVote) {
 		const actions = document.createElement("div");
 		actions.style.cssText = "margin-top:8px;display:flex;gap:5px;flex-wrap:wrap;";

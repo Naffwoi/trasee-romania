@@ -123,6 +123,10 @@ export class EtaCalculator {
 		return this.paceFactor;
 	}
 
+	baseSecondsAt(alongM: number): number {
+		return this.interpolateCumulative(this.cumBaseSeconds, alongM);
+	}
+
 	constructor(points: NavTrackPoint[], options?: EtaCalculatorOptions) {
 		this.points = points;
 		const isCycling = options?.isCycling ?? false;

@@ -421,7 +421,7 @@
     }
     function resetDraft() {
         resetBounds = true;
-        draft = { ...toDraft(defaults), q: "", category: [], subcategory: [], author: "", near: { radius: defaults.near.radius } };
+        draft = { ...toDraft(defaults), q: "", category: [], subcategory: [], author: "", trainAccessible: false, near: { radius: defaults.near.radius } };
         activeCategoryId = null;
     }
     function compactRange(min: number, max: number, limit: number, format: (value: number) => string) {
@@ -472,9 +472,11 @@
         if (value.startDate || value.endDate) chips.push({ key: "date", label: `${$_("date")}: ${value.startDate ?? "…"} – ${value.endDate ?? "…"}`, text: compactDates(value) });
         if (value.liked) chips.push({ key: "liked", label: $_("liked"), text: "" });
         if (value.completed !== undefined) chips.push({ key: "completed", label: value.completed ? $_("completed") : $_("not-completed") });
+        if (value.trainAccessible) chips.push({ key: "trainAccessible", label: "Cu trenul", text: "" });
         return chips;
     }
     function appliedIcon(key: string) {
+        if (key === "trainAccessible") return "fa-train";
         if (key.startsWith("category:")) {
             return displayCategoryIcon(categories.find(category => category.id === key.slice(9)));
         }
@@ -504,6 +506,7 @@
             case "date": next.startDate = undefined; next.endDate = undefined; break;
             case "liked": next.liked = false; break;
             case "completed": next.completed = undefined; break;
+            case "trainAccessible": next.trainAccessible = false; break;
         }
         publishFilter(next);
         if (expanded) {
@@ -639,6 +642,28 @@
                 oncompositionstart={() => composing = true}
                 oncompositionend={(event) => { composing = false; updateQuery(event); }}
                 aria-controls={expanded ? `${id}-panel ${id}-shortcuts ${id}-suggestions` : `${id}-panel`} />
+            {#if !mobilePill}
+                <button
+                    type="button"
+                    data-testid="filter-train-accessible"
+                    aria-pressed={Boolean((expanded ? draft : filter).trainAccessible)}
+                    onclick={(e) => {
+                        e.stopPropagation();
+                        const next = toDraft(expanded ? draft : filter);
+                        next.trainAccessible = !next.trainAccessible;
+                        draft = next;
+                        publishFilter(next);
+                    }}
+                    class={`px-2.5 py-1 rounded-full text-xs font-semibold inline-flex items-center gap-1.5 shrink-0 border transition-colors ${
+                        (expanded ? draft : filter).trainAccessible
+                            ? "bg-[#242734] text-white border-[#242734]"
+                            : "bg-content/[0.05] hover:bg-content/[0.1] text-content/85 border-input-border/70"
+                    }`}
+                >
+                    <i class="fa fa-train text-[11px]" aria-hidden="true"></i>
+                    <span>Cu trenul</span>
+                </button>
+            {/if}
             {#if resetEnabled}
             <button type="button" class="btn-icon icon-button reset-button"
                 aria-label={$_("trail-search-reset")} title={$_("trail-search-reset")} onclick={resetSearch}>

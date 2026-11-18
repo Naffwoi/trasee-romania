@@ -1,5 +1,6 @@
 <script lang="ts">
     import ActiveHikersBadge from "#lib/components/trail/active_hikers_badge.svelte";
+    import { getSalvamontDataset } from "#lib/emergency/salvamont_resolver.ts";
     import {
         getReportCategoryMeta,
         isReportVisibleOnMap,
@@ -11,6 +12,7 @@
         EtaSnapshot,
         NavTrackPoint,
         OffTrailRerouteResult,
+        TrailSolarForecast,
     } from "#lib/navigation/index.ts";
     import type { DirectRescueRouteResult } from "#lib/navigation/off_trail_router.ts";
     import { theme } from "#lib/stores/theme_store.ts";
@@ -41,6 +43,7 @@
         accessRouteActive?: boolean;
         onRequestAccessRoute?: () => void;
         groupMembers?: GroupMemberDto[];
+        solarForecast?: TrailSolarForecast | null;
     }
 
     let {
@@ -67,6 +70,7 @@
         accessRouteActive = false,
         onRequestAccessRoute,
         groupMembers = [],
+        solarForecast = null,
     }: Props = $props();
 
     let chartZoom = $state<"2km" | "full">("2km");
@@ -530,6 +534,25 @@
                   : "rgba(37, 99, 235, 0.10)";
             ctx.fill();
 
+            if (!rescueActive && solarForecast?.ridgeShadeAlongM != null) {
+                const shadeStart = Math.max(minDistM, solarForecast.ridgeShadeAlongM);
+                if (shadeStart < maxDistM) {
+                    ctx.save();
+                    ctx.fillStyle = "rgba(30, 41, 59, 0.16)";
+                    ctx.fillRect(toX(shadeStart), padTop, toX(maxDistM) - toX(shadeStart), plotH);
+                    ctx.restore();
+                }
+            }
+            if (!rescueActive && solarForecast?.civilDuskAlongM != null) {
+                const duskStart = Math.max(minDistM, solarForecast.civilDuskAlongM);
+                if (duskStart < maxDistM) {
+                    ctx.save();
+                    ctx.fillStyle = "rgba(15, 23, 42, 0.28)";
+                    ctx.fillRect(toX(duskStart), padTop, toX(maxDistM) - toX(duskStart), plotH);
+                    ctx.restore();
+                }
+            }
+
             ctx.lineWidth = 3;
             ctx.lineCap = "round";
             ctx.lineJoin = "round";
@@ -679,6 +702,57 @@
             }
         }
         reportPinsOverlay = nextReportPins;
+
+        // 3b-salvamont. Salvamont bases & refuges within 300 m of the trail
+        if (!rescueActive && pts.length >= 2) {
+            const salvamontPts = getSalvamontDataset().points;
+            for (const sp of salvamontPts) {
+                let bestDistSq = Infinity;
+                let bestIdx = -1;
+                const cosLat = Math.cos((sp.lat * Math.PI) / 180);
+                for (let i = 0; i < pts.length; i++) {
+                    const dy = (pts[i].lat - sp.lat) * 111132;
+                    const dx = (pts[i].lon - sp.lon) * 111132 * cosLat;
+                    const d2 = dx * dx + dy * dy;
+                    if (d2 < bestDistSq) {
+                        bestDistSq = d2;
+                        bestIdx = i;
+                    }
+                }
+                if (bestIdx < 0 || bestDistSq > 300 * 300) continue;
+                const dAlong = pts[bestIdx].distanceM;
+                if (dAlong < minDistM || dAlong > maxDistM) continue;
+                const sx = toX(dAlong);
+                const sy = toY(interpolateElevationAt(pts, dAlong));
+                const badgeY = Math.max(12, sy - 16);
+
+                ctx.save();
+                ctx.strokeStyle = "#242734";
+                ctx.lineWidth = 1.5;
+                ctx.beginPath();
+                ctx.moveTo(sx, sy);
+                ctx.lineTo(sx, badgeY + 6);
+                ctx.stroke();
+
+                ctx.fillStyle = "#242734";
+                ctx.strokeStyle = "#ffffff";
+                ctx.lineWidth = 1.5;
+                ctx.beginPath();
+                ctx.roundRect(sx - 6, badgeY - 6, 12, 12, 3);
+                ctx.fill();
+                ctx.stroke();
+
+                ctx.strokeStyle = "#ffffff";
+                ctx.lineWidth = 1.8;
+                ctx.beginPath();
+                ctx.moveTo(sx, badgeY - 3);
+                ctx.lineTo(sx, badgeY + 3);
+                ctx.moveTo(sx - 3, badgeY);
+                ctx.lineTo(sx + 3, badgeY);
+                ctx.stroke();
+                ctx.restore();
+            }
+        }
 
         // 3b-group. Live Group Friends along the elevation profile
         const nextGroupPins: Array<{
@@ -1061,6 +1135,18 @@
                                 {$_("nav-next-peak", { default: "Next peak" })}:
                                 {formatElevation(Math.round(eta.nextPeak.ele))}
                                 ({formatDistance(Math.round(eta.nextPeak.distanceAheadM), { compact: true })})
+                            </span>
+                        </span>
+                    {/if}
+                    {#if solarForecast && solarForecast.status !== "daylight_safe"}
+                        <span
+                            data-testid="nav-ridge-sunset-badge"
+                            class="inline-flex items-center gap-1 rounded-full bg-amber-500/15 text-amber-700 dark:text-amber-300 px-2.5 py-0.5 text-[11px] font-bold tabular-nums"
+                        >
+                            <span>
+                                {solarForecast.status === "ridge_shade"
+                                    ? `Umbră în vale de la ${new Date(solarForecast.ridgeShadeTimeMs ?? Date.now()).toLocaleTimeString("ro-RO", { hour: "2-digit", minute: "2-digit" })}`
+                                    : `Frontală necesară · apus creastă ${new Date(solarForecast.finishRidgeSunset.ridgeSunsetMs ?? Date.now()).toLocaleTimeString("ro-RO", { hour: "2-digit", minute: "2-digit" })}`}
                             </span>
                         </span>
                     {/if}

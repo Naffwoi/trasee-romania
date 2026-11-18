@@ -217,6 +217,15 @@
                         trail.difficulty ?? "?",
                     )}
                 </p>
+                {#if trail.train_accessible && trail.rail_station_name}
+                    <span
+                        data-testid="trail-card-rail-badge"
+                        class="inline-flex items-center gap-1 rounded-full bg-content/[0.07] px-2 py-0.5 text-xs text-content/85"
+                    >
+                        <i class="fa fa-train text-[10px]" aria-hidden="true"></i>
+                        <span>{trail.rail_station_name}</span>
+                    </span>
+                {/if}
             </div>
         </div>
         <div

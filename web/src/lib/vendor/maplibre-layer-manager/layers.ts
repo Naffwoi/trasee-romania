@@ -28,6 +28,12 @@ import Ferry from "#lib/assets/svgs/pois/ferry.svg?raw"
 import Picnic from "#lib/assets/svgs/pois/picnic.svg?raw"
 
 import type { FilterSpecification, MapMouseEvent, Marker, StyleSpecification } from "maplibre-gl"
+import {
+    buildGibsSnowOverlaySpec,
+    buildGibsTrueColorOverlaySpec,
+    buildGfwDisturbanceOverlaySpec,
+    buildHybridSatelliteStyle,
+} from "#lib/map/dynamic_raster_overlays.ts"
 
 export interface BaseLayer {
     markers?: Record<string, Marker>,
@@ -113,7 +119,32 @@ export const baseMapStyles: Record<string, string | StyleSpecification> = {
         ],
     },
     "Carto Light": "https://basemaps.cartocdn.com/gl/positron-gl-style/style.json",
-    "Carto Dark": "https://basemaps.cartocdn.com/gl/dark-matter-gl-style/style.json"
+    "Carto Dark": "https://basemaps.cartocdn.com/gl/dark-matter-gl-style/style.json",
+    "Satelit (Esri HD)": buildHybridSatelliteStyle(
+        "esriWorldImagery",
+        ["https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}"],
+        18,
+        "Source: Esri, Maxar, Earthstar Geographics, and the GIS User Community",
+    ),
+    "Sentinel-2 Fără Nori": buildHybridSatelliteStyle(
+        "eoxSentinel2Cloudless",
+        ["https://tiles.maps.eox.at/wmts/1.0.0/s2cloudless-2025_3857/default/g/{z}/{y}/{x}.jpg"],
+        15,
+        'Sentinel-2 cloudless - <a href="https://s2maps.eu" target="_blank">s2maps.eu</a> by EOX IT Services GmbH (Contains modified Copernicus Sentinel data 2025)',
+    ),
+}
+
+export function enableAncpiOrthoBaseStyle(available: boolean): void {
+    if (available) {
+        baseMapStyles["Ortofoto ANCPI (RO)"] = buildHybridSatelliteStyle(
+            "ancpiOrthoRo",
+            ["/api/v1/map/ancpi-ortho/{z}/{x}/{y}"],
+            19,
+            '&copy; <a href="https://www.ancpi.ro" target="_blank">ANCPI România</a>',
+        );
+    } else {
+        delete baseMapStyles["Ortofoto ANCPI (RO)"];
+    }
 }
 
 export const overlays: Record<string, StyleSpecification> = {
@@ -202,7 +233,66 @@ export const overlays: Record<string, StyleSpecification> = {
                 source: 'waymarkedTrailsWinter',
             },
         ],
-    }
+    },
+    avalancheSlope: {
+        name: "avalancheSlope",
+        version: 8,
+        sources: {
+            avalancheSlope: {
+                type: "raster",
+                tiles: ["terrain-slope://{z}/{x}/{y}"],
+                tileSize: 256,
+                minzoom: 12,
+                maxzoom: 13,
+                attribution: '&copy; <a href="https://mapterhorn.com/attribution" target="_blank">Mapterhorn</a>',
+            },
+        },
+        layers: [
+            {
+                id: "avalancheSlope",
+                type: "raster",
+                source: "avalancheSlope",
+                paint: {
+                    "raster-opacity": 0.62,
+                    "raster-resampling": "linear",
+                },
+            },
+        ],
+    },
+    solarShadows: {
+        name: "solarShadows",
+        version: 8,
+        sources: {
+            solarShadows: {
+                type: "raster",
+                tiles: ["terrain-shade://{z}/{x}/{y}"],
+                tileSize: 256,
+                minzoom: 12,
+                maxzoom: 13,
+                attribution: '&copy; <a href="https://mapterhorn.com/attribution" target="_blank">Mapterhorn</a>',
+            },
+        },
+        layers: [
+            {
+                id: "solarShadows",
+                type: "raster",
+                source: "solarShadows",
+                paint: {
+                    "raster-opacity": 0.78,
+                    "raster-resampling": "linear",
+                },
+            },
+        ],
+    },
+    snowCover: buildGibsSnowOverlaySpec("default"),
+    dailySatellite: buildGibsTrueColorOverlaySpec("default"),
+    weatherRadar: {
+        version: 8,
+        name: "rainViewerRadarPlaceholder",
+        sources: {},
+        layers: [],
+    },
+    forestDisturbance: buildGfwDisturbanceOverlaySpec(),
 }
 
 export type POI = {
@@ -494,20 +584,31 @@ export const pois: Record<string, POI> = {
 };
 
 
+export type OverlayName = keyof typeof overlays | "salvamont";
+
 export type MapState = {
     base: keyof typeof baseMapStyles,
-    overlays: { [K in keyof typeof overlays]: boolean }
-    pois: Record<string, Record<string, boolean>>
+    overlays: Record<OverlayName, boolean>,
+    pois: Record<string, Record<string, boolean>>,
+    satelliteDate?: string
 }
 
 export const defaultMapState: MapState = {
     base: "OpenFreeMap",
     overlays: {
+        salvamont: true,
         hiking: false,
         cycling: false,
         MTB: false,
         skiing: false,
+        avalancheSlope: false,
+        solarShadows: false,
+        snowCover: false,
+        dailySatellite: false,
+        weatherRadar: false,
+        forestDisturbance: false,
     },
+    satelliteDate: "default",
     pois: {
         food: {
             "food-drinks": false,

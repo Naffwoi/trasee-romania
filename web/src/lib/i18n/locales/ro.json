@@ -294,6 +294,7 @@
   "hero_section_1_text_alternative": "Începe prin a-ți salva cea mai recentă aventură.",
   "hero_section_2_text": "Știai că? Nu poți salva doar trasee de drumeție. Există numeroase categorii pentru toate aventurile tale.",
   "hiking": "Drumeție",
+  "salvamont": "Baze și refugii Salvamont",
   "home": "Acasă",
   "hotel": "Hotel",
   "hungarian": "Maghiară",
@@ -827,5 +828,13 @@
   "nav-no-gpx": "Acest traseu nu are o rută GPX pentru navigare.",
   "nav-arrived": "Ai ajuns la destinație",
   "nav-switch-3d": "3D",
-  "nav-switch-2d": "2D"
+  "nav-switch-2d": "2D",
+  "avalancheSlope": "Pantă avalanșă (>27°)",
+  "solarShadows": "Umbre solare",
+  "snowCover": "Strat de zăpadă satelit (NASA)",
+  "dailySatellite": "Satelit zilnic (fără nori / azi)",
+  "weatherRadar": "Radar precipitații live",
+  "forestDisturbance": "Doborâturi / tăieri recente (GFW)",
+  "satellite-pass-date": "Data pasajului satelitar",
+  "satellite-latest-pass": "Ultimul pasaj disponibil"
 }

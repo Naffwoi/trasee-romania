@@ -742,6 +742,10 @@ export async function searchResultToTrailList(hits: Hits<TrailSearchResult>): Pr
             gpx: h.gpx,
             polyline: h.polyline,
             bounding_box_diagonal: h.bounding_box_diagonal ?? 0,
+            train_accessible: h.train_accessible,
+            rail_station_name: h.rail_station_name,
+            rail_station_distance_m: h.rail_station_distance_m,
+            is_water_gorge: h.is_water_gorge,
             domain: h.domain,
             iri: h.iri,
             thumbnail: 0,
@@ -891,6 +895,8 @@ export function buildFilterText(user: AuthRecord, filter: TrailFilter, includeGe
         filterText += ` AND completed = ${filter.completed}`;
     }
 
+    filterText += buildTrailTrainFilterClause(filter.trainAccessible);
+
     if (includeGeo
         && typeof filter.near.lat === "number" && Number.isFinite(filter.near.lat)
         && Math.abs(filter.near.lat) <= 90
@@ -901,6 +907,10 @@ export function buildFilterText(user: AuthRecord, filter: TrailFilter, includeGe
     }
 
     return filterText
+}
+
+export function buildTrailTrainFilterClause(trainAccessible?: boolean): string {
+    return trainAccessible === true ? " AND train_accessible = true" : "";
 }
 
 function compareObjectArrays<T extends { id?: string }>(oldArray: T[], newArray: T[]) {

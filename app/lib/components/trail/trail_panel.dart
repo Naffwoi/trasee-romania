@@ -29,6 +29,7 @@ import 'package:wanderer/provider/local_settings_provider.dart';
 import 'package:wanderer/components/trail/trail_category_label.dart';
 import 'package:wanderer/util/format.dart';
 import 'package:wanderer/util/gpx/conversion.dart';
+import 'package:wanderer/util/trail/curated_carpathian_photos.dart';
 import 'package:wanderer/util/trail/route_location.dart';
 
 /// Identity-keyed memo for [computeTrailMetrics] — a full pass over every
@@ -72,8 +73,22 @@ class TrailPanel extends ConsumerWidget {
     final isSkeleton = Skeletonizer.maybeOf(context)?.enabled ?? false;
 
     final webPhotos = trail.photos
-        .map((p) => trail.getFileUrl(user?.serverUrl ?? '', p, thumb: '1200x0') ?? '')
+        .where((p) => !isPlaceholderPhotoName(p))
+        .map(
+          (p) => trail.getFileUrl(user?.serverUrl ?? '', p, thumb: '1200x0') ?? '',
+        )
+        .where((u) => u.isNotEmpty)
         .toList();
+
+    final curatedPhoto =
+        (trail.localPhotos.isEmpty && webPhotos.isEmpty && !isSkeleton)
+        ? resolveCuratedCarpathianPhoto(
+            name: trail.name,
+            location: trail.location,
+            lat: trail.lat,
+            lon: trail.lon,
+          )
+        : null;
 
     final metrics = trail.expand?.gpx == null
         ? null
@@ -167,6 +182,12 @@ class TrailPanel extends ConsumerWidget {
                       child: TrailMap(
                         trail: trail,
                         disabled: true,
+                        initialCameraFitPadding: const EdgeInsets.fromLTRB(
+                          48,
+                          52,
+                          48,
+                          36,
+                        ),
                         // Inside a SingleChildScrollView — picks the
                         // texture-layer composition mode so the native
                         // surface scrolls in sync with the rest of the
@@ -256,8 +277,60 @@ class TrailPanel extends ConsumerWidget {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            if (trail.localPhotos.isEmpty && webPhotos.isEmpty)
-              const SizedBox(height: kToolbarHeight + 16),
+            if (trail.localPhotos.isEmpty && webPhotos.isEmpty) ...[
+              if (curatedPhoto != null)
+                Stack(
+                  children: [
+                    Image.asset(
+                      curatedPhoto.assetPath,
+                      width: double.infinity,
+                      height: 220,
+                      fit: BoxFit.cover,
+                    ),
+                    Positioned(
+                      top: 0,
+                      left: 0,
+                      right: 0,
+                      height: kToolbarHeight + 24,
+                      child: const IgnorePointer(
+                        child: DecoratedBox(
+                          decoration: BoxDecoration(
+                            gradient: LinearGradient(
+                              begin: Alignment.topCenter,
+                              end: Alignment.bottomCenter,
+                              colors: [Color(0x59000000), Colors.transparent],
+                            ),
+                          ),
+                        ),
+                      ),
+                    ),
+                    Positioned(
+                      right: 12,
+                      bottom: 10,
+                      child: Container(
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 8,
+                          vertical: 4,
+                        ),
+                        decoration: BoxDecoration(
+                          color: const Color(0x99242734),
+                          borderRadius: BorderRadius.circular(8),
+                        ),
+                        child: Text(
+                          curatedPhoto.caption,
+                          style: const TextStyle(
+                            color: Colors.white,
+                            fontSize: 10.5,
+                            fontWeight: FontWeight.w600,
+                          ),
+                        ),
+                      ),
+                    ),
+                  ],
+                )
+              else
+                const SizedBox(height: kToolbarHeight + 16),
+            ],
             if (trail.localPhotos.isNotEmpty || webPhotos.isNotEmpty)
               PhotoCollage(
                 webPhotos: webPhotos,

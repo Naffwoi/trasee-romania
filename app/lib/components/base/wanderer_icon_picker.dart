@@ -33,6 +33,7 @@ class WandererIconPicker extends FormBuilderField<FaIconData> {
            Future<void> openPicker() async {
              final selected = await showModalBottomSheet<FaIconData>(
                context: field.context,
+               useRootNavigator: true,
                isScrollControlled: true,
                showDragHandle: true,
                builder: (_) => _IconPickerSheet(selected: icon),

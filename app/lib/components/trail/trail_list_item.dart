@@ -12,10 +12,13 @@ import 'package:wanderer/components/trail/stat_chip.dart';
 import 'package:wanderer/components/trail/sync_status_chip.dart';
 import 'package:wanderer/components/trail/trail_category_label.dart';
 import 'package:wanderer/i18n/app_localizations.dart';
+import 'package:wanderer/models/global_search_models.dart';
+import 'package:wanderer/models/trail.dart';
 import 'package:wanderer/models/trail_summary.dart';
 import 'package:wanderer/provider/auth_provider.dart';
 import 'package:wanderer/provider/local_settings_provider.dart';
 import 'package:wanderer/util/format.dart';
+import 'package:wanderer/util/trail/curated_carpathian_photos.dart';
 
 class TrailListItem extends ConsumerWidget {
   final TrailSummary trail;
@@ -47,6 +50,20 @@ class TrailListItem extends ConsumerWidget {
           )
         : null;
 
+    final String? curatedAssetPath =
+        (localFile == null && isPlaceholderPhotoName(trail.summaryThumbnail))
+        ? resolveCuratedCarpathianPhoto(
+            name: trail.name,
+            location: trail.location,
+            lat: trail is TrailSearchResult
+                ? (trail as TrailSearchResult).geo.lat
+                : (trail is Trail ? (trail as Trail).lat : null),
+            lon: trail is TrailSearchResult
+                ? (trail as TrailSearchResult).geo.lng
+                : (trail is Trail ? (trail as Trail).lon : null),
+          )?.assetPath
+        : null;
+
     final String locale = Localizations.localeOf(context).toString();
 
     return Container(
@@ -75,6 +92,7 @@ class TrailListItem extends ConsumerWidget {
                   _Thumbnail(
                     localFile: localFile,
                     networkUrl: networkUrl,
+                    curatedAssetPath: curatedAssetPath,
                     trail: trail,
                   ),
 
@@ -230,11 +248,13 @@ class TrailListItem extends ConsumerWidget {
 class _Thumbnail extends StatelessWidget {
   final String? localFile;
   final String? networkUrl;
+  final String? curatedAssetPath;
   final TrailSummary trail;
 
   const _Thumbnail({
     required this.localFile,
     required this.networkUrl,
+    this.curatedAssetPath,
     required this.trail,
   });
 
@@ -247,6 +267,8 @@ class _Thumbnail extends StatelessWidget {
         height: 90,
         child: localFile != null
             ? WandererPhoto.file(localFile!, errorBuilder: _placeholder)
+            : curatedAssetPath != null
+            ? Image.asset(curatedAssetPath!, fit: BoxFit.cover)
             : networkUrl != null
             ? WandererPhoto.network(networkUrl!, errorBuilder: _placeholder)
             : _placeholder(context),
@@ -385,10 +407,11 @@ class _StatsRow extends StatelessWidget {
           icon: FontAwesomeIcons.arrowTrendUp,
           label: formatElevation(trail.elevationGain, unit: unit),
         ),
-        StatChip(
-          icon: FontAwesomeIcons.arrowTrendDown,
-          label: formatElevation(trail.elevationLoss, unit: unit),
-        ),
+        if (trail.elevationLoss > 0)
+          StatChip(
+            icon: FontAwesomeIcons.arrowTrendDown,
+            label: formatElevation(trail.elevationLoss, unit: unit),
+          ),
       ],
     );
   }

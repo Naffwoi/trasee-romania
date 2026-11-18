@@ -1,4 +1,5 @@
 <script lang="ts">
+    import { browser } from "$app/env";
     import {
         normalizeGroupCode,
         type GroupMemberDto,
@@ -13,6 +14,8 @@
         groupSession: GroupSessionDto | null;
         busy?: boolean;
         initialDisplayName?: string;
+        initialTrailName?: string;
+        initialJoinCode?: string;
         selfLat?: number | null;
         selfLon?: number | null;
         selfAlongTrackM?: number | null;
@@ -28,6 +31,8 @@
         groupSession,
         busy = false,
         initialDisplayName = "",
+        initialTrailName = "",
+        initialJoinCode = "",
         selfLat = null,
         selfLon = null,
         selfAlongTrackM = null,
@@ -38,14 +43,62 @@
         onFocusMember,
     }: Props = $props();
 
+    let dialogEl = $state<HTMLDialogElement | undefined>();
+    let activeTab = $state<"live" | "plan">("live");
     let nameInput = $state("");
     let codeInput = $state("");
+    let planTrailInput = $state("");
+    let planDateInput = $state("");
+    let planTimeInput = $state("08:30");
+    let planMeetingInput = $state("");
     let copied = $state(false);
+    let planCopied = $state(false);
     let copyResetTimer: ReturnType<typeof setTimeout> | null = null;
+
+    function generatePlanCode(): string {
+        const alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+        let out = "";
+        for (let i = 0; i < 6; i++) {
+            out += alphabet[Math.floor(Math.random() * alphabet.length)];
+        }
+        return out;
+    }
+    const planFallbackCode = generatePlanCode();
+
+    $effect(() => {
+        if (!browser) return;
+        if (open && dialogEl && !dialogEl.open) {
+            try {
+                dialogEl.showModal?.();
+            } catch {
+                // Non-fatal in DOM test shims without full showModal support
+            }
+        }
+    });
 
     $effect(() => {
         if (initialDisplayName && !nameInput) {
             nameInput = initialDisplayName.slice(0, 24);
+        }
+    });
+
+    $effect(() => {
+        if (initialTrailName && !planTrailInput) {
+            planTrailInput = initialTrailName;
+        }
+    });
+
+    $effect(() => {
+        const seedCode = normalizeGroupCode(initialJoinCode);
+        if (open && seedCode && !codeInput) {
+            codeInput = seedCode;
+        }
+    });
+
+    $effect(() => {
+        if (!planDateInput) {
+            const tomorrow = new Date(Date.now() + 86_400_000);
+            planDateInput = tomorrow.toISOString().slice(0, 10);
         }
     });
 
@@ -147,6 +200,41 @@
         }
     }
 
+    async function handlePlanShare() {
+        const code = groupSession?.code ?? planFallbackCode;
+        const link = buildShareUrl(code);
+        const lines = [
+            `Invitație drumeție${planTrailInput.trim() ? `: ${planTrailInput.trim()}` : ""}`,
+            `Când: ${planDateInput} la ${planTimeInput}`,
+            planMeetingInput.trim() ? `Întâlnire: ${planMeetingInput.trim()}` : "",
+            `Cod grup live: ${code}`,
+            link.startsWith("http") ? `Link: ${link}` : "",
+        ].filter(Boolean);
+        const payload = lines.join("\n");
+        try {
+            if (typeof navigator !== "undefined" && typeof navigator.share === "function") {
+                await navigator.share({
+                    title: `Invitație tură${planTrailInput.trim() ? ` · ${planTrailInput.trim()}` : ""}`,
+                    text: payload,
+                });
+                return;
+            }
+        } catch {
+            // Fall through to clipboard copy
+        }
+        try {
+            if (typeof navigator !== "undefined" && navigator.clipboard?.writeText) {
+                await navigator.clipboard.writeText(payload);
+                planCopied = true;
+                setTimeout(() => {
+                    planCopied = false;
+                }, 2000);
+            }
+        } catch {
+            // Ignore clipboard permission errors
+        }
+    }
+
     async function handleLeave() {
         if (busy) return;
         await onLeaveGroup?.();
@@ -160,23 +248,19 @@
 </script>
 
 {#if open}
-    <div
-        class="fixed inset-0 z-50 flex items-end justify-center bg-black/45 backdrop-blur-[2px] p-0 sm:p-4 pointer-events-auto"
-        role="dialog"
-        aria-modal="true"
-        aria-label="Grup Live"
+    <dialog
+        bind:this={dialogEl}
         data-testid="group-sheet"
+        aria-label="Grup Live"
+        onclose={() => (open = false)}
+        onclick={(e) => {
+            if (e.target === dialogEl) open = false;
+        }}
+        class="group-sheet-dialog fixed inset-0 z-50 m-0 w-full max-w-none h-dvh max-h-none bg-transparent p-0 sm:p-4 flex items-end justify-center border-0 overscroll-contain pointer-events-auto"
     >
-        <button
-            type="button"
-            aria-label="Închide"
-            class="fixed inset-0 w-full h-full cursor-default"
-            onclick={() => (open = false)}
-        ></button>
-
         <div
             style="padding-bottom: calc(1rem + env(safe-area-inset-bottom, 0px));"
-            class="relative z-10 w-full max-w-md bg-menu-background text-content rounded-t-3xl sm:rounded-3xl shadow-2xl border border-input-border/60 px-4 pt-3"
+            class="relative z-10 w-full max-w-md bg-menu-background text-content rounded-t-3xl sm:rounded-3xl shadow-2xl border border-input-border/60 px-4 pt-3 max-h-[92dvh] overflow-y-auto overscroll-contain"
         >
             <div class="w-10 h-1 rounded-full bg-content/20 mx-auto mb-2.5"></div>
 
@@ -193,7 +277,7 @@
                             Grup Live
                         </h2>
                         <p class="text-[11px] text-content/60 leading-tight">
-                            Poziții pe hartă &amp; stabilizare GPS în pădure
+                            Poziții pe hartă &amp; planificare tură
                         </p>
                     </div>
                 </div>
@@ -201,13 +285,130 @@
                     type="button"
                     aria-label="Închide"
                     onclick={() => (open = false)}
-                    class="w-7 h-7 rounded-full bg-content/[0.08] hover:bg-content/15 text-content/75 flex items-center justify-center text-xs cursor-pointer shrink-0"
+                    class="w-11 h-11 -mr-1.5 rounded-full hover:bg-content/10 text-content/75 flex items-center justify-center text-sm cursor-pointer shrink-0 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#242734]"
                 >
-                    <i class="fa-solid fa-xmark" aria-hidden="true"></i>
+                    <span class="w-7 h-7 rounded-full bg-content/[0.08] flex items-center justify-center">
+                        <i class="fa-solid fa-xmark" aria-hidden="true"></i>
+                    </span>
                 </button>
             </div>
 
-            {#if groupSession === null}
+            <div
+                class="grid grid-cols-2 gap-1 p-1 rounded-xl bg-content/[0.06] mb-3"
+                role="tablist"
+                aria-label="Mod grup"
+            >
+                <button
+                    type="button"
+                    role="tab"
+                    aria-selected={activeTab === "live"}
+                    onclick={() => (activeTab = "live")}
+                    class={`min-h-11 sm:min-h-9 rounded-lg text-xs font-bold cursor-pointer transition-colors focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#242734] ${
+                        activeTab === "live"
+                            ? "bg-menu-background text-content shadow-xs"
+                            : "text-content/65 hover:text-content"
+                    }`}
+                >
+                    Grup Live Acum
+                </button>
+                <button
+                    type="button"
+                    role="tab"
+                    aria-selected={activeTab === "plan"}
+                    onclick={() => (activeTab = "plan")}
+                    class={`min-h-11 sm:min-h-9 rounded-lg text-xs font-bold cursor-pointer transition-colors focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#242734] ${
+                        activeTab === "plan"
+                            ? "bg-menu-background text-content shadow-xs"
+                            : "text-content/65 hover:text-content"
+                    }`}
+                >
+                    Planifică Tură
+                </button>
+            </div>
+
+            {#if activeTab === "plan"}
+                <div class="space-y-3">
+                    <div>
+                        <label
+                            for="group-plan-trail"
+                            class="block text-[11px] font-semibold text-content/70 mb-1"
+                        >
+                            Traseu / destinație
+                        </label>
+                        <input
+                            id="group-plan-trail"
+                            type="text"
+                            bind:value={planTrailInput}
+                            placeholder="ex. Masivul Piatra Mare"
+                            class="w-full rounded-xl bg-content/[0.05] border border-input-border/60 px-3 py-2.5 text-xs font-medium text-content placeholder:text-content/45 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#242734]"
+                        />
+                    </div>
+                    <div class="grid grid-cols-2 gap-2">
+                        <div>
+                            <label
+                                for="group-plan-date"
+                                class="block text-[11px] font-semibold text-content/70 mb-1"
+                            >
+                                Data
+                            </label>
+                            <input
+                                id="group-plan-date"
+                                type="date"
+                                bind:value={planDateInput}
+                                class="w-full rounded-xl bg-content/[0.05] border border-input-border/60 px-3 py-2.5 text-xs font-medium text-content focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#242734]"
+                            />
+                        </div>
+                        <div>
+                            <label
+                                for="group-plan-time"
+                                class="block text-[11px] font-semibold text-content/70 mb-1"
+                            >
+                                Ora plecării
+                            </label>
+                            <input
+                                id="group-plan-time"
+                                type="time"
+                                bind:value={planTimeInput}
+                                class="w-full rounded-xl bg-content/[0.05] border border-input-border/60 px-3 py-2.5 text-xs font-medium text-content focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#242734]"
+                            />
+                        </div>
+                    </div>
+                    <div>
+                        <label
+                            for="group-plan-meeting"
+                            class="block text-[11px] font-semibold text-content/70 mb-1"
+                        >
+                            Loc de întâlnire
+                        </label>
+                        <input
+                            id="group-plan-meeting"
+                            type="text"
+                            bind:value={planMeetingInput}
+                            placeholder="ex. Gara Predeal · intrare traseu"
+                            class="w-full rounded-xl bg-content/[0.05] border border-input-border/60 px-3 py-2.5 text-xs font-medium text-content placeholder:text-content/45 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#242734]"
+                        />
+                    </div>
+                    <div
+                        class="rounded-xl bg-content/[0.04] border border-input-border/50 px-3 py-2 flex items-center justify-between text-xs"
+                    >
+                        <span class="text-content/65 font-medium">Cod grup atașat</span>
+                        <span class="font-mono font-extrabold tracking-[0.2em]">
+                            {groupSession?.code ?? planFallbackCode}
+                        </span>
+                    </div>
+                    <button
+                        type="button"
+                        onclick={handlePlanShare}
+                        class="w-full rounded-2xl bg-[#242734] text-white hover:bg-[#242734]/90 min-h-11 px-4 text-xs font-bold flex items-center justify-center gap-2 cursor-pointer shadow-sm focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#242734]"
+                    >
+                        <i
+                            class={`fa-solid ${planCopied ? "fa-check" : "fa-share-nodes"} text-[11px]`}
+                            aria-hidden="true"
+                        ></i>
+                        <span>{planCopied ? "Invitație copiată" : "Trimite invitația de tură"}</span>
+                    </button>
+                </div>
+            {:else if groupSession === null}
                 <div class="space-y-3">
                     <div>
                         <label
@@ -223,7 +424,7 @@
                             maxlength="24"
                             bind:value={nameInput}
                             placeholder="ex. Diana, Andrei..."
-                            class="w-full rounded-xl bg-content/[0.05] border border-input-border/60 px-3 py-2 text-xs font-medium text-content placeholder:text-content/45 focus:outline-none focus:ring-2 focus:ring-[#242734]/30"
+                            class="w-full rounded-xl bg-content/[0.05] border border-input-border/60 px-3 py-2.5 text-xs font-medium text-content placeholder:text-content/45 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#242734]"
                         />
                     </div>
 
@@ -232,7 +433,7 @@
                         data-testid="group-create-btn"
                         disabled={busy}
                         onclick={handleCreate}
-                        class="w-full rounded-2xl bg-[#242734] text-white hover:bg-[#242734]/90 active:scale-[0.99] transition-all py-2.5 px-4 text-xs font-bold flex items-center justify-center gap-2 cursor-pointer disabled:opacity-50 shadow-sm"
+                        class="w-full rounded-2xl bg-[#242734] text-white hover:bg-[#242734]/90 active:scale-[0.99] transition-all min-h-11 px-4 text-xs font-bold flex items-center justify-center gap-2 cursor-pointer disabled:opacity-50 shadow-sm focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#242734]"
                     >
                         <i class="fa-solid fa-plus text-[11px]" aria-hidden="true"></i>
                         <span>Creează grup</span>
@@ -270,14 +471,14 @@
                             }}
                             placeholder="K7M9P2"
                             aria-label="Cod grup (6 caractere)"
-                            class="flex-1 rounded-xl bg-content/[0.05] border border-input-border/60 px-3 py-2 text-sm font-mono font-extrabold tracking-[0.22em] uppercase text-center text-content placeholder:text-content/35 placeholder:tracking-[0.18em] focus:outline-none focus:ring-2 focus:ring-[#242734]/30"
+                            class="flex-1 rounded-xl bg-content/[0.05] border border-input-border/60 px-3 py-2.5 text-sm font-mono font-extrabold tracking-[0.22em] uppercase text-center text-content placeholder:text-content/35 placeholder:tracking-[0.18em] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#242734]"
                         />
                         <button
                             type="button"
                             data-testid="group-join-btn"
                             disabled={busy || normalizedJoinCode === null}
                             onclick={handleJoin}
-                            class="rounded-xl bg-[#242734] text-white hover:bg-[#242734]/90 px-4 py-2 text-xs font-bold cursor-pointer disabled:opacity-40 shrink-0"
+                            class="rounded-xl bg-[#242734] text-white hover:bg-[#242734]/90 px-4 min-h-11 text-xs font-bold cursor-pointer disabled:opacity-40 shrink-0 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#242734]"
                         >
                             Intră
                         </button>
@@ -304,7 +505,7 @@
                             type="button"
                             data-testid="group-share-btn"
                             onclick={handleShare}
-                            class="rounded-xl bg-[#242734] text-white hover:bg-[#242734]/90 px-3 py-2 text-xs font-bold inline-flex items-center gap-1.5 cursor-pointer shrink-0"
+                            class="rounded-xl bg-[#242734] text-white hover:bg-[#242734]/90 px-3 min-h-11 sm:min-h-9 text-xs font-bold inline-flex items-center gap-1.5 cursor-pointer shrink-0 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#242734]"
                         >
                             <i
                                 class={`fa-solid ${copied ? "fa-check" : "fa-share-nodes"} text-[11px]`}
@@ -321,7 +522,7 @@
                                 data-testid="group-member-row"
                                 disabled={member.isSelf}
                                 onclick={() => handleMemberClick(member)}
-                                class={`w-full rounded-2xl border border-input-border/50 px-3 py-2 flex items-center gap-2.5 text-left transition-colors ${
+                                class={`w-full rounded-2xl border border-input-border/50 px-3 py-2 flex items-center gap-2.5 text-left transition-colors focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#242734] ${
                                     member.isSelf
                                         ? "bg-content/[0.03] cursor-default"
                                         : "bg-content/[0.04] hover:bg-content/[0.09] cursor-pointer"
@@ -371,12 +572,19 @@
                         data-testid="group-leave-btn"
                         disabled={busy}
                         onclick={handleLeave}
-                        class="w-full rounded-xl bg-content/[0.06] hover:bg-content/[0.12] text-content/80 border border-input-border/60 py-2 px-3 text-xs font-semibold cursor-pointer disabled:opacity-50"
+                        class="w-full rounded-xl bg-content/[0.06] hover:bg-content/[0.12] text-content/80 border border-input-border/60 min-h-11 px-3 text-xs font-semibold cursor-pointer disabled:opacity-50 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#242734]"
                     >
                         Ieși din grup
                     </button>
                 </div>
             {/if}
         </div>
-    </div>
+    </dialog>
 {/if}
+
+<style>
+    .group-sheet-dialog::backdrop {
+        background: rgba(0, 0, 0, 0.45);
+        backdrop-filter: blur(2px);
+    }
+</style>

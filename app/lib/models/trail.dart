@@ -5,6 +5,7 @@ import 'package:wanderer/models/global_search_models.dart';
 import 'package:wanderer/models/record.dart';
 import 'package:wanderer/models/trail_summary.dart';
 import 'package:wanderer/models/trail_sync_state.dart';
+import 'package:wanderer/util/format.dart';
 
 import 'actor.dart';
 import 'category.dart';
@@ -25,7 +26,8 @@ class _NullableDateTimeConverter implements JsonConverter<DateTime?, Object?> {
   @override
   DateTime? fromJson(Object? value) {
     if (value == null || value == '') return null;
-    return DateTime.parse(value as String);
+    final parsed = DateTime.tryParse(value as String);
+    return sanitizeTrailDate(parsed);
   }
 
   @override
@@ -224,7 +226,7 @@ abstract class Trail with _$Trail, RecordFunctions implements TrailSummary {
       (author.isNotEmpty && author != "000000000000000" ? author : null);
 
   @override
-  DateTime? get summaryDate => date;
+  DateTime? get summaryDate => sanitizeTrailDate(date);
 
   @override
   String get summaryThumbnail => photos.isNotEmpty ? photos[0] : "";

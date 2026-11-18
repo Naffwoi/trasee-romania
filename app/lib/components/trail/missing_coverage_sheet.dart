@@ -44,6 +44,7 @@ Future<MissingCoverageSelection?> showMissingCoverageSheet(
 ) {
   return showModalBottomSheet<MissingCoverageSelection>(
     context: context,
+    useRootNavigator: true,
     isDismissible: true,
     enableDrag: true,
     isScrollControlled: true,

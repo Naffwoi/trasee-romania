@@ -16,6 +16,7 @@
 
 	let { trail }: Props = $props();
 
+	let showLocalDispatches = $state(false);
 	const isRo = $derived(($locale ?? "ro").toLowerCase().startsWith("ro"));
 
 	const trackPoints = $derived.by(() => {
@@ -87,27 +88,52 @@
 			{/if}
 		</div>
 
-		<div class="mt-2.5 flex flex-wrap items-center gap-1.5">
+		<div class="mt-2.5 flex flex-wrap items-center gap-2">
 			<a
 				href="tel:112"
-				class="px-2.5 py-1 rounded-full bg-red-600 hover:bg-red-700 text-white text-[11px] font-extrabold"
+				class="inline-flex items-center gap-1.5 px-3 min-h-11 sm:min-h-9 rounded-full bg-red-600 hover:bg-red-700 text-white text-xs font-extrabold focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-red-600"
 			>
-				112
+				<i class="fa-solid fa-phone text-[11px]" aria-hidden="true"></i>
+				<span>112</span>
 			</a>
 			<a
 				href="tel:+40725826668"
-				class="px-2.5 py-1 rounded-full bg-[#242734] hover:opacity-90 text-white text-[11px] font-extrabold"
+				class="inline-flex items-center gap-1.5 px-3 min-h-11 sm:min-h-9 rounded-full bg-[#242734] hover:opacity-90 text-white text-xs font-extrabold focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#242734]"
 			>
-				0-SALVAMONT (0725 826 668)
+				<i class="fa-solid fa-shield-halved text-[11px]" aria-hidden="true"></i>
+				<span>0-SALVAMONT (0725 826 668)</span>
 			</a>
-			{#each summary.services as entry (entry.service.id)}
-				<a
-					href={`tel:${entry.service.primaryPhone}`}
-					class="px-2.5 py-1 rounded-full bg-content/[0.06] hover:bg-content/[0.11] border border-input-border/60 text-content text-[11px] font-bold"
+			{#if summary.services.length > 0}
+				<button
+					type="button"
+					aria-expanded={showLocalDispatches}
+					onclick={() => (showLocalDispatches = !showLocalDispatches)}
+					class="inline-flex items-center gap-1.5 px-3 min-h-11 sm:min-h-9 rounded-full bg-content/[0.06] hover:bg-content/[0.11] border border-input-border/60 text-content text-xs font-semibold cursor-pointer focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#242734]"
 				>
-					{entry.service.shortName}: {formatRoPhoneDisplay(entry.service.primaryPhone)}
-				</a>
-			{/each}
+					<span>
+						{isRo
+							? `Dispecerate locale (${summary.services.length})`
+							: `Local dispatches (${summary.services.length})`}
+					</span>
+					<i
+						class={`fa-solid ${showLocalDispatches ? "fa-chevron-up" : "fa-chevron-down"} text-[10px]`}
+						aria-hidden="true"
+					></i>
+				</button>
+			{/if}
 		</div>
+		{#if showLocalDispatches && summary.services.length > 0}
+			<div class="mt-2 flex flex-wrap items-center gap-1.5">
+				{#each summary.services as entry (entry.service.id)}
+					<a
+						href={`tel:${entry.service.primaryPhone}`}
+						class="inline-flex items-center gap-1.5 px-3 min-h-11 sm:min-h-9 rounded-full bg-content/[0.05] hover:bg-content/[0.1] border border-input-border/60 text-content text-xs font-semibold focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#242734]"
+					>
+						<i class="fa-solid fa-phone text-[10px] opacity-70" aria-hidden="true"></i>
+						<span>{entry.service.shortName}: {formatRoPhoneDisplay(entry.service.primaryPhone)}</span>
+					</a>
+				{/each}
+			</div>
+		{/if}
 	</div>
 {/if}

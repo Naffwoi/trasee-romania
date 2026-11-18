@@ -2,6 +2,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:maplibre/maplibre.dart' as ml;
+import 'package:qr_flutter/qr_flutter.dart';
 import 'package:share_plus/share_plus.dart';
 import 'package:wanderer/models/live/trail_live_models.dart';
 import 'package:wanderer/services/ble/sos_crypto_and_outbox.dart'
@@ -78,6 +79,9 @@ Future<void> showLiveGroupSheet(
   double? userAlongTrackM,
   ml.Geographic? userPosition,
   String? shareUrlBase,
+  String? initialTrailName,
+  String? initialJoinCode,
+  int initialTab = 0,
   required Future<GroupSessionModel?> Function(String displayName)
   onCreateGroup,
   required Future<GroupSessionModel?> Function(String code, String displayName)
@@ -88,6 +92,7 @@ Future<void> showLiveGroupSheet(
 }) {
   return showModalBottomSheet<void>(
     context: context,
+    useRootNavigator: true,
     isScrollControlled: true,
     useSafeArea: true,
     backgroundColor: Theme.of(context).colorScheme.surface,
@@ -104,6 +109,9 @@ Future<void> showLiveGroupSheet(
       userAlongTrackM: userAlongTrackM,
       userPosition: userPosition,
       shareUrlBase: shareUrlBase,
+      initialTrailName: initialTrailName,
+      initialJoinCode: initialJoinCode,
+      initialTab: initialTab,
       onCreateGroup: onCreateGroup,
       onJoinGroup: onJoinGroup,
       onLeaveGroup: onLeaveGroup,
@@ -125,6 +133,9 @@ class LiveGroupSheet extends StatefulWidget {
     this.userAlongTrackM,
     this.userPosition,
     this.shareUrlBase,
+    this.initialTrailName,
+    this.initialJoinCode,
+    this.initialTab = 0,
     required this.onCreateGroup,
     required this.onJoinGroup,
     required this.onLeaveGroup,
@@ -141,6 +152,9 @@ class LiveGroupSheet extends StatefulWidget {
   final double? userAlongTrackM;
   final ml.Geographic? userPosition;
   final String? shareUrlBase;
+  final String? initialTrailName;
+  final String? initialJoinCode;
+  final int initialTab;
   final Future<GroupSessionModel?> Function(String displayName) onCreateGroup;
   final Future<GroupSessionModel?> Function(String code, String displayName)
   onJoinGroup;
@@ -154,9 +168,15 @@ class LiveGroupSheet extends StatefulWidget {
 
 class _LiveGroupSheetState extends State<LiveGroupSheet> {
   late final TextEditingController _nameController;
-  final TextEditingController _codeController = TextEditingController();
+  late final TextEditingController _codeController;
+  late final TextEditingController _planTrailController;
+  late final TextEditingController _planMeetingController;
+  late final String _plannedGroupCode = generateOfflineGroupCode();
+  late DateTime _plannedDateTime;
+  int _activeTab = 0;
   bool _localBusy = false;
   bool _copiedFeedback = false;
+  bool _planCopiedFeedback = false;
   String? _errorText;
   GroupSessionModel? _localOfflineFallbackSession;
 
@@ -169,12 +189,31 @@ class _LiveGroupSheetState extends State<LiveGroupSheet> {
     _nameController = TextEditingController(
       text: seedName.isNotEmpty ? seedName : (widget.isRo ? 'Drumeț' : 'Hiker'),
     );
+    final seedCode = widget.initialJoinCode?.trim().toUpperCase() ?? '';
+    _codeController = TextEditingController(
+      text: _validGroupCode.hasMatch(seedCode) ? seedCode : '',
+    );
+    _planTrailController = TextEditingController(
+      text: widget.initialTrailName?.trim() ?? '',
+    );
+    _planMeetingController = TextEditingController();
+    final tomorrow = DateTime.now().add(const Duration(days: 1));
+    _plannedDateTime = DateTime(
+      tomorrow.year,
+      tomorrow.month,
+      tomorrow.day,
+      8,
+      30,
+    );
+    _activeTab = widget.initialTab == 1 ? 1 : 0;
   }
 
   @override
   void dispose() {
     _nameController.dispose();
     _codeController.dispose();
+    _planTrailController.dispose();
+    _planMeetingController.dispose();
     super.dispose();
   }
 
@@ -458,8 +497,12 @@ class _LiveGroupSheetState extends State<LiveGroupSheet> {
                             ),
                           ),
                         ],
+                        const SizedBox(height: 12),
+                        _buildModeTabs(context),
                         const SizedBox(height: 14),
-                        if (session == null)
+                        if (_activeTab == 1)
+                          _buildPlanTab(context, activeSession: session)
+                        else if (session == null)
                           _buildCreateOrJoinBody(context, isBusy: isBusy)
                         else
                           _buildActiveSessionBody(
@@ -662,52 +705,90 @@ class _LiveGroupSheetState extends State<LiveGroupSheet> {
               color: theme.colorScheme.outline.withValues(alpha: 0.55),
             ),
           ),
-          child: Row(
+          child: Column(
             children: [
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      isRo ? 'COD GRUP ACTIV' : 'ACTIVE GROUP CODE',
-                      style: theme.textTheme.labelSmall?.copyWith(
-                        color: theme.colorScheme.onSurface.withValues(
-                          alpha: 0.6,
+              Row(
+                children: [
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          isRo ? 'COD GRUP ACTIV' : 'ACTIVE GROUP CODE',
+                          style: theme.textTheme.labelSmall?.copyWith(
+                            color: theme.colorScheme.onSurface.withValues(
+                              alpha: 0.6,
+                            ),
+                            fontWeight: FontWeight.w700,
+                            letterSpacing: 0.8,
+                          ),
                         ),
-                        fontWeight: FontWeight.w700,
-                        letterSpacing: 0.8,
+                        const SizedBox(height: 2),
+                        Text(
+                          session.code,
+                          key: const ValueKey('group-active-code'),
+                          style: theme.textTheme.headlineSmall?.copyWith(
+                            fontWeight: FontWeight.w800,
+                            letterSpacing: 4.0,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                  IconButton(
+                    key: const ValueKey('group-copy-code-btn'),
+                    tooltip: isRo ? 'Copiază codul' : 'Copy code',
+                    onPressed: () => _copyCode(session.code),
+                    icon: Icon(
+                      _copiedFeedback ? Icons.check_rounded : Icons.copy_rounded,
+                      size: 20,
+                    ),
+                  ),
+                  IconButton(
+                    key: const ValueKey('group-share-code-btn'),
+                    tooltip: isRo ? 'Trimite colegilor' : 'Share with friends',
+                    onPressed: () {
+                      SharePlus.instance.share(
+                        ShareParams(text: _sharePayload(session.code)),
+                      );
+                    },
+                    icon: const Icon(Icons.ios_share_rounded, size: 20),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 10),
+              Row(
+                children: [
+                  Container(
+                    key: const ValueKey('group-qr-invite'),
+                    padding: const EdgeInsets.all(6),
+                    decoration: BoxDecoration(
+                      color: Colors.white,
+                      borderRadius: BorderRadius.circular(12),
+                      border: Border.all(
+                        color: theme.colorScheme.outline.withValues(alpha: 0.35),
                       ),
                     ),
-                    const SizedBox(height: 2),
-                    Text(
-                      session.code,
-                      key: const ValueKey('group-active-code'),
-                      style: theme.textTheme.headlineSmall?.copyWith(
-                        fontWeight: FontWeight.w800,
-                        letterSpacing: 4.0,
+                    child: QrImageView(
+                      data: _sharePayload(session.code),
+                      version: QrVersions.auto,
+                      size: 84,
+                      backgroundColor: Colors.white,
+                    ),
+                  ),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: Text(
+                      isRo
+                          ? 'Scanează codul QR de pe telefonul colegilor pentru intrare instant în grup (funcționează și offline prin Bluetooth).'
+                          : 'Friends can scan this QR code to join right away (also works offline via Bluetooth).',
+                      style: theme.textTheme.bodySmall?.copyWith(
+                        color: theme.colorScheme.onSurface.withValues(alpha: 0.72),
+                        height: 1.35,
                       ),
                     ),
-                  ],
-                ),
-              ),
-              IconButton(
-                key: const ValueKey('group-copy-code-btn'),
-                tooltip: isRo ? 'Copiază codul' : 'Copy code',
-                onPressed: () => _copyCode(session.code),
-                icon: Icon(
-                  _copiedFeedback ? Icons.check_rounded : Icons.copy_rounded,
-                  size: 20,
-                ),
-              ),
-              IconButton(
-                key: const ValueKey('group-share-code-btn'),
-                tooltip: isRo ? 'Trimite colegilor' : 'Share with friends',
-                onPressed: () {
-                  SharePlus.instance.share(
-                    ShareParams(text: _sharePayload(session.code)),
-                  );
-                },
-                icon: const Icon(Icons.ios_share_rounded, size: 20),
+                  ),
+                ],
               ),
             ],
           ),
@@ -745,6 +826,301 @@ class _LiveGroupSheetState extends State<LiveGroupSheet> {
             isRo ? 'Părăsește grupul' : 'Leave group',
             style: const TextStyle(fontWeight: FontWeight.w700),
           ),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildModeTabs(BuildContext context) {
+    final theme = Theme.of(context);
+    final isRo = widget.isRo;
+    Widget tabButton({
+      required Key key,
+      required int index,
+      required String label,
+    }) {
+      final selected = _activeTab == index;
+      return Expanded(
+        child: GestureDetector(
+          key: key,
+          onTap: () => setState(() => _activeTab = index),
+          child: Container(
+            padding: const EdgeInsets.symmetric(vertical: 9),
+            decoration: BoxDecoration(
+              color: selected ? theme.colorScheme.surface : Colors.transparent,
+              borderRadius: BorderRadius.circular(10),
+              boxShadow: selected
+                  ? [
+                      BoxShadow(
+                        color: Colors.black.withValues(alpha: 0.06),
+                        blurRadius: 4,
+                        offset: const Offset(0, 1),
+                      ),
+                    ]
+                  : null,
+            ),
+            alignment: Alignment.center,
+            child: Text(
+              label,
+              style: theme.textTheme.labelMedium?.copyWith(
+                fontWeight: selected ? FontWeight.w800 : FontWeight.w600,
+                color: selected
+                    ? theme.colorScheme.onSurface
+                    : theme.colorScheme.onSurface.withValues(alpha: 0.65),
+              ),
+            ),
+          ),
+        ),
+      );
+    }
+
+    return Container(
+      padding: const EdgeInsets.all(3),
+      decoration: BoxDecoration(
+        color: theme.colorScheme.onSurface.withValues(alpha: 0.06),
+        borderRadius: BorderRadius.circular(13),
+      ),
+      child: Row(
+        children: [
+          tabButton(
+            key: const ValueKey('group-tab-live'),
+            index: 0,
+            label: isRo ? 'Grup Live Acum' : 'Live Group Now',
+          ),
+          tabButton(
+            key: const ValueKey('group-tab-plan'),
+            index: 1,
+            label: isRo ? 'Planifică Tură' : 'Plan Hike',
+          ),
+        ],
+      ),
+    );
+  }
+
+  DateTime _nextWeekdayAt(int targetWeekday, int hour, int minute) {
+    final now = DateTime.now();
+    var daysAhead = (targetWeekday - now.weekday + 7) % 7;
+    if (daysAhead == 0) daysAhead = 7;
+    final target = now.add(Duration(days: daysAhead));
+    return DateTime(target.year, target.month, target.day, hour, minute);
+  }
+
+  String _formatPlannedDate(DateTime dt, {required bool isRo}) {
+    final dd = dt.day.toString().padLeft(2, '0');
+    final mm = dt.month.toString().padLeft(2, '0');
+    final hh = dt.hour.toString().padLeft(2, '0');
+    final min = dt.minute.toString().padLeft(2, '0');
+    return isRo ? '$dd.$mm.${dt.year} la $hh:$min' : '${dt.year}-$mm-$dd at $hh:$min';
+  }
+
+  String _buildPlanInviteText(String code, {required bool isRo}) {
+    final trail = _planTrailController.text.trim();
+    final meeting = _planMeetingController.text.trim();
+    final whenStr = _formatPlannedDate(_plannedDateTime, isRo: isRo);
+    final link = _sharePayload(code);
+    if (isRo) {
+      return [
+        'Invitație drumeție${trail.isNotEmpty ? ': $trail' : ''}',
+        'Când: $whenStr',
+        if (meeting.isNotEmpty) 'Întâlnire: $meeting',
+        'Cod grup live (inclusiv offline Bluetooth): $code',
+        if (link.startsWith('http')) 'Link: $link',
+      ].join('\n');
+    }
+    return [
+      'Hike invite${trail.isNotEmpty ? ': $trail' : ''}',
+      'When: $whenStr',
+      if (meeting.isNotEmpty) 'Meeting point: $meeting',
+      'Live / offline Bluetooth group code: $code',
+      if (link.startsWith('http')) 'Link: $link',
+    ].join('\n');
+  }
+
+  Widget _buildPlanTab(
+    BuildContext context, {
+    required GroupSessionModel? activeSession,
+  }) {
+    final theme = Theme.of(context);
+    final isRo = widget.isRo;
+    final inviteCode = activeSession?.code ?? _plannedGroupCode;
+    final now = DateTime.now();
+    final tomorrow = DateTime(now.year, now.month, now.day + 1, 8, 30);
+    final saturday = _nextWeekdayAt(DateTime.saturday, 8, 0);
+    final sunday = _nextWeekdayAt(DateTime.sunday, 8, 30);
+
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        TextField(
+          key: const ValueKey('group-plan-trail-input'),
+          controller: _planTrailController,
+          decoration: InputDecoration(
+            isDense: true,
+            labelText: isRo ? 'Traseu / destinație' : 'Trail / destination',
+            hintText: isRo ? 'ex. Masivul Piatra Mare' : 'e.g. Piatra Mare',
+            border: OutlineInputBorder(borderRadius: BorderRadius.circular(12)),
+          ),
+        ),
+        const SizedBox(height: 10),
+        Wrap(
+          spacing: 6,
+          runSpacing: 6,
+          children: [
+            ChoiceChip(
+              label: Text(isRo ? 'Mâine 08:30' : 'Tomorrow 08:30'),
+              selected:
+                  _plannedDateTime.day == tomorrow.day &&
+                  _plannedDateTime.month == tomorrow.month,
+              onSelected: (_) => setState(() => _plannedDateTime = tomorrow),
+            ),
+            ChoiceChip(
+              label: Text(isRo ? 'Sâmbătă 08:00' : 'Saturday 08:00'),
+              selected:
+                  _plannedDateTime.day == saturday.day &&
+                  _plannedDateTime.month == saturday.month,
+              onSelected: (_) => setState(() => _plannedDateTime = saturday),
+            ),
+            ChoiceChip(
+              label: Text(isRo ? 'Duminică 08:30' : 'Sunday 08:30'),
+              selected:
+                  _plannedDateTime.day == sunday.day &&
+                  _plannedDateTime.month == sunday.month,
+              onSelected: (_) => setState(() => _plannedDateTime = sunday),
+            ),
+            ActionChip(
+              avatar: const Icon(Icons.calendar_today_outlined, size: 14),
+              label: Text(_formatPlannedDate(_plannedDateTime, isRo: isRo)),
+              onPressed: () async {
+                final pickedDate = await showDatePicker(
+                  context: context,
+                  initialDate: _plannedDateTime,
+                  firstDate: now,
+                  lastDate: now.add(const Duration(days: 365)),
+                );
+                if (pickedDate == null || !context.mounted) return;
+                final pickedTime = await showTimePicker(
+                  context: context,
+                  initialTime: TimeOfDay.fromDateTime(_plannedDateTime),
+                );
+                if (!mounted) return;
+                setState(() {
+                  _plannedDateTime = DateTime(
+                    pickedDate.year,
+                    pickedDate.month,
+                    pickedDate.day,
+                    pickedTime?.hour ?? _plannedDateTime.hour,
+                    pickedTime?.minute ?? _plannedDateTime.minute,
+                  );
+                });
+              },
+            ),
+          ],
+        ),
+        const SizedBox(height: 10),
+        TextField(
+          key: const ValueKey('group-plan-meeting-input'),
+          controller: _planMeetingController,
+          decoration: InputDecoration(
+            isDense: true,
+            labelText: isRo ? 'Loc de întâlnire' : 'Meeting point',
+            hintText: isRo
+                ? 'ex. Gara Predeal · intrare traseu'
+                : 'e.g. Trailhead parking',
+            border: OutlineInputBorder(borderRadius: BorderRadius.circular(12)),
+          ),
+        ),
+        const SizedBox(height: 10),
+        Container(
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+          decoration: BoxDecoration(
+            color: theme.colorScheme.onSurface.withValues(alpha: 0.05),
+            borderRadius: BorderRadius.circular(12),
+          ),
+          child: Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              Text(
+                isRo ? 'Cod grup atașat:' : 'Attached group code:',
+                style: theme.textTheme.bodySmall?.copyWith(
+                  color: theme.colorScheme.onSurface.withValues(alpha: 0.7),
+                ),
+              ),
+              Text(
+                inviteCode,
+                style: theme.textTheme.titleSmall?.copyWith(
+                  fontWeight: FontWeight.w800,
+                  letterSpacing: 2.5,
+                ),
+              ),
+            ],
+          ),
+        ),
+        const SizedBox(height: 12),
+        Row(
+          children: [
+            Expanded(
+              child: OutlinedButton.icon(
+                key: const ValueKey('group-plan-copy-btn'),
+                style: OutlinedButton.styleFrom(
+                  padding: const EdgeInsets.symmetric(vertical: 12),
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                ),
+                onPressed: () async {
+                  await Clipboard.setData(
+                    ClipboardData(
+                      text: _buildPlanInviteText(inviteCode, isRo: isRo),
+                    ),
+                  );
+                  if (!mounted) return;
+                  setState(() => _planCopiedFeedback = true);
+                  Future<void>.delayed(const Duration(seconds: 2), () {
+                    if (mounted) setState(() => _planCopiedFeedback = false);
+                  });
+                },
+                icon: Icon(
+                  _planCopiedFeedback ? Icons.check_rounded : Icons.copy_rounded,
+                  size: 16,
+                ),
+                label: Text(
+                  _planCopiedFeedback
+                      ? (isRo ? 'Copiat' : 'Copied')
+                      : (isRo ? 'Copiază' : 'Copy'),
+                ),
+              ),
+            ),
+            const SizedBox(width: 8),
+            Expanded(
+              flex: 2,
+              child: FilledButton.icon(
+                key: const ValueKey('group-plan-share-btn'),
+                style: FilledButton.styleFrom(
+                  backgroundColor: theme.brightness == Brightness.dark
+                      ? theme.colorScheme.primary
+                      : AppColors.primaryLight,
+                  foregroundColor: Colors.white,
+                  padding: const EdgeInsets.symmetric(vertical: 12),
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                ),
+                onPressed: () {
+                  SharePlus.instance.share(
+                    ShareParams(
+                      text: _buildPlanInviteText(inviteCode, isRo: isRo),
+                    ),
+                  );
+                },
+                icon: const Icon(Icons.ios_share_rounded, size: 17),
+                label: Text(
+                  isRo ? 'Trimite invitația' : 'Send invite',
+                  style: const TextStyle(fontWeight: FontWeight.w700),
+                ),
+              ),
+            ),
+          ],
         ),
       ],
     );

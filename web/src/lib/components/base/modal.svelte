@@ -115,7 +115,7 @@
             </h3>
             <button
                 type="button"
-                class="rounded-full btn-icon"
+                class="rounded-full btn-icon min-w-11 min-h-11 inline-flex items-center justify-center"
                 onclick={closeModal}
             >
                 <i class="fa fa-close"></i>
@@ -135,6 +135,9 @@
 
 <style lang="postcss">
     @reference "tailwindcss";
+    dialog {
+        overscroll-behavior: contain;
+    }
     dialog::backdrop {
         @apply bg-gray-500 opacity-50;
     }

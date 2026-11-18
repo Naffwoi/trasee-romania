@@ -22,6 +22,7 @@
         formatElevation,
         formatHTMLAsTextPreview,
         formatTimeHHMM,
+        isValidTrailDate,
         trailDisplayDuration,
     } from "#lib/util/format_util.ts";
     import {
@@ -713,7 +714,7 @@
                             {/if}
                         </div>
                     {/if}
-                    {#if trail.date}
+                    {#if isValidTrailDate(trail.date)}
                         <h5 class="text-sm text-gray-500">
                             {new Date(trail.date).toLocaleDateString(
                                 undefined,

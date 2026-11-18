@@ -33,6 +33,22 @@ export function trailDisplayDuration(trail: {
         : trail.duration;
 }
 
+export function isValidTrailDate(raw: unknown): raw is string | number | Date {
+    if (raw === null || raw === undefined || raw === "") return false;
+    let candidate: string | number | Date = raw as string | number | Date;
+    if (typeof raw === "string") {
+        const trimmed = raw.trim();
+        if (!trimmed) return false;
+        // PocketBase formats datetimes with a space ("0001-01-01 00:00:00.000Z");
+        // V8 parses space-separated years < 100 as 2001 unless normalized to ISO 'T'.
+        candidate = /^\d{4}-\d{2}-\d{2} /.test(trimmed)
+            ? trimmed.replace(" ", "T")
+            : trimmed;
+    }
+    const parsed = new Date(candidate);
+    return Number.isFinite(parsed.getTime()) && parsed.getUTCFullYear() > 1971;
+}
+
 export function formatDistance(
     meters?: number,
     options: { compact?: boolean } = {},

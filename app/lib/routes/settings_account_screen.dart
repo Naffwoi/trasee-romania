@@ -221,6 +221,7 @@ class _SettingsAccountScreenState extends ConsumerState<SettingsAccountScreen> {
                 : () {
                     showModalBottomSheet<void>(
                       context: context,
+                      useRootNavigator: true,
                       isScrollControlled: true,
                       builder: (_) => EmailChangeSheet(userId: user.id),
                     );
@@ -236,6 +237,7 @@ class _SettingsAccountScreenState extends ConsumerState<SettingsAccountScreen> {
                 : () {
                     showModalBottomSheet<void>(
                       context: context,
+                      useRootNavigator: true,
                       isScrollControlled: true,
                       builder: (_) => PasswordChangeSheet(userId: user.id),
                     );

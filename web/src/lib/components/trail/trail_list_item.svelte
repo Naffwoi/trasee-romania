@@ -6,10 +6,15 @@
     import { currentUser } from "#lib/stores/user_store.ts";
     import { getFileURL, isVideoURL } from "#lib/util/file_util.ts";
     import {
+        isPlaceholderPhotoName,
+        resolveCuratedCarpathianPhoto,
+    } from "#lib/util/curated_carpathian_photos.ts";
+    import {
         formatDistance,
         formatElevation,
         formatHTMLAsText,
         formatTimeHHMM,
+        isValidTrailDate,
         trailDisplayDuration,
     } from "#lib/util/format_util.ts";
     import {
@@ -39,16 +44,28 @@
         hovered = false,
     }: Props = $props();
 
-    let thumbnail = $derived(
+    const rawThumbName = $derived(
         trail.photos.length
-            ? getFileURL(
-                  trail,
-                  trail.photos.at(trail.thumbnail ?? 0) ?? trail.photos[0],
-                  "600x0",
-              )
-            : $theme === "light"
-              ? emptyStateTrailLight
-              : emptyStateTrailDark,
+            ? (trail.photos.at(trail.thumbnail ?? 0) ?? trail.photos[0])
+            : null,
+    );
+
+    const curatedPhoto = $derived(
+        isPlaceholderPhotoName(rawThumbName)
+            ? resolveCuratedCarpathianPhoto({
+                  name: trail.name,
+                  location: trail.location,
+                  lat: trail.lat,
+                  lon: trail.lon,
+              })
+            : null,
+    );
+
+    let thumbnail = $derived(
+        rawThumbName && !isPlaceholderPhotoName(rawThumbName)
+            ? getFileURL(trail, rawThumbName, "600x0")
+            : curatedPhoto?.assetPath ??
+              ($theme === "light" ? emptyStateTrailLight : emptyStateTrailDark),
     );
 
     let expandedTags = $state(false);
@@ -112,7 +129,7 @@
                 {/if}
             </div>
         </div>
-        {#if trail.date}
+        {#if isValidTrailDate(trail.date)}
             <p class="text-xs text-gray-500 mb-3">
                 {new Date(trail.date).toLocaleDateString(undefined, {
                     month: "long",

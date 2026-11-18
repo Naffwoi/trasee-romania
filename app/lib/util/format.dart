@@ -14,6 +14,11 @@ DateFormat dateFormatYMMMMd(String locale) =>
 DateFormat dateFormatYMMMd(String locale) =>
     _yMMMdCache.putIfAbsent(locale, () => DateFormat.yMMMd(locale));
 
+/// Drops epoch/Go zero dates (`0001-01-01` / `<= 1971`) so unrecorded import
+/// timestamps never render as `"1 ian. 1"`.
+DateTime? sanitizeTrailDate(DateTime? dt) =>
+    (dt == null || dt.toUtc().year <= 1971) ? null : dt;
+
 /// The single app-side display rule: show `movingDuration` when it is
 /// present and positive, otherwise fall back to `duration`. A zero moving
 /// time is not treated as a value (matches

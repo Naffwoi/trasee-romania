@@ -1,5 +1,4 @@
 <script lang="ts">
-    import { goto } from "$app/navigation";
     import emptyStateTrailDark from "#lib/assets/svgs/empty_states/empty_state_trail_dark.svg";
     import emptyStateTrailLight from "#lib/assets/svgs/empty_states/empty_state_trail_light.svg";
     import type { Trail } from "#lib/models/trail.ts";
@@ -10,11 +9,16 @@
         displayTrailCategoryBadgeIcon,
         displayTrailCategoryIcon,
     } from "#lib/util/category_util.ts";
+    import {
+        isPlaceholderPhotoName,
+        resolveCuratedCarpathianPhoto,
+    } from "#lib/util/curated_carpathian_photos.ts";
     import { getFileURL, isVideoURL } from "#lib/util/file_util.ts";
     import {
         formatDistance,
         formatElevation,
         formatTimeHHMM,
+        isValidTrailDate,
         trailDisplayDuration,
     } from "#lib/util/format_util.ts";
     import { _, locale } from "svelte-i18n";
@@ -23,29 +27,39 @@
     interface Props {
         trail: Trail;
         ondismiss: () => void;
+        ongroup?: (trail: Trail) => void;
     }
 
-    let { trail, ondismiss }: Props = $props();
+    let { trail, ondismiss, ongroup }: Props = $props();
+
+    const rawThumbName = $derived(
+        trail.photos?.length
+            ? (trail.photos.at(trail.thumbnail ?? 0) ?? trail.photos[0])
+            : null,
+    );
+
+    const curatedPhoto = $derived(
+        isPlaceholderPhotoName(rawThumbName)
+            ? resolveCuratedCarpathianPhoto({
+                  name: trail.name,
+                  location: trail.location,
+                  lat: trail.lat,
+                  lon: trail.lon,
+              })
+            : null,
+    );
 
     const thumbnail = $derived(
-        trail.photos?.length
-            ? getFileURL(
-                  trail,
-                  trail.photos.at(trail.thumbnail ?? 0) ?? trail.photos[0],
-                  "600x0",
-              )
-            : $theme === "light"
-              ? emptyStateTrailLight
-              : emptyStateTrailDark,
+        rawThumbName && !isPlaceholderPhotoName(rawThumbName)
+            ? getFileURL(trail, rawThumbName, "600x0")
+            : curatedPhoto?.assetPath ??
+              ($theme === "light" ? emptyStateTrailLight : emptyStateTrailDark),
     );
 
     const formattedDate = $derived.by(() => {
         const raw = trail.date || trail.created;
-        if (!raw) return "";
-        const parsed = new Date(raw);
-        if (!Number.isFinite(parsed.getTime()) || parsed.getUTCFullYear() <= 1971) {
-            return "";
-        }
+        if (!isValidTrailDate(raw)) return "";
+        const parsed = new Date(raw as string | number | Date);
         return parsed.toLocaleDateString($locale ?? undefined, {
             month: "short",
             day: "numeric",
@@ -80,27 +94,16 @@
 
     const detailHref = $derived(`/map/trail/${trailHandle}/${trail.id}`);
     const navigateHref = $derived(`/map/trail/${trailHandle}/${trail.id}/navigate`);
-
-    function openDetail() {
-        void goto(detailHref);
-    }
 </script>
 
-<div
-    class="mobile-selected-trail-card rounded-2xl bg-menu-background text-content border border-input-border/60 shadow-[0_8px_28px_rgba(0,0,0,0.2)] p-3 flex gap-3 items-start cursor-pointer transition-transform active:scale-[0.99]"
-    role="button"
-    tabindex="0"
+<article
     aria-label={trail.name}
-    onclick={openDetail}
-    onkeydown={(e) => {
-        if (e.key === "Enter" || e.key === " ") {
-            e.preventDefault();
-            openDetail();
-        }
-    }}
+    class="mobile-selected-trail-card rounded-2xl bg-menu-background text-content border border-input-border/60 shadow-[0_8px_28px_rgba(0,0,0,0.2)] p-3 flex gap-3 items-start"
 >
-    <div
-        class="w-[90px] h-[90px] rounded-xl overflow-hidden shrink-0 bg-input-background flex items-center justify-center"
+    <a
+        href={detailHref}
+        aria-label={trail.name}
+        class="w-[90px] h-[90px] rounded-xl overflow-hidden shrink-0 bg-input-background flex items-center justify-center focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#242734]"
     >
         {#if isVideoURL(thumbnail)}
             <!-- svelte-ignore a11y_media_has_caption -->
@@ -108,13 +111,16 @@
         {:else}
             <img class="w-full h-full object-cover" src={thumbnail} alt="" />
         {/if}
-    </div>
+    </a>
 
     <div class="flex-1 min-w-0">
         <div class="flex items-start gap-2">
-            <h4 class="font-bold text-[15px] leading-snug line-clamp-2 flex-1 wrap-anywhere">
+            <a
+                href={detailHref}
+                class="font-bold text-[15px] leading-snug line-clamp-2 flex-1 wrap-anywhere text-content hover:underline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#242734] rounded"
+            >
                 {trail.name}
-            </h4>
+            </a>
             <div class="flex items-center gap-1 shrink-0">
                 {#if trail.public}
                     <span
@@ -127,13 +133,14 @@
                 <button
                     type="button"
                     aria-label={$_("close")}
-                    class="w-6 h-6 rounded-full bg-content/[0.06] hover:bg-secondary-hover flex items-center justify-center text-content/70 text-xs cursor-pointer"
-                    onclick={(e) => {
-                        e.stopPropagation();
-                        ondismiss();
-                    }}
+                    class="w-11 h-11 -mr-1.5 -mt-1.5 rounded-full hover:bg-secondary-hover flex items-center justify-center text-content/70 text-sm cursor-pointer focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#242734]"
+                    onclick={ondismiss}
                 >
-                    <i class="fa fa-xmark" aria-hidden="true"></i>
+                    <span
+                        class="w-7 h-7 rounded-full bg-content/[0.06] flex items-center justify-center"
+                    >
+                        <i class="fa fa-xmark" aria-hidden="true"></i>
+                    </span>
                 </button>
             </div>
         </div>
@@ -193,19 +200,30 @@
             <StatChip icon="fa-ruler" label={formatDistance(trail.distance)} />
             <StatChip icon="fa-clock" label={formatTimeHHMM(trailDisplayDuration(trail))} />
             <StatChip icon="fa-arrow-trend-up" label={formatElevation(trail.elevation_gain)} />
-            <StatChip icon="fa-arrow-trend-down" label={formatElevation(trail.elevation_loss)} />
+            {#if (trail.elevation_loss ?? 0) > 0}
+                <StatChip icon="fa-arrow-trend-down" label={formatElevation(trail.elevation_loss)} />
+            {/if}
         </div>
 
-        <div class="mt-2.5 flex items-center justify-end">
+        <div class="mt-2.5 flex items-center justify-end gap-2">
+            {#if ongroup}
+                <button
+                    type="button"
+                    data-testid="mobile-card-group-btn"
+                    onclick={() => ongroup(trail)}
+                    class="inline-flex items-center gap-1.5 rounded-full border border-input-border/70 bg-content/[0.04] hover:bg-content/[0.09] text-content px-3.5 min-h-11 sm:min-h-9 text-xs font-semibold whitespace-nowrap cursor-pointer transition-colors focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#242734]"
+                >
+                    <i class="fa-solid fa-user-group text-[11px]" aria-hidden="true"></i>
+                    <span>{$_("group", { default: "Grup" })}</span>
+                </button>
+            {/if}
             <a
                 href={navigateHref}
-                onclick={(e) => e.stopPropagation()}
-                onkeydown={(e) => e.stopPropagation()}
-                class="inline-flex items-center gap-1.5 rounded-full bg-emerald-700 hover:bg-emerald-800 text-white px-3.5 py-1.5 text-xs font-semibold whitespace-nowrap shadow-sm transition-colors"
+                class="inline-flex items-center gap-1.5 rounded-full bg-[#242734] hover:bg-[#242734]/90 text-white px-4 min-h-11 sm:min-h-9 text-xs font-semibold whitespace-nowrap shadow-sm transition-colors focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#242734]"
             >
                 <i class="fa-solid fa-location-arrow text-[11px]" aria-hidden="true"></i>
-                <span>{$_("start-trail", { default: "Start" })}</span>
+                <span>{$_("start-trail", { default: "Navighează" })}</span>
             </a>
         </div>
     </div>
-</div>
+</article>

@@ -14,6 +14,8 @@ import 'package:wanderer/models/route_travel_bucket.dart';
 Future<RouteTravelBucket?> showTravelProfileSheet(BuildContext context) {
   return showModalBottomSheet<RouteTravelBucket>(
     context: context,
+    useRootNavigator: true,
+    useSafeArea: true,
     isDismissible: true,
     enableDrag: true,
     shape: const RoundedRectangleBorder(
@@ -24,17 +26,14 @@ Future<RouteTravelBucket?> showTravelProfileSheet(BuildContext context) {
         builder: (context, ref, _) {
           final categories = ref.watch(categoryProvider).value ?? const [];
 
-          // 5 cards can exceed the sheet height on smaller screens, so make
-          // it scrollable instead of overflowing.
-          // Opened from the shell, so the sheet sits behind the bottom app
-          // bar: its padding here is the bar's full height, system inset
-          // included. 56 more clears the docked FAB's overhang.
+          // Modal opens on the root navigator above the shell's bottom bar, so
+          // standard safe-area bottom inset padding is sufficient.
           return SingleChildScrollView(
             padding: EdgeInsets.fromLTRB(
               16,
               16,
               16,
-              MediaQuery.paddingOf(context).bottom + 56,
+              MediaQuery.paddingOf(context).bottom + 16,
             ),
             child: Column(
               mainAxisSize: MainAxisSize.min,

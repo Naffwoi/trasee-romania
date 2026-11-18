@@ -19,6 +19,7 @@ class ListQuickFilterBar extends ConsumerWidget {
   void _showSortSheet(BuildContext context, WidgetRef ref, ListFilter filter) {
     showModalBottomSheet(
       context: context,
+      useRootNavigator: true,
       isScrollControlled: true,
       shape: const RoundedRectangleBorder(
         borderRadius: BorderRadius.vertical(top: Radius.circular(20)),

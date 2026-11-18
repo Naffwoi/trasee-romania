@@ -11,10 +11,13 @@ import 'package:wanderer/components/trail/stat_chip.dart';
 import 'package:wanderer/components/trail/sync_status_chip.dart';
 import 'package:wanderer/components/trail/trail_category_label.dart';
 import 'package:wanderer/i18n/app_localizations.dart';
+import 'package:wanderer/models/global_search_models.dart';
+import 'package:wanderer/models/trail.dart';
 import 'package:wanderer/models/trail_summary.dart';
 import 'package:wanderer/provider/auth_provider.dart';
 import 'package:wanderer/provider/local_settings_provider.dart';
 import 'package:wanderer/util/format.dart';
+import 'package:wanderer/util/trail/curated_carpathian_photos.dart';
 
 class TrailCard extends ConsumerWidget {
   final TrailSummary trail;
@@ -43,11 +46,27 @@ class TrailCard extends ConsumerWidget {
         ? trail.localPhotos.first
         : null;
 
-    WandererPhoto? photo;
+    Widget? photo;
 
     if (trail.isLocal && localPath != null) {
       if (File(localPath).existsSync()) {
         photo = WandererPhoto.file(localPath, errorBuilder: _buildPlaceholder);
+      }
+    }
+
+    if (photo == null && isPlaceholderPhotoName(trail.summaryThumbnail)) {
+      final curated = resolveCuratedCarpathianPhoto(
+        name: trail.name,
+        location: trail.location,
+        lat: trail is TrailSearchResult
+            ? (trail as TrailSearchResult).geo.lat
+            : (trail is Trail ? (trail as Trail).lat : null),
+        lon: trail is TrailSearchResult
+            ? (trail as TrailSearchResult).geo.lng
+            : (trail is Trail ? (trail as Trail).lon : null),
+      );
+      if (curated != null) {
+        photo = Image.asset(curated.assetPath, fit: BoxFit.cover);
       }
     }
 

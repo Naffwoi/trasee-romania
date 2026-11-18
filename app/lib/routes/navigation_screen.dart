@@ -46,6 +46,7 @@ import 'package:wanderer/models/waypoint.dart';
 import 'package:wanderer/provider/api_provider.dart';
 import 'package:wanderer/provider/auth_provider.dart';
 import 'package:wanderer/provider/foreground_position_stream_provider.dart';
+import 'package:wanderer/provider/group_session_provider.dart';
 import 'package:wanderer/provider/local_settings_provider.dart';
 import 'package:wanderer/provider/map_style_json_provider.dart';
 import 'package:wanderer/provider/nav_session_hibernation_provider.dart';
@@ -349,6 +350,7 @@ class _NavigationScreenState extends ConsumerState<NavigationScreen>
   TrailLiveService? _liveService;
   final ValueNotifier<GroupSessionModel?> _groupSession =
       ValueNotifier<GroupSessionModel?>(null);
+  VoidCallback? _groupSessionSyncListener;
   final ValueNotifier<GroupMemberModel?> _selectedGroupMember =
       ValueNotifier<GroupMemberModel?>(null);
   final ValueNotifier<int?> _activeHikers30m = ValueNotifier<int?>(null);
@@ -733,6 +735,20 @@ class _NavigationScreenState extends ConsumerState<NavigationScreen>
     });
     _myActiveSos.addListener(_syncSosPowerOverride);
     _nearbySosAlerts.addListener(_syncSosPowerOverride);
+
+    final seededGroup = ref.read(globalGroupSessionProvider);
+    if (seededGroup != null && _groupSession.value == null) {
+      _groupSession.value = seededGroup;
+      _configureBleForActiveGroup(seededGroup);
+      _radioScheduler.updateState(hasActiveGroup: true);
+    }
+    _groupSessionSyncListener = () {
+      if (!mounted) return;
+      ref
+          .read(globalGroupSessionProvider.notifier)
+          .syncExternalSession(_groupSession.value);
+    };
+    _groupSession.addListener(_groupSessionSyncListener!);
 
     _motionSub = _motionChannel.events.listen(_powerEngine.ingestMotionEvent);
     unawaited(_motionChannel.startStepMonitoring());
@@ -3575,6 +3591,7 @@ class _NavigationScreenState extends ConsumerState<NavigationScreen>
     if (!mounted) return;
     await showModalBottomSheet<void>(
       context: context,
+      useRootNavigator: true,
       isScrollControlled: true,
       backgroundColor: Colors.transparent,
       builder: (ctx) => PeakFinderSheet(
@@ -3991,15 +4008,13 @@ class _NavigationScreenState extends ConsumerState<NavigationScreen>
     unawaited(_bleMeshEngine.dispose());
     _valhallaRerouteCancelToken?.cancel('dispose');
     _disconnectLiveSse();
+    if (_groupSessionSyncListener != null) {
+      _groupSession.removeListener(_groupSessionSyncListener!);
+      _groupSessionSyncListener = null;
+    }
     if (active_nav.read(_store) == null) {
       final service = _liveService;
       if (service != null && service.isConfigured) {
-        final activeGroup = _groupSession.value;
-        if (activeGroup != null && !activeGroup.isOfflineBleGroup) {
-          unawaited(
-            service.leaveGroup(activeGroup.code).catchError((Object _) {}),
-          );
-        }
         unawaited(service.clearHeartbeat());
       }
     }

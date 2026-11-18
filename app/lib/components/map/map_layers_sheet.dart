@@ -6,6 +6,8 @@ import 'package:wanderer/provider/local_settings_provider.dart';
 Future<void> showMapLayersSheet(BuildContext context) {
   return showModalBottomSheet<void>(
     context: context,
+    useRootNavigator: true,
+    useSafeArea: true,
     isScrollControlled: true,
     backgroundColor: Theme.of(
       context,

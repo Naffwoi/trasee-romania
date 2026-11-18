@@ -197,6 +197,7 @@ class _LibraryScreenState extends ConsumerState<LibraryScreen> {
 
     showModalBottomSheet(
       context: context,
+      useRootNavigator: true,
       builder: (ctx) => SafeArea(
         child: Column(
           mainAxisSize: MainAxisSize.min,

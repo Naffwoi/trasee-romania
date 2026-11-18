@@ -31,3 +31,6 @@ DESIGN.md
 PRODUCT.md
 __pycache__/
 *.py[cod]
+
+.stitch/
+graphify-out/

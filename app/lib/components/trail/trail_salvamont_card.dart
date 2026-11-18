@@ -7,7 +7,7 @@ import 'package:wanderer/provider/local_settings_provider.dart';
 import 'package:wanderer/provider/salvamont_provider.dart';
 import 'package:wanderer/util/emergency/salvamont_resolver.dart';
 
-class TrailSalvamontCard extends ConsumerWidget {
+class TrailSalvamontCard extends ConsumerStatefulWidget {
   const TrailSalvamontCard({
     super.key,
     required this.trail,
@@ -17,6 +17,13 @@ class TrailSalvamontCard extends ConsumerWidget {
   final Trail trail;
   final Gpx? gpx;
 
+  @override
+  ConsumerState<TrailSalvamontCard> createState() => _TrailSalvamontCardState();
+}
+
+class _TrailSalvamontCardState extends ConsumerState<TrailSalvamontCard> {
+  bool _showLocalDispatches = false;
+
   Future<void> _dial(String number) async {
     final uri = Uri(scheme: 'tel', path: number);
     try {
@@ -25,7 +32,7 @@ class TrailSalvamontCard extends ConsumerWidget {
   }
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
+  Widget build(BuildContext context) {
     final ds = ref.watch(salvamontDatasetProvider).value;
     if (ds == null) return const SizedBox.shrink();
 
@@ -33,8 +40,8 @@ class TrailSalvamontCard extends ConsumerWidget {
     final isRo = !langCode.toLowerCase().startsWith('en');
 
     final pts = <({double lat, double lon, double? ele})>[];
-    if (gpx != null) {
-      for (final trk in gpx!.trks) {
+    if (widget.gpx != null) {
+      for (final trk in widget.gpx!.trks) {
         for (final seg in trk.trksegs) {
           for (final wpt in seg.trkpts) {
             if (wpt.lat != null && wpt.lon != null) {
@@ -44,8 +51,8 @@ class TrailSalvamontCard extends ConsumerWidget {
         }
       }
     }
-    if (pts.isEmpty && trail.lat != null && trail.lon != null) {
-      pts.add((lat: trail.lat!, lon: trail.lon!, ele: null));
+    if (pts.isEmpty && widget.trail.lat != null && widget.trail.lon != null) {
+      pts.add((lat: widget.trail.lat!, lon: widget.trail.lon!, ele: null));
     }
 
     final summary = resolveTrailSalvamontSummary(
@@ -147,45 +154,89 @@ class TrailSalvamontCard extends ConsumerWidget {
           ],
           const SizedBox(height: 10),
           Wrap(
-            spacing: 6,
-            runSpacing: 6,
+            spacing: 8,
+            runSpacing: 8,
             children: [
               ActionChip(
+                key: const ValueKey('salvamont-call-112'),
                 backgroundColor: const Color(0xFFDC2626),
                 side: BorderSide.none,
+                avatar: const Icon(
+                  Icons.phone_in_talk_rounded,
+                  size: 15,
+                  color: Colors.white,
+                ),
                 labelStyle: const TextStyle(
                   color: Colors.white,
                   fontWeight: FontWeight.w800,
-                  fontSize: 11,
+                  fontSize: 12,
                 ),
-                label: const Text('📞 112'),
+                label: const Text('112'),
                 onPressed: () => _dial('112'),
               ),
               ActionChip(
+                key: const ValueKey('salvamont-call-national'),
                 backgroundColor: const Color(0xFF242734),
                 side: BorderSide.none,
+                avatar: const Icon(
+                  Icons.shield_outlined,
+                  size: 15,
+                  color: Colors.white,
+                ),
                 labelStyle: const TextStyle(
                   color: Colors.white,
                   fontWeight: FontWeight.w700,
-                  fontSize: 11,
+                  fontSize: 12,
                 ),
                 label: const Text('0-SALVAMONT'),
                 onPressed: () => _dial(ds.nationalDispatchPhone),
               ),
-              for (final svcEntry in summary.services)
+              if (summary.services.isNotEmpty)
                 ActionChip(
+                  key: const ValueKey('salvamont-local-toggle'),
                   labelStyle: TextStyle(
                     color: theme.colorScheme.onSurface,
-                    fontWeight: FontWeight.w700,
+                    fontWeight: FontWeight.w600,
                     fontSize: 11,
                   ),
                   label: Text(
-                    '${svcEntry.service.shortName}: ${formatRoPhoneDisplay(svcEntry.service.primaryPhone)}',
+                    isRo
+                        ? 'Dispecerate locale (${summary.services.length}) ${_showLocalDispatches ? "▴" : "▾"}'
+                        : 'Local dispatches (${summary.services.length}) ${_showLocalDispatches ? "▴" : "▾"}',
                   ),
-                  onPressed: () => _dial(svcEntry.service.primaryPhone),
+                  onPressed: () => setState(
+                    () => _showLocalDispatches = !_showLocalDispatches,
+                  ),
                 ),
             ],
           ),
+          if (_showLocalDispatches && summary.services.isNotEmpty) ...[
+            const SizedBox(height: 8),
+            Wrap(
+              spacing: 6,
+              runSpacing: 6,
+              children: [
+                for (final svcEntry in summary.services)
+                  ActionChip(
+                    key: ValueKey('salvamont-local-${svcEntry.service.id}'),
+                    avatar: Icon(
+                      Icons.call_outlined,
+                      size: 14,
+                      color: theme.colorScheme.onSurface,
+                    ),
+                    labelStyle: TextStyle(
+                      color: theme.colorScheme.onSurface,
+                      fontWeight: FontWeight.w600,
+                      fontSize: 11,
+                    ),
+                    label: Text(
+                      '${svcEntry.service.shortName}: ${formatRoPhoneDisplay(svcEntry.service.primaryPhone)}',
+                    ),
+                    onPressed: () => _dial(svcEntry.service.primaryPhone),
+                  ),
+              ],
+            ),
+          ],
         ],
       ),
     );

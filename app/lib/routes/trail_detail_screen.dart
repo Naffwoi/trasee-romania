@@ -10,6 +10,8 @@ import 'package:wanderer/components/trail/trail_panel.dart';
 import 'package:wanderer/i18n/app_localizations.dart';
 import 'package:wanderer/models/trail.dart';
 import 'package:wanderer/models/trail_sync_state.dart';
+import 'package:wanderer/provider/group_session_provider.dart';
+import 'package:wanderer/provider/local_settings_provider.dart';
 import 'package:wanderer/provider/trail/local_trail_provider.dart';
 import 'package:wanderer/provider/trail/trail_download_state_provider.dart';
 import 'package:wanderer/provider/trail/trail_library_provider.dart';
@@ -259,6 +261,7 @@ class _TrailDetailScreenState extends ConsumerState<TrailDetailScreen> {
                       : [
                           if (!availableOffline) ...[
                             Expanded(
+                              flex: 6,
                               child: OutlinedButton.icon(
                                 onPressed: isDownloading
                                     ? null
@@ -268,10 +271,15 @@ class _TrailDetailScreenState extends ConsumerState<TrailDetailScreen> {
                                                 .notifier,
                                           )
                                           .download(trail),
+                                style: OutlinedButton.styleFrom(
+                                  padding: const EdgeInsets.symmetric(
+                                    horizontal: 8,
+                                  ),
+                                ),
                                 icon: isDownloading
                                     ? SizedBox(
-                                        width: 18,
-                                        height: 18,
+                                        width: 16,
+                                        height: 16,
                                         child: CircularProgressIndicator(
                                           strokeWidth: 2,
                                           color: Theme.of(
@@ -281,12 +289,15 @@ class _TrailDetailScreenState extends ConsumerState<TrailDetailScreen> {
                                       )
                                     : FaIcon(
                                         FontAwesomeIcons.download,
+                                        size: 14,
                                         color: Theme.of(
                                           context,
                                         ).colorScheme.onSurface,
                                       ),
                                 label: Text(
                                   AppLocalizations.of(context)!.download,
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
                                   style: TextStyle(
                                     color: Theme.of(
                                       context,
@@ -298,7 +309,40 @@ class _TrailDetailScreenState extends ConsumerState<TrailDetailScreen> {
                             const SizedBox(width: 8),
                           ],
                           Expanded(
+                            flex: 5,
+                            child: OutlinedButton.icon(
+                              key: const ValueKey('trail-detail-group-btn'),
+                              style: OutlinedButton.styleFrom(
+                                padding: const EdgeInsets.symmetric(
+                                  horizontal: 8,
+                                ),
+                              ),
+                              onPressed: () => openGlobalGroupSheet(
+                                context,
+                                ref,
+                                trailId: trail.id,
+                                trailName: trail.name,
+                              ),
+                              icon: const Icon(Icons.group_outlined, size: 17),
+                              label: Text(
+                                !(ref.watch(localeProvider)?.languageCode ?? 'ro')
+                                        .toLowerCase()
+                                        .startsWith('en')
+                                    ? 'Grup'
+                                    : 'Group',
+                                maxLines: 1,
+                              ),
+                            ),
+                          ),
+                          const SizedBox(width: 8),
+                          Expanded(
+                            flex: 7,
                             child: ElevatedButton.icon(
+                              style: ElevatedButton.styleFrom(
+                                padding: const EdgeInsets.symmetric(
+                                  horizontal: 10,
+                                ),
+                              ),
                               onPressed: _isLaunching
                                   ? null
                                   : () async {
@@ -323,9 +367,12 @@ class _TrailDetailScreenState extends ConsumerState<TrailDetailScreen> {
                                     )
                                   : const FaIcon(
                                       FontAwesomeIcons.locationArrow,
+                                      size: 15,
                                     ),
                               label: Text(
                                 AppLocalizations.of(context)!.navigate,
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
                               ),
                             ),
                           ),

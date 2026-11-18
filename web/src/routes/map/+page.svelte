@@ -1,12 +1,28 @@
 <script lang="ts">
     import { replaceState } from "$app/navigation";
     import { page } from "$app/state";
+    import GroupSheet from "#lib/components/navigation/group_sheet.svelte";
     import TrailSearchBar from "#lib/components/trail/trail_search_bar.svelte";
     import TrailResultControls from "#lib/components/trail/trail_result_controls.svelte";
     import TrailMapResults, { type MapCamera } from "#lib/components/trail/trail_map_results.svelte";
+    import { normalizeGroupCode } from "#lib/live/live_client.ts";
     import type { Trail, TrailFilter } from "#lib/models/trail.ts";
+    import {
+        activeGroupBusy,
+        activeGroupSession,
+        createSharedGroup,
+        groupSheetInitialCode,
+        groupSheetOpen,
+        groupSheetTrailId,
+        groupSheetTrailName,
+        joinSharedGroup,
+        leaveSharedGroup,
+        openSharedGroupSheet,
+        restoreSharedGroupSession,
+    } from "#lib/stores/group_store.ts";
     import { loadSearchLayout, searchLayout, updateSearchLayout } from "#lib/stores/search_layout_store.ts";
     import { trails_search_filter, trails_search_map_data } from "#lib/stores/trail_store.ts";
+    import { currentUser } from "#lib/stores/user_store.ts";
     import { sanitizeTrailFilter } from "#lib/util/trail_filter_util.ts";
     import { isTrailSearchBounds, trailSearchBoundsFromUrl, type TrailSearchBounds } from "#lib/util/trail_search_util.ts";
     import type { Snapshot } from "@sveltejs/kit";
@@ -112,6 +128,12 @@
         window.addEventListener("resize", updateFullscreenLayout);
         updateFullscreenLayout();
         loadSearchLayout();
+        const urlGroupCode = normalizeGroupCode(page.url.searchParams.get("group"));
+        if (urlGroupCode) {
+            openSharedGroupSheet({ joinCode: urlGroupCode });
+        } else {
+            void restoreSharedGroupSession();
+        }
         window.addEventListener("keydown", handleEscape, true);
         try {
             const stored = localStorage.getItem("mapResultsDisplay");
@@ -394,6 +416,19 @@
                 {sortOptions}
                 onsort={(sort, sortOrder) => applySearch({ ...filter, sort: sort as TrailFilter["sort"], sortOrder })}
             />
+            <button
+                type="button"
+                data-testid="map-top-group-btn"
+                class="filter-stadium-chip"
+                onclick={() => openSharedGroupSheet()}
+                aria-label="Grup Live"
+            >
+                {#if $activeGroupSession}
+                    <span class="w-2 h-2 rounded-full bg-emerald-500 shrink-0" aria-hidden="true"></span>
+                {/if}
+                <i class="fa-solid fa-user-group text-xs opacity-80" aria-hidden="true"></i>
+                <span>{$activeGroupSession ? $activeGroupSession.code : "Grup"}</span>
+            </button>
         </div>
         {#if resultError || markerError}
             <p class="map-error" role="alert">{$_("trail-search-error")} <button type="button" onclick={refresh}>{$_("trail-search-retry")}</button></p>
@@ -406,6 +441,7 @@
                 expanded={expandedLayout} onenlarge={toggleExpanded}
                 initialBounds={viewport} initialCamera={restoredCamera} {initialCenter} boundingBox={page.data.boundingBox}
                 settings={page.data.settings} display={resultDisplay} near={filter.near} onviewport={onViewport}
+                ongroup={(t) => openSharedGroupSheet({ trailId: t.id, trailName: t.name })}
                 onupdate={handleTrailsUpdated} {filter} tableHeader={sortOptions.filter(option => option.value !== "elevation_loss" && option.value !== "relevance")} onsort={sortTable}>
                 {#snippet moreResults()}
                     {#if hasMore}
@@ -421,6 +457,18 @@
         </div>
     </div>
 </main>
+
+<GroupSheet
+    bind:open={$groupSheetOpen}
+    groupSession={$activeGroupSession}
+    busy={$activeGroupBusy}
+    initialDisplayName={$currentUser?.preferred_username || $currentUser?.username || ""}
+    initialTrailName={$groupSheetTrailName}
+    initialJoinCode={$groupSheetInitialCode}
+    onCreateGroup={(name) => void createSharedGroup(name, $groupSheetTrailId)}
+    onJoinGroup={(code, name) => void joinSharedGroup(code, name, $groupSheetTrailId)}
+    onLeaveGroup={() => void leaveSharedGroup()}
+/>
 
 <style>
     .map-page {

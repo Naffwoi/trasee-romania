@@ -269,10 +269,12 @@ class _TrailMapState extends ConsumerState<TrailMap>
         if (widget.trackingMode != null)
           LocationFollowController(trackingMode: widget.trackingMode!),
 
-        const WandererMapScalebar(alignment: Alignment.topLeft),
-        const WandererAttribution(
-          alignment: Alignment.topLeft,
-          padding: EdgeInsets.symmetric(horizontal: 10, vertical: 44),
+        if (!widget.embedded) const WandererMapScalebar(alignment: Alignment.topLeft),
+        WandererAttribution(
+          alignment: widget.embedded ? Alignment.bottomLeft : Alignment.topLeft,
+          padding: widget.embedded
+              ? const EdgeInsets.symmetric(horizontal: 8, vertical: 8)
+              : const EdgeInsets.symmetric(horizontal: 10, vertical: 44),
         ),
 
         Align(

@@ -72,7 +72,11 @@ abstract class TrailSearchResult
   String? get summaryAuthorActorId => author.isNotEmpty ? author : null;
 
   @override
-  DateTime? get summaryDate => DateTime.fromMillisecondsSinceEpoch(date * 1000);
+  DateTime? get summaryDate {
+    if (date <= 86400) return null;
+    final dt = DateTime.fromMillisecondsSinceEpoch(date * 1000, isUtc: true);
+    return dt.year <= 1971 ? null : dt.toLocal();
+  }
 
   @override
   int get summaryDifficulty => difficulty;

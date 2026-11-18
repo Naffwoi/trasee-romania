@@ -1,8 +1,7 @@
 <script lang="ts">
-    
     import { browser } from "$app/env";
     import { beforeNavigate } from "$app/navigation";
-    import type { Snippet } from 'svelte';
+    import type { Snippet } from "svelte";
     import { backIn, backOut } from "svelte/easing";
     import { slide } from "svelte/transition";
 
@@ -12,16 +11,14 @@
     }
 
     let { open = $bindable(false), children }: Props = $props();
+    let dialogEl = $state<HTMLDialogElement | undefined>();
 
     $effect(() => {
-        if (open && browser) {
-            document.body.style.position = "fixed";
-            document.body.style.top = `-${window.scrollY}px`;
-        } else if (browser) {
-            const scrollY = document.body.style.top;
-            document.body.style.position = "";
-            document.body.style.top = "";
-            window.scrollTo(0, parseInt(scrollY || "0") * -1);
+        if (!browser) return;
+        if (open && dialogEl && !dialogEl.open) {
+            dialogEl.showModal?.();
+        } else if (!open && dialogEl?.open) {
+            dialogEl.close?.();
         }
     });
 
@@ -32,20 +29,25 @@
 </script>
 
 {#if open}
-    <div
-        class="fixed drawer-overlay h-screen w-screen backdrop-blur-md z-50 bg-gray-500 opacity-50 cursor-pointer"
-        onclick={() => (open = false)}
-        onkeydown={(e) => {
-            if (e.key == "Escape") open = false;
+    <dialog
+        bind:this={dialogEl}
+        onclose={() => (open = false)}
+        onclick={(e) => {
+            if (e.target === dialogEl) open = false;
         }}
-        role="button"
-        tabindex="0"
-    ></div>
-    <div
-        class="absolute flex flex-col overflow-y-auto w-72 h-dvh bg-background right-0 top-0 z-50"
+        class="wanderer-drawer fixed inset-0 m-0 ml-auto h-dvh max-h-none w-72 max-w-[85vw] bg-background text-content p-0 border-0 shadow-2xl overflow-y-auto overscroll-contain"
         in:slide={{ axis: "x", easing: backOut }}
         out:slide={{ axis: "x", easing: backIn }}
     >
-        {@render children?.()}
-    </div>
+        <div class="flex flex-col min-h-full">
+            {@render children?.()}
+        </div>
+    </dialog>
 {/if}
+
+<style>
+    .wanderer-drawer::backdrop {
+        background: rgba(18, 20, 28, 0.45);
+        backdrop-filter: blur(4px);
+    }
+</style>

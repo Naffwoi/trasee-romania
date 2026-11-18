@@ -41,8 +41,10 @@ import 'objectbox.g.dart';
 import 'provider/router_provider.dart';
 import 'provider/local_settings_provider.dart';
 import 'theme/theme.dart';
+import 'provider/group_session_provider.dart';
 import 'provider/pending_launch_location_provider.dart';
 import 'provider/pending_trail_import_provider.dart';
+import 'util/inbound_uri_guard.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -259,6 +261,20 @@ class _MainAppState extends ConsumerState<MainApp> with WidgetsBindingObserver {
 
     // App shortcuts: while running, and the one that launched the app.
     unawaited(_quickActions.initialize(_handleShortcut).catchError((_) {}));
+
+    InboundGroupLinkHandler.onGroupCode = (code) {
+      if (!mounted) return;
+      ref.read(pendingGroupJoinCodeProvider.notifier).setCode(code);
+    };
+    final defaultUri = Uri.tryParse(
+      WidgetsBinding.instance.platformDispatcher.defaultRouteName,
+    );
+    if (defaultUri != null) {
+      final code = extractGroupCodeFromUri(defaultUri);
+      if (code != null) {
+        ref.read(pendingGroupJoinCodeProvider.notifier).setCode(code);
+      }
+    }
   }
 
   // The foreground trigger.
@@ -271,6 +287,7 @@ class _MainAppState extends ConsumerState<MainApp> with WidgetsBindingObserver {
 
   @override
   void dispose() {
+    InboundGroupLinkHandler.onGroupCode = null;
     WidgetsBinding.instance.removeObserver(this);
     _authSub?.close();
     _onlineStatusSub?.close();

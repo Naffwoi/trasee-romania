@@ -8,11 +8,13 @@
     }
 
     const IPA_URL =
-        "https://trasee.skillfy.ro/downloads/TraseeRomania-iOS-unsigned.ipa";
+        "https://github.com/Naffwoi/trasee-romania/releases/download/ios-latest/TraseeRomania-iOS-unsigned.ipa";
     const APK_ARM64_URL =
-        "https://trasee.skillfy.ro/downloads/TraseeRomania-Android-arm64.apk";
+        "https://github.com/Naffwoi/trasee-romania/releases/download/ios-latest/TraseeRomania-Android-arm64.apk";
     const APK_URL =
-        "https://trasee.skillfy.ro/downloads/TraseeRomania-Android.apk";
+        "https://github.com/Naffwoi/trasee-romania/releases/download/ios-latest/TraseeRomania-Android.apk";
+    const ALTSTORE_SOURCE_URL =
+        "https://github.com/Naffwoi/trasee-romania/releases/download/ios-latest/altstore.json";
     const RELEASE_PAGE_URL =
         "https://github.com/Naffwoi/trasee-romania/releases/tag/ios-latest";
     const TEST_TRAIL_URL = "/map/trail/@romania/ayl2z0tf824rp3n";
@@ -198,19 +200,19 @@
             </div>
 
             <div class="rounded-2xl bg-content/[0.05] border border-input-border/50 px-3.5 py-2.5 text-xs font-mono break-all select-all">
-                https://trasee.skillfy.ro/altstore.json
+                {ALTSTORE_SOURCE_URL}
             </div>
 
             <div class="grid grid-cols-1 sm:grid-cols-2 gap-2">
                 <a
-                    href="sidestore://source?url=https://trasee.skillfy.ro/altstore.json"
+                    href={`sidestore://source?url=${ALTSTORE_SOURCE_URL}`}
                     class="py-2.5 px-3 rounded-2xl bg-indigo-600 hover:bg-indigo-700 text-white font-semibold text-xs flex items-center justify-center gap-2 transition-colors"
                 >
                     <i class="fa-solid fa-plus" aria-hidden="true"></i>
                     <span>Adaugă în SideStore</span>
                 </a>
                 <a
-                    href="altstore://source?url=https://trasee.skillfy.ro/altstore.json"
+                    href={`altstore://source?url=${ALTSTORE_SOURCE_URL}`}
                     class="py-2.5 px-3 rounded-2xl bg-teal-600 hover:bg-teal-700 text-white font-semibold text-xs flex items-center justify-center gap-2 transition-colors"
                 >
                     <i class="fa-solid fa-plus" aria-hidden="true"></i>

@@ -3,6 +3,33 @@ import 'dart:async';
 import 'package:flutter/widgets.dart' show BuildContext;
 import 'package:go_router/go_router.dart';
 
+class InboundGroupLinkHandler {
+  static void Function(String code)? onGroupCode;
+}
+
+final RegExp _groupCodeRegex = RegExp(r'^[A-HJ-NP-Z2-9]{6}$');
+
+/// Extracts a 6-character trail group invite code from `wanderer://group/CODE`
+/// or `?group=CODE` URLs when present.
+String? extractGroupCodeFromUri(Uri uri) {
+  final param = uri.queryParameters['group']?.trim().toUpperCase();
+  if (param != null && _groupCodeRegex.hasMatch(param)) {
+    return param;
+  }
+  final segments = uri.pathSegments.where((s) => s.isNotEmpty).toList();
+  if (uri.scheme == 'wanderer' &&
+      uri.host == 'group' &&
+      segments.isNotEmpty) {
+    final cand = segments.first.trim().toUpperCase();
+    if (_groupCodeRegex.hasMatch(cand)) return cand;
+  }
+  if (segments.length >= 2 && segments[segments.length - 2] == 'group') {
+    final cand = segments.last.trim().toUpperCase();
+    if (_groupCodeRegex.hasMatch(cand)) return cand;
+  }
+  return null;
+}
+
 /// Whether [uri] is something the OS handed us rather than a location of this
 /// app.
 ///
@@ -38,6 +65,11 @@ FutureOr<OnEnterResult> ignoreInboundUris(
   GoRouterState nextState,
   GoRouter router,
 ) {
+  final groupCode = extractGroupCodeFromUri(nextState.uri);
+  if (groupCode != null) {
+    InboundGroupLinkHandler.onGroupCode?.call(groupCode);
+    return const Block.stop();
+  }
   if (isInboundUri(nextState.uri)) return const Block.stop();
   return const Allow();
 }

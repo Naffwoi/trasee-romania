@@ -1,7 +1,7 @@
 name: wanderer
 description: "A new Flutter project."
 publish_to: 'none'
-version: 0.2.0+20
+version: 0.2.1+21
 
 environment:
   sdk: ^3.13.0
@@ -92,6 +92,7 @@ flutter:
     - assets/svgs/
     - assets/map/
     - assets/data/
+    - assets/images/carpathians/
   fonts:
     - family: IBMPlexSans
       fonts:

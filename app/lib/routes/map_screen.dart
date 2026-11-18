@@ -21,17 +21,18 @@ import 'package:wanderer/components/map/location_follow_controller.dart';
 import 'package:wanderer/components/map/location_marker_layer.dart';
 import 'package:wanderer/components/map/map_layers_sheet.dart';
 import 'package:wanderer/components/map/salvamont_map_layer.dart';
+import 'package:wanderer/components/map/selected_trail_map_card.dart';
 import 'package:wanderer/components/map/trail_layer.dart'
     show trailPolylineLayers;
 import 'package:wanderer/components/map/trail_markers.dart';
 import 'package:wanderer/components/route_planner/travel_profile_sheet.dart';
 import 'package:wanderer/components/trail/trail_card.dart';
-import 'package:wanderer/components/trail/trail_list_item.dart';
 import 'package:wanderer/i18n/app_localizations.dart';
 import 'package:wanderer/models/global_search_models.dart';
 import 'package:wanderer/models/route_travel_bucket.dart';
 import 'package:wanderer/models/trail.dart';
 import 'package:wanderer/provider/foreground_position_stream_provider.dart';
+import 'package:wanderer/provider/group_session_provider.dart';
 import 'package:wanderer/provider/local_settings_provider.dart';
 import 'package:wanderer/provider/location_tracking_mode_provider.dart';
 import 'package:wanderer/provider/map_camera_provider.dart';
@@ -129,6 +130,13 @@ class _MapScreenState extends ConsumerState<MapScreen>
     super.initState();
     _sheetController.addListener(_onSheetSizeChanged);
     _sheetSize = ValueNotifier<double>(sheetMinSize);
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      final code = ref.read(pendingGroupJoinCodeProvider.notifier).take();
+      if (code != null) {
+        unawaited(openGlobalGroupSheet(context, ref, initialJoinCode: code));
+      }
+    });
     _mapButtonController = AnimationController(
       vsync: this,
       duration: const Duration(milliseconds: 500),
@@ -294,9 +302,15 @@ class _MapScreenState extends ConsumerState<MapScreen>
     ref.read(trailPolylineProvider(trailId).future).then((polyline) {
       if (!mounted || _selectedTrail?.id != trailId) return;
       if (polyline != null) {
+        final media = MediaQuery.paddingOf(context);
         _controller?.fitBoundsKeepingRotation(
           bounds: ml.LngLatBounds.fromPoints(polyline),
-          padding: const EdgeInsets.fromLTRB(40, 56, 40, 248),
+          padding: EdgeInsets.fromLTRB(
+            40,
+            media.top + 136,
+            40,
+            media.bottom + 276,
+          ),
           nativeDuration: const Duration(milliseconds: 750),
         );
       }
@@ -510,6 +524,21 @@ class _MapScreenState extends ConsumerState<MapScreen>
       _controller = null;
       _initialSearchDone = false;
     }
+
+    final activeGroup = ref.watch(globalGroupSessionProvider);
+    final langCode = ref.watch(localeProvider)?.languageCode ?? 'ro';
+    final isRo = !langCode.toLowerCase().startsWith('en');
+
+    ref.listen<String?>(pendingGroupJoinCodeProvider, (_, next) {
+      if (next == null) return;
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted) return;
+        final code = ref.read(pendingGroupJoinCodeProvider.notifier).take();
+        if (code != null) {
+          unawaited(openGlobalGroupSheet(context, ref, initialJoinCode: code));
+        }
+      });
+    });
 
     return Stack(
       children: [
@@ -749,7 +778,7 @@ class _MapScreenState extends ConsumerState<MapScreen>
                 ),
                 const WandererMapScalebar(
                   alignment: Alignment.topLeft,
-                  padding: EdgeInsets.only(left: 24, top: 112),
+                  padding: EdgeInsets.only(left: 24, top: 124),
                 ),
                 WandererAttribution(
                   alignment: Alignment.bottomLeft,
@@ -996,6 +1025,27 @@ class _MapScreenState extends ConsumerState<MapScreen>
           ),
         ),
 
+        Positioned(
+          top: 0,
+          left: 0,
+          right: 0,
+          height: MediaQuery.paddingOf(context).top + 16,
+          child: IgnorePointer(
+            child: DecoratedBox(
+              decoration: BoxDecoration(
+                gradient: LinearGradient(
+                  begin: Alignment.topCenter,
+                  end: Alignment.bottomCenter,
+                  colors: [
+                    Theme.of(context).colorScheme.surface.withValues(alpha: 0.72),
+                    Theme.of(context).colorScheme.surface.withValues(alpha: 0.0),
+                  ],
+                ),
+              ),
+            ),
+          ),
+        ),
+
         SafeArea(
           child: Align(
             alignment: Alignment.topCenter,
@@ -1005,38 +1055,96 @@ class _MapScreenState extends ConsumerState<MapScreen>
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  GestureDetector(
-                    onTap: () => context.push('/search'),
-                    child: Material(
-                      color: Theme.of(context).colorScheme.surface,
-                      elevation: 4,
-                      shadowColor: Colors.black26,
-                      borderRadius: BorderRadius.circular(30),
-                      child: Padding(
-                        padding: const EdgeInsets.symmetric(
-                          horizontal: 16,
-                          vertical: 13,
-                        ),
-                        child: Row(
-                          children: [
-                            Icon(
-                              Icons.search,
-                              color: Theme.of(context).colorScheme.onSurface,
-                            ),
-                            const SizedBox(width: 8),
-                            Expanded(
-                              child: Text(
-                                AppLocalizations.of(context)!.search,
-                                style: const TextStyle(
-                                  color: Colors.grey,
-                                  fontSize: 16,
-                                ),
+                  Row(
+                    children: [
+                      Expanded(
+                        child: GestureDetector(
+                          onTap: () => context.push('/search'),
+                          child: Material(
+                            color: Theme.of(context).colorScheme.surface,
+                            elevation: 4,
+                            shadowColor: Colors.black26,
+                            borderRadius: BorderRadius.circular(30),
+                            child: Padding(
+                              padding: const EdgeInsets.symmetric(
+                                horizontal: 16,
+                                vertical: 13,
+                              ),
+                              child: Row(
+                                children: [
+                                  Icon(
+                                    Icons.search,
+                                    color: Theme.of(context).colorScheme.onSurface,
+                                  ),
+                                  const SizedBox(width: 8),
+                                  Expanded(
+                                    child: Text(
+                                      AppLocalizations.of(context)!.search,
+                                      style: const TextStyle(
+                                        color: Colors.grey,
+                                        fontSize: 16,
+                                      ),
+                                    ),
+                                  ),
+                                ],
                               ),
                             ),
-                          ],
+                          ),
                         ),
                       ),
-                    ),
+                      const SizedBox(width: 8),
+                      Material(
+                        key: const ValueKey('map-top-group-btn'),
+                        color: Theme.of(context).colorScheme.surface,
+                        elevation: 4,
+                        shadowColor: Colors.black26,
+                        borderRadius: BorderRadius.circular(30),
+                        child: InkWell(
+                          borderRadius: BorderRadius.circular(30),
+                          onTap: () => openGlobalGroupSheet(
+                            context,
+                            ref,
+                            trailId: _selectedTrail?.id,
+                            trailName: _selectedTrail?.name,
+                          ),
+                          child: Padding(
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: 14,
+                              vertical: 13,
+                            ),
+                            child: Row(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                if (activeGroup != null) ...[
+                                  Container(
+                                    width: 8,
+                                    height: 8,
+                                    decoration: const BoxDecoration(
+                                      color: Color(0xFF10B981),
+                                      shape: BoxShape.circle,
+                                    ),
+                                  ),
+                                  const SizedBox(width: 6),
+                                ],
+                                Icon(
+                                  Icons.group_outlined,
+                                  size: 20,
+                                  color: Theme.of(context).colorScheme.onSurface,
+                                ),
+                                const SizedBox(width: 6),
+                                Text(
+                                  activeGroup != null
+                                      ? activeGroup.code
+                                      : (isRo ? 'Grup' : 'Group'),
+                                  style: Theme.of(context).textTheme.labelLarge
+                                      ?.copyWith(fontWeight: FontWeight.w700),
+                                ),
+                              ],
+                            ),
+                          ),
+                        ),
+                      ),
+                    ],
                   ),
                   const SizedBox(height: 8),
                   Row(
@@ -1135,7 +1243,7 @@ class _MapScreenState extends ConsumerState<MapScreen>
 
         if (_selectedTrail != null)
           Positioned(
-            bottom: shellBottom + 37,
+            bottom: shellBottom + 44,
             left: 16,
             right: 16,
             child: Dismissible(
@@ -1147,10 +1255,16 @@ class _MapScreenState extends ConsumerState<MapScreen>
                   _selectedPolyline = null;
                 });
               },
-              child: TrailListItem(
+              child: SelectedTrailMapCard(
                 trail: _selectedTrail!,
-                onTrailSelect: () {
+                onOpenDetail: () {
                   context.push('/trail/${_selectedTrail!.id}');
+                },
+                onDismiss: () {
+                  setState(() {
+                    _selectedTrail = null;
+                    _selectedPolyline = null;
+                  });
                 },
               ),
             ),

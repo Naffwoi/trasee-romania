@@ -5,6 +5,7 @@
         formatDistance,
         formatElevation,
         formatTimeHHMM,
+        isValidTrailDate,
         trailDisplayDuration,
     } from "#lib/util/format_util.ts";
     import { _ } from "svelte-i18n";
@@ -237,7 +238,7 @@
                             {trail.like_count}
                         </td>
                         <td class="p-4 text-sm">
-                            {#if trail.created}
+                            {#if isValidTrailDate(trail.created)}
                                 {new Date(trail.created).toLocaleDateString(
                                     undefined,
                                     {
@@ -250,7 +251,7 @@
                             {/if}
                         </td>
                         <td class="p-4 text-sm">
-                            {#if trail.date}
+                            {#if isValidTrailDate(trail.date)}
                                 {new Date(trail.date).toLocaleDateString(
                                     undefined,
                                     {

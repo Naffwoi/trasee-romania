@@ -13,6 +13,7 @@ import 'package:wanderer/components/route_planner/travel_profile_sheet.dart';
 import 'package:wanderer/i18n/app_localizations.dart';
 import 'package:wanderer/models/settings.dart';
 import 'package:wanderer/provider/foreground_position_stream_provider.dart';
+import 'package:wanderer/provider/group_session_provider.dart';
 import 'package:wanderer/provider/online_status_provider.dart';
 import 'package:wanderer/provider/pending_trail_import_provider.dart';
 import 'package:wanderer/provider/settings_provider.dart';
@@ -224,6 +225,10 @@ class _TrailSourceSelectScreenState
   Widget build(BuildContext context) {
     final l10n = AppLocalizations.of(context)!;
     final isOnline = ref.watch(onlineStatusProvider);
+    final isRo = !Localizations.localeOf(context)
+        .languageCode
+        .toLowerCase()
+        .startsWith('en');
 
     // Deferred: [_takePendingImport] clears the provider, which must not
     // happen while it is still notifying its listeners.
@@ -277,6 +282,18 @@ class _TrailSourceSelectScreenState
             isLoading: _importLoading,
             onTap: busy ? null : () => _importGpx(l10n),
           ),
+          const SizedBox(height: 8),
+          _SourceActionCard(
+            key: const ValueKey('source-select-group-card'),
+            icon: FontAwesomeIcons.userGroup,
+            title: isRo
+                ? 'Grup pe traseu / Planifică tură'
+                : 'Trail group / Plan hike',
+            description: isRo
+                ? 'Creează rapid un grup live (inclusiv prin Bluetooth fără semnal), intră cu cod sau organizează o tură.'
+                : 'Start a live group (including offline Bluetooth mesh), join with a 6-character code, or plan a hike.',
+            onTap: busy ? null : () => openGlobalGroupSheet(context, ref),
+          ),
         ],
       ),
     );
@@ -291,6 +308,7 @@ class _SourceActionCard extends StatelessWidget {
   final bool isLoading;
 
   const _SourceActionCard({
+    super.key,
     required this.icon,
     required this.title,
     required this.description,

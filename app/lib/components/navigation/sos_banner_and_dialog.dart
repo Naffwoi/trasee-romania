@@ -49,6 +49,7 @@ Future<SosTriggerSubmission?> showSosTriggerDialog(
 }) {
   return showModalBottomSheet<SosTriggerSubmission>(
     context: context,
+    useRootNavigator: true,
     isScrollControlled: true,
     useSafeArea: true,
     shape: const RoundedRectangleBorder(

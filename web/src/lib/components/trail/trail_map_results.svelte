@@ -38,6 +38,7 @@
         settings?: Settings;
         near: TrailFilter["near"];
         onviewport: (bounds: TrailSearchBounds, zoom: number) => void;
+        ongroup?: (trail: Trail) => void;
         moreResults: Snippet;
     }
     let {
@@ -61,6 +62,7 @@
         settings,
         near,
         onviewport,
+        ongroup,
         moreResults,
         initialCamera,
     }: Props = $props();
@@ -303,6 +305,7 @@
             <MobileSelectedTrailCard
                 trail={selectedTrail}
                 ondismiss={() => (selectedTrail = null)}
+                {ongroup}
             />
         </div>
     {:else}
@@ -344,19 +347,19 @@
         z-index: 35;
     }
     #trail-map :global(.maplibregl-ctrl-top-left) {
-        top: 112px;
+        top: calc(124px + env(safe-area-inset-top, 0px));
         left: 16px;
     }
     #trail-map :global(.maplibregl-ctrl-scale) {
-        background: rgba(255, 255, 255, 0.88);
-        border: 1.5px solid #242734;
-        border-top: none;
-        border-radius: 0 0 4px 4px;
+        background: rgba(255, 255, 255, 0.78);
+        border: none;
+        border-bottom: 2px solid #242734;
+        border-radius: 3px;
         color: #242734;
         font-size: 11px;
-        font-weight: 600;
+        font-weight: 700;
         padding: 1px 6px;
-        box-shadow: 0 1px 4px rgb(0 0 0 / 0.12);
+        box-shadow: none;
     }
     #trail-map :global(.maplibregl-ctrl-top-right) {
         top: 68px;

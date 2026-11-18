@@ -2,6 +2,7 @@
     import { goto } from "$app/navigation";
     import { page } from "$app/state";
     import MetaTags from "#lib/components/base/meta_tags.svelte";
+    import GroupSheet from "#lib/components/navigation/group_sheet.svelte";
     import StatChip from "#lib/components/mobile_shell/stat_chip.svelte";
     import ActiveHikersBadge from "#lib/components/trail/active_hikers_badge.svelte";
     import LikeButton from "#lib/components/trail/like_button.svelte";
@@ -13,6 +14,7 @@
         fetchTrailLiveSummary,
         mergeReportIntoList,
         mergeSosIntoList,
+        normalizeGroupCode,
         subscribeWebPushIfSupported,
         voteReport,
         type LiveStreamHandle,
@@ -24,6 +26,19 @@
         syncReportMapMarkers,
         syncSosMapMarkers,
     } from "#lib/live/report_markers.ts";
+    import {
+        activeGroupBusy,
+        activeGroupSession,
+        createSharedGroup,
+        groupSheetInitialCode,
+        groupSheetOpen,
+        groupSheetTrailId,
+        groupSheetTrailName,
+        joinSharedGroup,
+        leaveSharedGroup,
+        openSharedGroupSheet,
+        restoreSharedGroupSession,
+    } from "#lib/stores/group_store.ts";
     import { currentUser } from "#lib/stores/user_store.ts";
     import { fetchGPX, getFileURL } from "#lib/util/file_util.ts";
     import {
@@ -166,6 +181,16 @@
             });
         }
         void loadLiveSummary();
+        const urlGroupCode = normalizeGroupCode(page.url.searchParams.get("group"));
+        if (urlGroupCode) {
+            openSharedGroupSheet({
+                trailId: trail.id,
+                trailName: trail.name,
+                joinCode: urlGroupCode,
+            });
+        } else {
+            void restoreSharedGroupSession(trail.id);
+        }
 
         summaryPollTimer = setInterval(() => {
             if (typeof document === "undefined" || document.visibilityState === "visible") {
@@ -273,10 +298,26 @@
         <div
             class="pointer-events-auto flex items-center gap-1.5 bg-menu-background/95 backdrop-blur px-2 py-1 rounded-full shadow-md border border-input-border/50 shrink-0"
         >
+            <button
+                type="button"
+                data-testid="trail-detail-group-btn"
+                onclick={() =>
+                    openSharedGroupSheet({
+                        trailId: trail.id,
+                        trailName: trail.name,
+                    })}
+                class="inline-flex items-center gap-1.5 rounded-full border border-input-border/70 bg-content/[0.04] hover:bg-content/[0.09] text-content px-3 min-h-9 text-xs font-semibold whitespace-nowrap cursor-pointer transition-colors focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#242734]"
+            >
+                {#if $activeGroupSession}
+                    <span class="w-2 h-2 rounded-full bg-emerald-500 shrink-0" aria-hidden="true"></span>
+                {/if}
+                <i class="fa-solid fa-user-group text-[11px]" aria-hidden="true"></i>
+                <span>{$activeGroupSession ? $activeGroupSession.code : "Grup"}</span>
+            </button>
             <a
                 href={navigateHref}
                 onclick={requestIosCompassPermissionFromStartTap}
-                class="inline-flex items-center gap-1.5 rounded-full bg-emerald-700 hover:bg-emerald-800 text-white px-3 py-1.5 text-xs font-semibold whitespace-nowrap shadow-sm transition-colors"
+                class="inline-flex items-center gap-1.5 rounded-full bg-[#242734] hover:bg-[#242734]/90 text-white px-3 min-h-9 text-xs font-semibold whitespace-nowrap shadow-sm transition-colors focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#242734]"
             >
                 <i class="fa-solid fa-location-arrow text-[11px]" aria-hidden="true"></i>
                 <span>{$_("start-trail", { default: "Start" })}</span>
@@ -456,21 +497,33 @@
     </section>
 </main>
 
+<GroupSheet
+    bind:open={$groupSheetOpen}
+    groupSession={$activeGroupSession}
+    busy={$activeGroupBusy}
+    initialDisplayName={$currentUser?.preferred_username || $currentUser?.username || ""}
+    initialTrailName={$groupSheetTrailName || trail.name}
+    initialJoinCode={$groupSheetInitialCode}
+    onCreateGroup={(name) => void createSharedGroup(name, $groupSheetTrailId ?? trail.id)}
+    onJoinGroup={(code, name) => void joinSharedGroup(code, name, $groupSheetTrailId ?? trail.id)}
+    onLeaveGroup={() => void leaveSharedGroup()}
+/>
+
 <style>
     #trail-detail-map :global(.maplibregl-ctrl-top-left) {
         top: 64px;
         left: 64px;
     }
     #trail-detail-map :global(.maplibregl-ctrl-scale) {
-        background: rgba(255, 255, 255, 0.88);
-        border: 1.5px solid #242734;
-        border-top: none;
-        border-radius: 0 0 4px 4px;
+        background: rgba(255, 255, 255, 0.78);
+        border: none;
+        border-bottom: 2px solid #242734;
+        border-radius: 3px;
         color: #242734;
         font-size: 11px;
-        font-weight: 600;
+        font-weight: 700;
         padding: 1px 6px;
-        box-shadow: 0 1px 4px rgb(0 0 0 / 0.12);
+        box-shadow: none;
     }
     #trail-detail-map :global(.maplibregl-ctrl-top-right) {
         top: 64px;

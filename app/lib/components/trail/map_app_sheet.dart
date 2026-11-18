@@ -11,6 +11,7 @@ import 'package:wanderer/util/route/map_app.dart';
 Future<MapApp?> showMapAppSheet(BuildContext context, List<MapApp> apps) {
   return showModalBottomSheet<MapApp>(
     context: context,
+    useRootNavigator: true,
     isDismissible: true,
     enableDrag: true,
     shape: const RoundedRectangleBorder(

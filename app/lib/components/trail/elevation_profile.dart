@@ -111,7 +111,14 @@ class _ElevationProfileState extends ConsumerState<ElevationProfile> {
     final minElev = _points.map((p) => p.elevationM).reduce(min);
     final maxElev = _points.map((p) => p.elevationM).reduce(max);
     final maxDist = _points.last.distanceM;
-    final maxDur = widget.durationOverride ?? _points.last.duration;
+    final fallbackSeconds = widget.trail != null
+        ? (trailDisplayDuration(widget.trail!) ?? 0)
+        : 0.0;
+    final maxDur =
+        widget.durationOverride ??
+        (_points.last.duration > Duration.zero
+            ? _points.last.duration
+            : Duration(seconds: fallbackSeconds.round()));
 
     final yMin = (minElev / 100).floor() * 100.0;
     final yMax = ((maxElev + 100) / 50).ceil() * 50.0;
@@ -127,32 +134,29 @@ class _ElevationProfileState extends ConsumerState<ElevationProfile> {
     final Widget statsHeader;
     if (showScrubStats) {
       final pt = _points[_selectedIndex!];
-      statsHeader = Row(
-        mainAxisAlignment: MainAxisAlignment.spaceAround,
-        children: [
-          _buildStatText(
-            pt.duration.pretty(
-              abbreviated: true,
-              tersity: DurationTersity.minute,
-            ),
-            FontAwesomeIcons.clock,
+      statsHeader = _buildStatsHeader([
+        _buildStatText(
+          pt.duration.pretty(
+            abbreviated: true,
+            tersity: DurationTersity.minute,
           ),
-          _buildStatText(
-            formatDistance(pt.distanceM, unit: ref.read(unitProvider)),
-            FontAwesomeIcons.ruler,
-          ),
-          _buildStatText(
-            formatElevation(pt.elevationM, unit: ref.read(unitProvider)),
-            FontAwesomeIcons.mountain,
-          ),
-          _buildStatText(
-            '${pt.gradient >= 0 ? '+' : ''}${pt.gradient.toStringAsFixed(1)}%',
-            pt.gradient >= 0
-                ? FontAwesomeIcons.arrowTrendUp
-                : FontAwesomeIcons.arrowTrendDown,
-          ),
-        ],
-      );
+          FontAwesomeIcons.clock,
+        ),
+        _buildStatText(
+          formatDistance(pt.distanceM, unit: ref.read(unitProvider)),
+          FontAwesomeIcons.ruler,
+        ),
+        _buildStatText(
+          formatElevation(pt.elevationM, unit: ref.read(unitProvider)),
+          FontAwesomeIcons.mountain,
+        ),
+        _buildStatText(
+          '${pt.gradient >= 0 ? '+' : ''}${pt.gradient.toStringAsFixed(1)}%',
+          pt.gradient >= 0
+              ? FontAwesomeIcons.arrowTrendUp
+              : FontAwesomeIcons.arrowTrendDown,
+        ),
+      ]);
     } else {
       final trail = widget.trail;
       final double elevationGain;
@@ -165,27 +169,24 @@ class _ElevationProfileState extends ConsumerState<ElevationProfile> {
         elevationGain = metrics.elevationGain;
         elevationLoss = metrics.elevationLoss;
       }
-      statsHeader = Row(
-        mainAxisAlignment: MainAxisAlignment.spaceAround,
-        children: [
-          _buildStatText(
-            maxDur.pretty(abbreviated: true, tersity: DurationTersity.minute),
-            FontAwesomeIcons.clock,
-          ),
-          _buildStatText(
-            formatDistance(maxDist, unit: ref.read(unitProvider)),
-            FontAwesomeIcons.ruler,
-          ),
-          _buildStatText(
-            formatElevation(elevationGain, unit: ref.read(unitProvider)),
-            FontAwesomeIcons.arrowTrendUp,
-          ),
-          _buildStatText(
-            formatElevation(elevationLoss, unit: ref.read(unitProvider)),
-            FontAwesomeIcons.arrowTrendDown,
-          ),
-        ],
-      );
+      statsHeader = _buildStatsHeader([
+        _buildStatText(
+          maxDur.pretty(abbreviated: true, tersity: DurationTersity.minute),
+          FontAwesomeIcons.clock,
+        ),
+        _buildStatText(
+          formatDistance(maxDist, unit: ref.read(unitProvider)),
+          FontAwesomeIcons.ruler,
+        ),
+        _buildStatText(
+          formatElevation(elevationGain, unit: ref.read(unitProvider)),
+          FontAwesomeIcons.arrowTrendUp,
+        ),
+        _buildStatText(
+          formatElevation(elevationLoss, unit: ref.read(unitProvider)),
+          FontAwesomeIcons.arrowTrendDown,
+        ),
+      ]);
     }
 
     return Column(
@@ -206,8 +207,22 @@ class _ElevationProfileState extends ConsumerState<ElevationProfile> {
     );
   }
 
+  Widget _buildStatsHeader(List<Widget> children) {
+    return SizedBox(
+      width: double.infinity,
+      child: Wrap(
+        alignment: WrapAlignment.spaceEvenly,
+        crossAxisAlignment: WrapCrossAlignment.center,
+        spacing: 12,
+        runSpacing: 4,
+        children: children,
+      ),
+    );
+  }
+
   Widget _buildStatText(String text, FaIconData icon) {
     return Row(
+      mainAxisSize: MainAxisSize.min,
       crossAxisAlignment: CrossAxisAlignment.center,
       children: [
         FaIcon(icon, size: 16),

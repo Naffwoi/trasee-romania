@@ -1,5 +1,4 @@
 import 'dart:math' as math;
-import 'dart:typed_data';
 import 'dart:ui';
 
 import 'package:flutter/material.dart';
@@ -240,15 +239,14 @@ class _WandererMapScalebarState extends State<WandererMapScalebar> {
         padding: widget.padding,
         child: CustomPaint(
           painter: painter,
-          size: Size(painter.width, _height),
+          size: Size(painter.paintWidth, _height),
         ),
       ),
     );
   }
 }
 
-/// Metric bar-length selection and rendering ported from maplibre 0.3.5's
-/// `ScaleBarPainter` (not exported by the package).
+/// Metric bar-length selection and minimalist hairline rendering.
 class _ScaleBarPainter extends CustomPainter {
   _ScaleBarPainter(this.metersPerPixel, this.theme) {
     meters = switch (metersPerPixel) {
@@ -286,6 +284,23 @@ class _ScaleBarPainter extends CustomPainter {
       >= 0.01 => 1,
       _ => metersPerPixel * 100,
     };
+
+    final useKm = meters >= 1000;
+    final isDark = theme.brightness == Brightness.dark;
+    final fg = isDark ? Colors.white : const Color(0xFF242734);
+    _textPainter = TextPainter(
+      text: TextSpan(
+        style: theme.textTheme.bodySmall?.copyWith(
+          color: fg,
+          fontSize: 10.5,
+          fontWeight: FontWeight.w700,
+          height: 1.1,
+        ),
+        text: useKm ? '${(meters / 1000).round()} km' : '${meters.round()} m',
+      ),
+      textAlign: TextAlign.left,
+      textDirection: TextDirection.ltr,
+    )..layout();
   }
 
   final double metersPerPixel;
@@ -293,68 +308,39 @@ class _ScaleBarPainter extends CustomPainter {
 
   late final double meters;
   late final double width = meters / metersPerPixel;
-
-  late final _linePaint = Paint()
-    ..color = Colors.black
-    ..strokeWidth = 1.5;
-  late final _backgroundPaint = Paint()..color = Colors.white60;
+  late final TextPainter _textPainter;
+  double get paintWidth => math.max(width, _textPainter.width + 8) + 2;
 
   @override
   void paint(Canvas canvas, Size size) {
-    final useKm = meters >= 1000;
-    canvas.drawVertices(
-      Vertices.raw(
-        VertexMode.triangles,
-        Float32List.fromList([
-          0,
-          22,
-          0,
-          0,
-          width,
-          22,
-          0,
-          0,
-          width,
-          0,
-          width,
-          22,
-        ]),
-      ),
-      BlendMode.color,
-      _backgroundPaint,
-    );
-    canvas.drawRawPoints(
-      PointMode.lines,
-      Float32List.fromList([
-        0,
-        22,
-        0,
-        0,
-        0,
-        22,
-        width,
-        22,
-        width,
-        0,
-        width,
-        22,
-      ]),
-      _linePaint,
+    final isDark = theme.brightness == Brightness.dark;
+    final fg = isDark ? Colors.white : const Color(0xFF242734);
+    final halo = isDark ? const Color(0xCC12141C) : const Color(0xD9FFFFFF);
+
+    final boxWidth = math.max(width, _textPainter.width + 8);
+    final haloRect = RRect.fromLTRBR(0, 0, boxWidth, 20, const Radius.circular(4));
+    canvas.drawRRect(haloRect, Paint()..color = halo);
+
+    final linePaint = Paint()
+      ..color = fg
+      ..strokeWidth = 1.75
+      ..strokeCap = StrokeCap.square;
+
+    const baselineY = 17.5;
+    const tickTopY = 13.0;
+    canvas.drawLine(Offset(1, baselineY), Offset(width + 1, baselineY), linePaint);
+    canvas.drawLine(const Offset(1, tickTopY), const Offset(1, baselineY), linePaint);
+    canvas.drawLine(
+      Offset(width + 1, tickTopY),
+      Offset(width + 1, baselineY),
+      linePaint,
     );
 
-    final textPainter = TextPainter(
-      text: TextSpan(
-        style: theme.textTheme.bodySmall?.copyWith(color: Colors.black),
-        text: useKm ? '${(meters / 1000).round()} km' : '${meters.round()} m',
-      ),
-      textAlign: TextAlign.left,
-      textDirection: TextDirection.ltr,
-    );
-    textPainter.layout();
-    textPainter.paint(canvas, const Offset(5, 5));
+    _textPainter.paint(canvas, const Offset(4, 2));
   }
 
   @override
   bool shouldRepaint(covariant _ScaleBarPainter oldDelegate) =>
-      metersPerPixel != oldDelegate.metersPerPixel;
+      metersPerPixel != oldDelegate.metersPerPixel ||
+      theme.brightness != oldDelegate.theme.brightness;
 }

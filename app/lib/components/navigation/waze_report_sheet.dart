@@ -28,6 +28,7 @@ Future<WazeReportSubmission?> showWazeReportSheet(
 }) {
   return showModalBottomSheet<WazeReportSubmission>(
     context: context,
+    useRootNavigator: true,
     isScrollControlled: true,
     useSafeArea: true,
     shape: const RoundedRectangleBorder(

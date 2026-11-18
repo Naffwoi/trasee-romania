@@ -30,3 +30,8 @@
 # same bug to whenever the plugin starts calling something new.
 -keep class org.maplibre.android.** { *; }
 -keep interface org.maplibre.android.** { *; }
+
+# Cronet / native_dio_adapter JNI bindings (HTTP/3 QUIC)
+-keep class org.chromium.net.** { *; }
+-keep interface org.chromium.net.** { *; }
+-dontwarn org.chromium.net.**

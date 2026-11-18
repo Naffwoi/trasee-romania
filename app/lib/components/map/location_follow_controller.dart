@@ -8,6 +8,7 @@ import 'package:maplibre/maplibre.dart' as ml;
 import 'package:wanderer/provider/compass_heading_stream_provider.dart';
 import 'package:wanderer/provider/foreground_position_stream_provider.dart';
 import 'package:wanderer/provider/location_tracking_mode_provider.dart';
+import 'package:wanderer/provider/nav_session_hibernation_provider.dart';
 import 'package:wanderer/util/map/heading_math.dart';
 
 /// Invisible map-child coordinator that drives the camera in `followNorthUp`
@@ -197,6 +198,16 @@ class _LocationFollowControllerState
   }
 
   void _bindStreams() {
+    if (!shouldAcquireForegroundMapSensors(context, ref)) {
+      _posSub?.cancel();
+      _posSub = null;
+      _boundPosStream = null;
+      _compassSub?.cancel();
+      _compassSub = null;
+      _boundCompassStream = null;
+      if (_bearingTicker.isTicking) _bearingTicker.stop();
+      return;
+    }
     final posStream = ref.watch(liveLocationProvider);
     final compassStream = ref.watch(liveCompassProvider);
 

@@ -8,6 +8,7 @@ import 'package:wanderer/i18n/app_localizations.dart';
 import 'package:wanderer/provider/compass_heading_stream_provider.dart';
 import 'package:wanderer/provider/foreground_position_stream_provider.dart';
 import 'package:wanderer/provider/location_tracking_mode_provider.dart';
+import 'package:wanderer/provider/nav_session_hibernation_provider.dart';
 
 /// Round floating "center on my location" button supporting Google Maps
 /// 3-state cycling (`freeTracking -> followNorthUp -> followHeadingUp -> followNorthUp`).
@@ -25,6 +26,9 @@ class CenterOnLocationButton extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
+    if (!shouldAcquireForegroundMapSensors(context, ref)) {
+      return const SizedBox.shrink();
+    }
     final posStream = ref.watch(liveLocationProvider);
     final compassStream = ref.watch(liveCompassProvider);
 

@@ -5,6 +5,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:maplibre/maplibre.dart' as ml;
 import 'package:wanderer/provider/compass_heading_stream_provider.dart';
 import 'package:wanderer/provider/foreground_position_stream_provider.dart';
+import 'package:wanderer/provider/nav_session_hibernation_provider.dart';
 import 'package:wanderer/util/map/heading_math.dart';
 
 const Color kGoogleMapsBlue = Color(0xFF4285F4);
@@ -195,6 +196,9 @@ class _LocationMarkerLayerState extends ConsumerState<LocationMarkerLayer> {
 
   @override
   Widget build(BuildContext context) {
+    if (!shouldAcquireForegroundMapSensors(context, ref)) {
+      return const SizedBox.shrink();
+    }
     final controller = ml.MapController.maybeOf(context);
     final camera = ml.MapCamera.maybeOf(context);
     final cameraBearing = camera?.bearing ?? 0.0;

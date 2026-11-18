@@ -6,6 +6,7 @@ import 'package:flutter/widgets.dart'
     show AppLifecycleState, WidgetsBinding, WidgetsBindingObserver;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:geolocator/geolocator.dart';
+import 'package:wanderer/provider/nav_session_hibernation_provider.dart';
 import 'package:wanderer/services/trail_live_service.dart';
 
 /// Plain data class carrying a foreground GPS fix for map location markers.
@@ -112,7 +113,11 @@ class ForegroundPositionStream extends Notifier<Stream<LocationMarkerPosition?>>
   bool _hasActivePresence = false;
 
   void _maybeSendForegroundPresence(LocationMarkerPosition pos, {bool force = false}) {
-    if (_uiSuspended || _consumers <= 0) return;
+    if (_uiSuspended ||
+        _consumers <= 0 ||
+        ref.read(navSessionHibernationProvider)) {
+      return;
+    }
     final service = ref.read(trailLiveServiceProvider);
     if (service == null || !service.isConfigured) return;
     final now = DateTime.now();
@@ -280,9 +285,11 @@ class ForegroundPositionStream extends Notifier<Stream<LocationMarkerPosition?>>
     _latest = null;
     if (_hasActivePresence) {
       _hasActivePresence = false;
-      final service = ref.read(trailLiveServiceProvider);
-      if (service != null && service.isConfigured) {
-        unawaited(service.clearHeartbeat());
+      if (!ref.read(navSessionHibernationProvider)) {
+        final service = ref.read(trailLiveServiceProvider);
+        if (service != null && service.isConfigured) {
+          unawaited(service.clearHeartbeat());
+        }
       }
     }
   }

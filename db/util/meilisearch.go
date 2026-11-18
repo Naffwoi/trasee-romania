@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"sync"
 	"time"
 
 	"github.com/meilisearch/meilisearch-go"
@@ -355,15 +356,16 @@ func TrailSearchDocument(app core.App, r *core.Record) (map[string]any, error) {
 }
 
 func IndexTrails(app core.App, trails []*core.Record, client meilisearch.ServiceManager) error {
-	documents := make([]map[string]any, len(trails))
-
-	for i, r := range trails {
-		doc, err := TrailSearchDocument(app, r)
+	if len(trails) == 0 {
+		return nil
+	}
+	built, errs := TrailSearchDocuments(app, trails)
+	documents := make([]map[string]any, 0, len(trails))
+	for i, err := range errs {
 		if err != nil {
 			return err
 		}
-
-		documents[i] = doc
+		documents = append(documents, built[i])
 	}
 
 	if _, err := client.Index("trails").AddDocuments(documents, SearchWriteOptions); err != nil {
@@ -446,14 +448,16 @@ func ListSearchDocument(app core.App, r *core.Record) (map[string]any, error) {
 }
 
 func IndexLists(app core.App, lists []*core.Record, client meilisearch.ServiceManager) error {
-	documents := make([]map[string]any, len(lists))
-
-	for i, r := range lists {
-		doc, err := ListSearchDocument(app, r)
+	if len(lists) == 0 {
+		return nil
+	}
+	built, errs := ListSearchDocuments(app, lists)
+	documents := make([]map[string]any, 0, len(lists))
+	for i, err := range errs {
 		if err != nil {
 			return err
 		}
-		documents[i] = doc
+		documents = append(documents, built[i])
 	}
 	if _, err := client.Index("lists").AddDocuments(documents, SearchWriteOptions); err != nil {
 		return err
@@ -511,38 +515,65 @@ func UpdateActor(r *core.Record, client meilisearch.ServiceManager) error {
 	return nil
 }
 
-func GenerateMeilisearchToken(rules map[string]interface{}, client meilisearch.ServiceManager) (string, error) {
-	var apiKeyUid string
-	var apiKey string
+type cachedSearchKey struct {
+	uid string
+	key string
+}
+
+var searchSigningKeyCache sync.Map // map[meilisearch.ServiceManager]cachedSearchKey
+
+// InvalidateMeilisearchSigningKey drops the cached search API key for client so the next mint re-fetches /keys.
+func InvalidateMeilisearchSigningKey(client meilisearch.ServiceManager) {
+	if client != nil {
+		searchSigningKeyCache.Delete(client)
+	}
+}
+
+func resolveSearchSigningKey(client meilisearch.ServiceManager) (cachedSearchKey, error) {
+	if cached, ok := searchSigningKeyCache.Load(client); ok {
+		return cached.(cachedSearchKey), nil
+	}
 
 	keys, err := client.GetKeys(&meilisearch.KeysQuery{Limit: 20})
 	if err != nil {
-		return "", fmt.Errorf("meilisearch connection error: %w", err)
+		return cachedSearchKey{}, fmt.Errorf("meilisearch connection error: %w", err)
 	}
 
+	var resolved cachedSearchKey
 	for _, k := range keys.Results {
 		for _, action := range k.Actions {
 			if action == "search" || k.Name == "Default Search API Key" {
-				apiKeyUid = k.UID
-				apiKey = k.Key
+				resolved = cachedSearchKey{uid: k.UID, key: k.Key}
 				break
 			}
 		}
-		if apiKey != "" {
+		if resolved.key != "" {
 			break
 		}
 	}
 
-	if apiKey == "" || apiKeyUid == "" {
-		return "", errors.New("unable to locate a valid search API key")
+	if resolved.key == "" || resolved.uid == "" {
+		return cachedSearchKey{}, errors.New("unable to locate a valid search API key")
 	}
+	searchSigningKeyCache.Store(client, resolved)
+	return resolved, nil
+}
 
-	expiresAt := time.Now().Add(24 * time.Hour)
+func GenerateMeilisearchToken(rules map[string]interface{}, client meilisearch.ServiceManager) (string, error) {
+	signingKey, err := resolveSearchSigningKey(client)
+	if err != nil {
+		return "", err
+	}
 
 	options := &meilisearch.TenantTokenOptions{
-		APIKey:    apiKey,
-		ExpiresAt: expiresAt,
+		APIKey:    signingKey.key,
+		ExpiresAt: time.Now().Add(24 * time.Hour),
 	}
 
-	return client.GenerateTenantToken(apiKeyUid, rules, options)
+	tok, err := client.GenerateTenantToken(signingKey.uid, rules, options)
+	if err != nil {
+		searchSigningKeyCache.Delete(client)
+		return "", err
+	}
+	return tok, nil
 }

@@ -47,6 +47,9 @@ func UpdateUserHandler(client meilisearch.ServiceManager) func(e *core.RecordEve
 		if origin != "" && e.Record.GetString("avatar") != "" {
 			icon = fmt.Sprintf("%s/api/v1/files/_pb_users_auth_/%s/%s", origin, e.Record.Id, e.Record.GetString("avatar"))
 		}
+		if actor.GetString("icon") == icon {
+			return e.Next()
+		}
 		actor.Set("icon", icon)
 		if err := e.App.Save(actor); err != nil {
 			return err

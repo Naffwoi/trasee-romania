@@ -67,7 +67,7 @@ func main() {
 		os.Exit(pluginsystem.RunPluginWorker(context.Background(), os.Stdin, os.Stdout, os.Stderr))
 	}
 
-	app := pocketbase.New()
+	app := pocketbase.NewWithConfig(newPocketBaseConfig())
 	client := initializeMeilisearch()
 
 	verifySettings()
@@ -227,6 +227,8 @@ func setupEventHandlers(app *pocketbase.PocketBase, client meilisearch.ServiceMa
 	app.OnRecordUpdateRequest("trails").BindFunc(hooks.ValidateTrailSubcategoryHandler())
 	app.OnRecordCreate("trails").BindFunc(hooks.SetTrailCompletedAtHandler())
 	app.OnRecordUpdate("trails").BindFunc(hooks.SetTrailCompletedAtHandler())
+	app.OnRecordCreate("trails").BindFunc(hooks.PrepareTrailBeforeSaveHandler())
+	app.OnRecordUpdate("trails").BindFunc(hooks.PrepareTrailBeforeSaveHandler())
 	app.OnRecordAfterCreateSuccess("trails").BindFunc(hooks.CreateTrailHandler(client))
 	app.OnRecordAfterUpdateSuccess("trails").BindFunc(hooks.UpdateTrailHandler(client))
 	app.OnRecordDelete("trails").BindFunc(hooks.CollectTrailDeleteRecipientsHandler())
@@ -307,6 +309,7 @@ func setupEventHandlers(app *pocketbase.PocketBase, client meilisearch.ServiceMa
 	app.OnBackupCreate().BindFunc(hooks.ExcludeRegionArchivesFromBackupHandler())
 
 	app.OnRecordValidate().BindFunc(util.SanitizeHTML())
+	routes.RegisterZeroCopyFileDownloadHook(app)
 
 	app.OnServe().BindFunc(onBeforeServeHandler(client))
 
@@ -320,6 +323,12 @@ func setupCommands(app *pocketbase.PocketBase) {
 
 func onBeforeServeHandler(client meilisearch.ServiceManager) func(se *core.ServeEvent) error {
 	return func(se *core.ServeEvent) error {
+		stopLiveSnapshot := startLiveMemoryLifecycle(se.App, live.DefaultMemoryStore())
+		se.App.OnTerminate().BindFunc(func(te *core.TerminateEvent) error {
+			stopLiveSnapshot()
+			return te.Next()
+		})
+
 		registerRoutes(se, client)
 		registerCronJobs(se.App, client)
 		if err := initData(se.App, client); err != nil {
@@ -447,9 +456,10 @@ func registerRoutes(se *core.ServeEvent, client meilisearch.ServiceManager) {
 	// superuser-bound registrations above (RegionArchiveDelete,
 	// RegionSyncStart, RegionSyncStatus).
 	se.Router.GET("/regions/{id}/geometry", routes.RegionGeometryGet).Bind(apis.RequireSuperuserAuth())
+	routes.RegisterPublicFilesAndRegionsRoutes(se)
 
-	// Internal-only Trail Live Community endpoints (/live/*), gated by
-	// X-Internal-Secret from the SvelteKit /api/v1/live/* proxy.
+	// Trail Live Community endpoints: direct public /api/v1/live/* (HMAC device
+	// auth + sharded rate limiter + native Go VAPID push) alongside internal /live/*.
 	routes.RegisterTrailLiveRoutes(se, live.DefaultHub())
 }
 
@@ -483,6 +493,9 @@ func registerCronJobs(app core.App, client meilisearch.ServiceManager) {
 
 	app.Cron().MustAdd("search-repair", repairSchedule, func() {
 		runSearchRepair(app, client)
+	})
+	app.Cron().MustAdd("sqlite-pragma-optimize", "0 */6 * * *", func() {
+		runSQLitePlannerOptimize(app)
 	})
 }
 

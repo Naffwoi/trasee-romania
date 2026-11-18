@@ -12,7 +12,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/pocketbase/dbx"
 	"github.com/pocketbase/pocketbase/apis"
 	"github.com/pocketbase/pocketbase/core"
 
@@ -309,39 +308,50 @@ func TestTrailLiveGroupsLifecyclePrivacyAndPrivateSSE(t *testing.T) {
 		t.Fatalf("expected PingGroup to refresh expiresAt to %v, got %q", curTime.Add(12*time.Hour), pingSession.ExpiresAt)
 	}
 
-	// Verify groupRec in DB also has refreshed expires_at.
+	// Verify lazy 1h DB write reduction: at +5m (4m after JoinGroup at +1m, remaining 11h56m >= 11h threshold),
+	// PingGroup leaves SQLite untouched (`t0 + 1m + 12h`), while RAM session already reports `curTime + 12h`.
 	groupRecAfterPing, err := app.FindFirstRecordByData("trail_groups", "code", code)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !groupRecAfterPing.GetDateTime("expires_at").Time().Equal(curTime.Add(12 * time.Hour)) {
-		t.Fatalf("DB trail_groups.expires_at = %v, want %v", groupRecAfterPing.GetDateTime("expires_at").Time(), curTime.Add(12*time.Hour))
+	wantLazyDBExp := t0.Add(1*time.Minute + 12*time.Hour)
+	if !groupRecAfterPing.GetDateTime("expires_at").Time().Equal(wantLazyDBExp) {
+		t.Fatalf("expected lazy DB trail_groups.expires_at to stay %v within 1h window, got %v", wantLazyDBExp, groupRecAfterPing.GetDateTime("expires_at").Time())
 	}
 
 	// Verify SSE frame on subGroupDirect: exact wire keys & isSelf == false & no device_hash.
 	var sseUpdateFrame string
 	select {
-	case sseUpdateFrame = <-subGroupDirect.Ch:
+	case rawUpdate := <-subGroupDirect.Ch:
+		sseUpdateFrame = string(rawUpdate)
 	default:
 		t.Fatal("expected group SSE subscriber to receive group_member_update")
 	}
-	if !strings.HasPrefix(sseUpdateFrame, "event: group_member_update\ndata: ") {
+	if !strings.HasPrefix(sseUpdateFrame, "id: ") || !strings.Contains(sseUpdateFrame, "\nevent: group_member_update\ndata: ") {
 		t.Fatalf("unexpected SSE frame prefix: %q", sseUpdateFrame)
 	}
 	if strings.Contains(sseUpdateFrame, joinerHash) || strings.Contains(sseUpdateFrame, "device_hash") || strings.Contains(sseUpdateFrame, "deviceHash") {
 		t.Fatalf("PRIVACY VIOLATION in SSE frame: %s", sseUpdateFrame)
 	}
 
-	dataJSON := strings.TrimSpace(strings.TrimPrefix(sseUpdateFrame, "event: group_member_update\ndata: "))
-	var rawWireMap map[string]any
-	if err := json.Unmarshal([]byte(dataJSON), &rawWireMap); err != nil {
+	_, dataPart, _ := strings.Cut(sseUpdateFrame, "\ndata: ")
+	dataJSON := strings.TrimSpace(dataPart)
+	var envelopeMap map[string]any
+	if err := json.Unmarshal([]byte(dataJSON), &envelopeMap); err != nil {
 		t.Fatalf("unmarshal SSE JSON map: %v", err)
+	}
+	if envelopeMap["type"] != "group_member_update" || envelopeMap["groupCode"] != code {
+		t.Fatalf("unexpected group_member_update envelope metadata: %s", dataJSON)
+	}
+	rawWireMap, ok := envelopeMap["member"].(map[string]any)
+	if !ok {
+		t.Fatalf("missing member object in group_member_update envelope: %s", dataJSON)
 	}
 	requiredKeys := []string{
 		"memberId", "displayName", "colorHex",
 		"lat", "lon", "ele", "accuracy",
 		"heading", "speed", "alongTrackM",
-		"inNavigation", "isSelf", "updatedAt",
+		"inNavigation", "stationary", "isSelf", "updatedAt",
 	}
 	for _, k := range requiredKeys {
 		if _, exists := rawWireMap[k]; !exists {
@@ -349,10 +359,13 @@ func TestTrailLiveGroupsLifecyclePrivacyAndPrivateSSE(t *testing.T) {
 		}
 	}
 
-	var sseMember GroupMemberDto
-	if err := json.Unmarshal([]byte(dataJSON), &sseMember); err != nil {
+	var sseWrap struct {
+		Member GroupMemberDto `json:"member"`
+	}
+	if err := json.Unmarshal([]byte(dataJSON), &sseWrap); err != nil {
 		t.Fatalf("unmarshal GroupMemberDto: %v", err)
 	}
+	sseMember := sseWrap.Member
 	if sseMember.MemberID != wantJoinerMemberID || sseMember.IsSelf {
 		t.Fatalf("SSE GroupMemberDto expected memberId=%s and isSelf=false, got %+v", wantJoinerMemberID, sseMember)
 	}
@@ -372,12 +385,12 @@ func TestTrailLiveGroupsLifecyclePrivacyAndPrivateSSE(t *testing.T) {
 	// Verify subscribers WITHOUT matching groupCode NEVER received private group coordinates!
 	select {
 	case leaked := <-subNoGroup.Ch:
-		t.Fatalf("PRIVACY VIOLATION: subscriber without groupCode received frame: %s", leaked)
+		t.Fatalf("PRIVACY VIOLATION: subscriber without groupCode received frame: %s", string(leaked))
 	default:
 	}
 	select {
 	case leaked := <-subOtherGroup.Ch:
-		t.Fatalf("PRIVACY VIOLATION: subscriber with different groupCode received frame: %s", leaked)
+		t.Fatalf("PRIVACY VIOLATION: subscriber with different groupCode received frame: %s", string(leaked))
 	default:
 	}
 
@@ -412,39 +425,59 @@ func TestTrailLiveGroupsLifecyclePrivacyAndPrivateSSE(t *testing.T) {
 	}
 
 	select {
-	case leftFrame := <-subGroupDirect.Ch:
-		if !strings.HasPrefix(leftFrame, "event: group_member_left\ndata: ") {
+	case rawLeft := <-subGroupDirect.Ch:
+		leftFrame := string(rawLeft)
+		if !strings.HasPrefix(leftFrame, "id: ") || !strings.Contains(leftFrame, "\nevent: group_member_left\ndata: ") {
 			t.Fatalf("unexpected leave SSE frame: %q", leftFrame)
 		}
-		leftData := strings.TrimSpace(strings.TrimPrefix(leftFrame, "event: group_member_left\ndata: "))
+		_, leftDataPart, _ := strings.Cut(leftFrame, "\ndata: ")
+		leftData := strings.TrimSpace(leftDataPart)
 		var leftPayload struct {
+			Type      string `json:"type"`
 			GroupCode string `json:"groupCode"`
 			MemberID  string `json:"memberId"`
 		}
 		if err := json.Unmarshal([]byte(leftData), &leftPayload); err != nil {
 			t.Fatalf("unmarshal group_member_left: %v", err)
 		}
-		if leftPayload.GroupCode != code || leftPayload.MemberID != wantJoinerMemberID {
+		if leftPayload.Type != "group_member_left" || leftPayload.GroupCode != code || leftPayload.MemberID != wantJoinerMemberID {
 			t.Fatalf("unexpected group_member_left payload: %+v", leftPayload)
 		}
 	default:
 		t.Fatal("expected group SSE subscriber to receive group_member_left")
 	}
 
-	// Confirm joiner row was deleted from trail_group_members, while creator's stale row still exists before GC.
-	remainingForJoiner, err := app.FindRecordsByFilter(
-		"trail_group_members",
-		"group_code = {:code} && device_hash = {:dh}",
-		"",
-		10,
-		0,
-		dbx.Params{"code": code, "dh": joinerHash},
-	)
-	if err != nil {
+	// Confirm joiner was deleted from RAM GroupStore, and 0 rows were written to SQLite trail_group_members.
+	if _, exists := handler.memoryStore().GetGroupMember(code, joinerHash); exists {
+		t.Fatal("expected joiner entry removed from RAM GroupStore on leave")
+	}
+	if dbMemberRows, _ := app.CountRecords("trail_group_members"); dbMemberRows != 0 {
+		t.Fatalf("expected 0 SQLite trail_group_members rows on RAM hot path, got %d", dbMemberRows)
+	}
+
+	// Advance past 1h threshold (t0 + 1h05m) and verify ?ack=1 compact response + lazy SQLite expires_at refresh!
+	curTime = t0.Add(65 * time.Minute)
+	stAck, rawAck := invokeLiveHandler(t, app, handler.PingGroup, liveCallOptions{
+		method:     http.MethodPost,
+		target:     "/live/groups/" + code + "/ping?ack=1",
+		body:       `{"lat":45.412,"lon":25.512,"accuracy":5,"stationary":true}`,
+		secret:     testLiveSecret,
+		deviceHash: creatorHash,
+		pathValues: map[string]string{"code": code},
+	})
+	if stAck != http.StatusOK {
+		t.Fatalf("PingGroup ?ack=1 status = %d: %s", stAck, rawAck)
+	}
+	var ackMap map[string]any
+	if err := json.Unmarshal(rawAck, &ackMap); err != nil {
 		t.Fatal(err)
 	}
-	if len(remainingForJoiner) != 0 {
-		t.Fatalf("expected joiner row deleted on leave, found %d", len(remainingForJoiner))
+	if ackMap["ok"] != true || ackMap["code"] != code || ackMap["selfMemberId"] != deriveGroupMemberID(code, creatorHash) {
+		t.Fatalf("unexpected ?ack=1 payload: %s", rawAck)
+	}
+	groupRecAfter1h, _ := app.FindFirstRecordByData("trail_groups", "code", code)
+	if !groupRecAfter1h.GetDateTime("expires_at").Time().Equal(curTime.Add(12 * time.Hour)) {
+		t.Fatalf("expected lazy DB expires_at refresh after >1h elapsed, got %v", groupRecAfter1h.GetDateTime("expires_at").Time())
 	}
 
 	// Close HTTP stream and confirm HTTP Stream output received both SSE events too!
@@ -507,19 +540,11 @@ func TestTrailLiveGroupsGarbageCollection(t *testing.T) {
 		t.Fatalf("RunTrailLiveGC at +2h05m: %v", err)
 	}
 
-	membersAfter2h, err := app.FindRecordsByFilter(
-		"trail_group_members",
-		"group_code = {:code}",
-		"",
-		10,
-		0,
-		dbx.Params{"code": groupA.Code},
-	)
-	if err != nil {
-		t.Fatal(err)
+	if handler.memoryStore().GroupMemberCount(groupA.Code) != 1 {
+		t.Fatalf("expected 1 member in RAM GroupStore after 2h GC, got %d", handler.memoryStore().GroupMemberCount(groupA.Code))
 	}
-	if len(membersAfter2h) != 1 || membersAfter2h[0].GetString("device_hash") != "dev-fresh-a2" {
-		t.Fatalf("expected only dev-fresh-a2 to survive 2h member GC, got %d records", len(membersAfter2h))
+	if _, ok := handler.memoryStore().GetGroupMember(groupA.Code, "dev-fresh-a2"); !ok {
+		t.Fatal("expected dev-fresh-a2 to survive 2h member GC in RAM GroupStore")
 	}
 
 	// Create Group B at t0 + 13h so it is fresh while Group A expires (t0 + 13h50m < t0 + 15h).

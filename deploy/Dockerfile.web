@@ -14,4 +14,4 @@ ENV MEILI_URL=http://127.0.0.1:7700 \
     UPLOAD_PASSWORD= \
     UPLOAD_USER=
 EXPOSE 3000
-CMD ["npm", "run", "start"]
+CMD ["/bin/sh", "-c", "if [ -n \"${UPLOAD_FOLDER:-}\" ] && { [ -n \"${UPLOAD_USER:-}\" ] || [ \"${ENABLE_UPLOAD_WATCHER:-}\" = \"true\" ]; }; then node watcher.js & fi; exec node --max-old-space-size=320 server.js"]

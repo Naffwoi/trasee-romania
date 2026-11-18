@@ -1,0 +1,69 @@
+# Production Caddy 2.8+ configuration for Trasee România (Single-VPS + Cloudflare Proxy)
+# Requires TCP 80/443 and UDP 443 open on host firewall for HTTP/3 QUIC 0-RTT migration.
+{
+	servers {
+		protocols h1 h2 h3
+	}
+}
+
+{$TRASEE_DOMAIN:trasee.skillfy.ro} {
+	# Dynamic compression Zstd + Brotli + Gzip for SSR HTML & JSON (Caddy automatically skips text/event-stream)
+	encode zstd br gzip
+
+	header {
+		Alt-Svc "h3=\":443\"; ma=86400"
+		X-Content-Type-Options "nosniff"
+	}
+
+	# 1. Direct Live SSE connections to Go binary (0 Node.js RAM, 0 buffering)
+	@live_sse path /api/v1/live/stream
+	handle @live_sse {
+		reverse_proxy 127.0.0.1:8090 {
+			flush_interval -1
+			transport http {
+				read_timeout 2h
+				write_timeout 2h
+			}
+		}
+	}
+
+	# 2. All other /api/v1/live/* routes direct to Go (HMAC X-Device-Token + Rate Limit + Native VAPID Push)
+	@live_api path /api/v1/live/*
+	handle @live_api {
+		reverse_proxy 127.0.0.1:8090
+	}
+
+	# 3. Immutable files (photos, thumbs, avatars, GPX) and offline .pmtiles archives direct from Go (zero-copy sendfile)
+	@go_direct_assets path /api/v1/files/* /api/v1/regions /api/v1/regions/*
+	handle @go_direct_assets {
+		reverse_proxy 127.0.0.1:8090 {
+			flush_interval -1
+			transport http {
+				read_timeout 24h
+				write_timeout 24h
+			}
+		}
+	}
+
+	# 4. Local mobile packages (.apk arm64/universal & .ipa) served directly from disk with HTTP 206 Range support
+	handle_path /downloads/* {
+		root * {$TRASEE_DOWNLOADS_DIR:/var/www/maps.skillfy.ro/downloads}
+		header Cache-Control "public, max-age=3600, stale-while-revalidate=86400"
+		file_server
+	}
+
+	# 5. SvelteKit static assets outside /_app/immutable/ (WOFF2 fonts, map styles, 3D models)
+	@static_cached path /fonts/* /styles/* /models/* /imgs/* /svgs/* /favicon* /apple-touch-icon.png
+	handle @static_cached {
+		header Cache-Control "public, max-age=86400, stale-while-revalidate=604800"
+		reverse_proxy 127.0.0.1:3090
+	}
+
+	# 6. SvelteKit SSR pages & remaining REST API -> wanderer-web single-process
+	handle {
+		request_body {
+			max_size 512MB
+		}
+		reverse_proxy 127.0.0.1:3090
+	}
+}

@@ -77,6 +77,7 @@ export interface GroupMemberDto {
 	speed?: number | null;
 	alongTrackM?: number | null;
 	inNavigation: boolean;
+	stationary?: boolean;
 	isSelf: boolean;
 	updatedAt: string;
 }
@@ -257,6 +258,44 @@ const knownRespondingSosIds = new Set<string>();
 const knownSelfMemberByGroup = new Map<string, string>();
 let activeSelfMemberId: string | null = null;
 let memorySavedGroup: SavedGroupSession | null = null;
+let activeLiveStreamOpenCount = 0;
+let lastSeenEventId = "";
+const cachedGroupMembersByCode = new Map<string, GroupMemberDto[]>();
+let cachedHeartbeatState: {
+	trailId: string;
+	lat: number;
+	lon: number;
+	stateHash: string;
+	summary: TrailLiveSummaryDto;
+} | null = null;
+
+export function quantizeCoord6(value: number): number {
+	return Math.round(value * 1_000_000) / 1_000_000;
+}
+
+export function quantizeMeter1(value: number): number {
+	return Math.round(value * 10) / 10;
+}
+
+export function computeJitteredBackoffMs(
+	baseMs: number,
+	rng: () => number = Math.random,
+): number {
+	const clampedRatio = Math.min(1, Math.max(0, rng()));
+	const factor = 0.7 + 0.6 * clampedRatio;
+	return Math.max(500, Math.round(baseMs * factor));
+}
+
+export function isLiveStreamConnected(): boolean {
+	return activeLiveStreamOpenCount > 0;
+}
+
+export function resetLiveWireStateForTests(): void {
+	activeLiveStreamOpenCount = 0;
+	lastSeenEventId = "";
+	cachedHeartbeatState = null;
+	cachedGroupMembersByCode.clear();
+}
 
 function bytesToHex(bytes: Uint8Array): string {
 	let hex = "";
@@ -540,22 +579,77 @@ export async function sendHeartbeat(params: {
 	lon: number;
 	ele?: number | null;
 	inNavigation?: boolean;
+	stationary?: boolean;
 }): Promise<TrailLiveSummaryDto | null> {
 	if (!Number.isFinite(params.lat) || !Number.isFinite(params.lon)) {
 		return null;
 	}
+	const trailId = params.trailId ?? "";
+	const qLat = quantizeCoord6(params.lat);
+	const qLon = quantizeCoord6(params.lon);
+
+	let reusableStateHash: string | undefined;
+	if (cachedHeartbeatState && cachedHeartbeatState.trailId === trailId && cachedHeartbeatState.stateHash) {
+		const dLat = (qLat - cachedHeartbeatState.lat) * 111_132;
+		const dLon =
+			(qLon - cachedHeartbeatState.lon) * 111_132 * Math.cos((qLat * Math.PI) / 180);
+		if (Math.hypot(dLat, dLon) <= 250) {
+			reusableStateHash = cachedHeartbeatState.stateHash;
+		}
+	}
+
+	const reqBody: Record<string, unknown> = {
+		trailId,
+		lat: qLat,
+		lon: qLon,
+		ele: params.ele != null && Number.isFinite(params.ele) ? quantizeMeter1(params.ele) : 0,
+		inNavigation: Boolean(params.inNavigation),
+	};
+	if (params.stationary) {
+		reqBody.stationary = true;
+	}
+	if (reusableStateHash) {
+		reqBody.stateHash = reusableStateHash;
+	}
+
 	const data = await liveJsonFetch<Record<string, unknown>>("/api/v1/live/heartbeat", {
 		method: "POST",
-		body: JSON.stringify({
-			trailId: params.trailId ?? "",
-			lat: params.lat,
-			lon: params.lon,
-			ele: params.ele ?? 0,
-			inNavigation: Boolean(params.inNavigation),
-		}),
+		body: JSON.stringify(reqBody),
 	});
 	if (!data) return null;
-	return normalizeSummaryResponse(data, params.trailId ?? "");
+
+	if (data.unchanged === true && cachedHeartbeatState && cachedHeartbeatState.trailId === trailId) {
+		const updatedSummary: TrailLiveSummaryDto = {
+			...cachedHeartbeatState.summary,
+			activeHikers30m: Math.max(
+				0,
+				Number(data.activeHikers30m ?? cachedHeartbeatState.summary.activeHikers30m),
+			),
+		};
+		cachedHeartbeatState = {
+			trailId,
+			lat: qLat,
+			lon: qLon,
+			stateHash:
+				typeof data.stateHash === "string" && data.stateHash
+					? data.stateHash
+					: cachedHeartbeatState.stateHash,
+			summary: updatedSummary,
+		};
+		return updatedSummary;
+	}
+
+	const normalized = normalizeSummaryResponse(data, trailId);
+	if (typeof data.stateHash === "string" && data.stateHash.trim()) {
+		cachedHeartbeatState = {
+			trailId,
+			lat: qLat,
+			lon: qLon,
+			stateHash: data.stateHash.trim(),
+			summary: normalized,
+		};
+	}
+	return normalized;
 }
 
 export async function clearHeartbeat(): Promise<void> {
@@ -953,6 +1047,7 @@ export function normalizeGroupMemberDto(
 		speed: optNum(raw.speed),
 		alongTrackM: optNum(raw.alongTrackM),
 		inNavigation: Boolean(raw.inNavigation),
+		stationary: Boolean(raw.stationary),
 		isSelf,
 		updatedAt: String(raw.updatedAt ?? ""),
 	};
@@ -979,6 +1074,7 @@ export function normalizeGroupSessionDto(
 	const members = rawMembers
 		.map((item) => normalizeGroupMemberDto(item as Record<string, unknown>, selfMemberId))
 		.filter((item): item is GroupMemberDto => item !== null);
+	cachedGroupMembersByCode.set(code, members);
 
 	return {
 		code,
@@ -1255,6 +1351,8 @@ export async function pingLiveGroup(
 		speed?: number | null;
 		alongTrackM?: number | null;
 		inNavigation?: boolean;
+		stationary?: boolean;
+		ackOnly?: boolean;
 	},
 ): Promise<GroupSessionDto | null> {
 	const normCode = normalizeGroupCode(code);
@@ -1263,34 +1361,61 @@ export async function pingLiveGroup(
 	}
 
 	const body: Record<string, unknown> = {
-		lat: params.lat,
-		lon: params.lon,
+		lat: quantizeCoord6(params.lat),
+		lon: quantizeCoord6(params.lon),
 		inNavigation: Boolean(params.inNavigation),
 	};
 	if (typeof params.ele === "number" && Number.isFinite(params.ele)) {
-		body.ele = params.ele;
+		body.ele = quantizeMeter1(params.ele);
 	}
 	if (typeof params.accuracy === "number" && Number.isFinite(params.accuracy)) {
-		body.accuracy = params.accuracy;
+		body.accuracy = quantizeMeter1(params.accuracy);
 	}
 	if (typeof params.heading === "number" && Number.isFinite(params.heading)) {
-		body.heading = params.heading;
+		body.heading = quantizeMeter1(params.heading);
 	}
 	if (typeof params.speed === "number" && Number.isFinite(params.speed)) {
-		body.speed = params.speed;
+		body.speed = quantizeMeter1(params.speed);
 	}
 	if (typeof params.alongTrackM === "number" && Number.isFinite(params.alongTrackM)) {
-		body.alongTrackM = params.alongTrackM;
+		body.alongTrackM = quantizeMeter1(params.alongTrackM);
+	}
+	if (params.stationary) {
+		body.stationary = true;
 	}
 
+	const useAck = params.ackOnly ?? isLiveStreamConnected();
+	const querySuffix = useAck ? "?ack=1" : "";
+
 	const data = await liveJsonFetch<Record<string, unknown>>(
-		`/api/v1/live/groups/${encodeURIComponent(normCode)}/ping`,
+		`/api/v1/live/groups/${encodeURIComponent(normCode)}/ping${querySuffix}`,
 		{
 			method: "POST",
 			body: JSON.stringify(body),
 		},
 	);
 	if (!data) return null;
+	if (data.ok === true && !Array.isArray(data.members)) {
+		const saved = getSavedGroupSession();
+		const selfMemberId =
+			typeof data.selfMemberId === "string" && data.selfMemberId.trim()
+				? data.selfMemberId.trim()
+				: (knownSelfMemberByGroup.get(normCode) ??
+					saved?.selfMemberId ??
+					activeSelfMemberId ??
+					"");
+		const expiresAt =
+			typeof data.expiresAt === "string" && data.expiresAt.trim()
+				? data.expiresAt.trim()
+				: (saved?.expiresAt ?? "");
+		return {
+			code: normCode,
+			trailId: saved?.trailId ?? "",
+			expiresAt,
+			selfMemberId,
+			members: cachedGroupMembersByCode.get(normCode) ?? [],
+		};
+	}
 	return normalizeGroupSessionDto(data, normCode);
 }
 
@@ -1346,6 +1471,7 @@ export interface LiveStreamCallbacks {
 	onSosUpdate?: (sos: SosAlertDto) => void;
 	onGroupMemberUpdate?: (member: GroupMemberDto) => void;
 	onGroupMemberLeft?: (payload: { groupCode: string; memberId: string }) => void;
+	onResyncRequired?: () => void;
 }
 
 export interface LiveStreamHandle {
@@ -1373,6 +1499,20 @@ export function connectLiveStream(params: {
 	let curGroupCode: string | null = normalizeGroupCode(params.groupCode);
 	let openedLat = curLat;
 	let openedLon = curLon;
+	let markedOpen = false;
+
+	const markStreamClosed = () => {
+		if (markedOpen) {
+			markedOpen = false;
+			activeLiveStreamOpenCount = Math.max(0, activeLiveStreamOpenCount - 1);
+		}
+	};
+
+	const recordEventId = (e: MessageEvent) => {
+		if (typeof e.lastEventId === "string" && e.lastEventId.trim().length > 0) {
+			lastSeenEventId = e.lastEventId.trim();
+		}
+	};
 
 	const clearTimer = () => {
 		if (reconnectTimer !== null) {
@@ -1383,6 +1523,7 @@ export function connectLiveStream(params: {
 
 	const handleRawReportEvent = (e: MessageEvent) => {
 		backoffMs = 2000;
+		recordEventId(e);
 		try {
 			const parsed = JSON.parse(e.data) as Record<string, unknown>;
 			const report = normalizeReportDto(
@@ -1398,6 +1539,7 @@ export function connectLiveStream(params: {
 
 	const handleRawSosEvent = (e: MessageEvent) => {
 		backoffMs = 2000;
+		recordEventId(e);
 		try {
 			const parsed = JSON.parse(e.data) as Record<string, unknown>;
 			const sos = normalizeSosDto((parsed.sos ?? parsed) as Record<string, unknown>);
@@ -1411,8 +1553,11 @@ export function connectLiveStream(params: {
 
 	const handleRawGroupMemberUpdate = (e: MessageEvent) => {
 		backoffMs = 2000;
+		recordEventId(e);
 		try {
 			const parsed = JSON.parse(e.data) as Record<string, unknown>;
+			const groupCode =
+				normalizeGroupCode(String(parsed.groupCode ?? curGroupCode ?? "")) ?? curGroupCode;
 			const selfForGroup = curGroupCode
 				? knownSelfMemberByGroup.get(curGroupCode) ?? activeSelfMemberId
 				: activeSelfMemberId;
@@ -1421,6 +1566,10 @@ export function connectLiveStream(params: {
 				selfForGroup,
 			);
 			if (member) {
+				if (groupCode) {
+					const prev = cachedGroupMembersByCode.get(groupCode) ?? [];
+					cachedGroupMembersByCode.set(groupCode, mergeGroupMemberIntoList(prev, member));
+				}
 				params.callbacks.onGroupMemberUpdate?.(member);
 			}
 		} catch {
@@ -1430,6 +1579,7 @@ export function connectLiveStream(params: {
 
 	const handleRawGroupMemberLeft = (e: MessageEvent) => {
 		backoffMs = 2000;
+		recordEventId(e);
 		try {
 			const parsed = JSON.parse(e.data) as Record<string, unknown>;
 			const memberId = typeof parsed.memberId === "string" ? parsed.memberId.trim() : "";
@@ -1437,6 +1587,14 @@ export function connectLiveStream(params: {
 				normalizeGroupCode(String(parsed.groupCode ?? curGroupCode ?? "")) ??
 				String(parsed.groupCode ?? curGroupCode ?? "");
 			if (memberId) {
+				const normGroup = normalizeGroupCode(groupCode);
+				if (normGroup) {
+					const prev = cachedGroupMembersByCode.get(normGroup) ?? [];
+					cachedGroupMembersByCode.set(
+						normGroup,
+						removeGroupMemberFromList(prev, memberId),
+					);
+				}
 				params.callbacks.onGroupMemberLeft?.({ groupCode, memberId });
 			}
 		} catch {
@@ -1444,8 +1602,16 @@ export function connectLiveStream(params: {
 		}
 	};
 
+	const handleResyncRequired = (e: MessageEvent) => {
+		backoffMs = 2000;
+		recordEventId(e);
+		cachedHeartbeatState = null;
+		params.callbacks.onResyncRequired?.();
+	};
+
 	const handleGenericMessage = (e: MessageEvent) => {
 		backoffMs = 2000;
+		recordEventId(e);
 		try {
 			const parsed = JSON.parse(e.data) as Record<string, unknown>;
 			const type = String(parsed.type ?? "");
@@ -1461,6 +1627,9 @@ export function connectLiveStream(params: {
 				handleRawGroupMemberUpdate(e);
 			} else if (type === "group_member_left") {
 				handleRawGroupMemberLeft(e);
+			} else if (type === "resync_required") {
+				cachedHeartbeatState = null;
+				params.callbacks.onResyncRequired?.();
 			}
 		} catch {
 			// Ignore keepalive or non-JSON frames
@@ -1481,6 +1650,7 @@ export function connectLiveStream(params: {
 		if (curLat !== null && Number.isFinite(curLat)) qs.set("lat", curLat.toFixed(6));
 		if (curLon !== null && Number.isFinite(curLon)) qs.set("lon", curLon.toFixed(6));
 		if (curGroupCode) qs.set("groupCode", curGroupCode);
+		if (lastSeenEventId) qs.set("lastEventId", lastSeenEventId);
 		qs.set("deviceToken", getOrCreateDeviceToken());
 
 		openedLat = curLat;
@@ -1491,15 +1661,27 @@ export function connectLiveStream(params: {
 			es = source;
 			source.addEventListener("open", () => {
 				backoffMs = 2000;
+				if (!markedOpen) {
+					markedOpen = true;
+					activeLiveStreamOpenCount++;
+				}
 			});
 			source.addEventListener("report_update", handleRawReportEvent as EventListener);
 			source.addEventListener("report_change", handleRawReportEvent as EventListener);
 			source.addEventListener("sos_update", handleRawSosEvent as EventListener);
 			source.addEventListener("sos_alert", handleRawSosEvent as EventListener);
-			source.addEventListener("group_member_update", handleRawGroupMemberUpdate as EventListener);
-			source.addEventListener("group_member_left", handleRawGroupMemberLeft as EventListener);
+			source.addEventListener(
+				"group_member_update",
+				handleRawGroupMemberUpdate as EventListener,
+			);
+			source.addEventListener(
+				"group_member_left",
+				handleRawGroupMemberLeft as EventListener,
+			);
+			source.addEventListener("resync_required", handleResyncRequired as EventListener);
 			source.addEventListener("message", handleGenericMessage as EventListener);
 			source.onerror = () => {
+				markStreamClosed();
 				try {
 					source.close();
 				} catch {
@@ -1509,14 +1691,15 @@ export function connectLiveStream(params: {
 					es = null;
 				}
 				if (!closed) {
-					const delay = backoffMs;
+					const delay = computeJitteredBackoffMs(backoffMs);
 					backoffMs = Math.min(30_000, backoffMs * 2);
 					reconnectTimer = setTimeout(open, delay);
 				}
 			};
 		} catch {
+			markStreamClosed();
 			if (!closed) {
-				const delay = backoffMs;
+				const delay = computeJitteredBackoffMs(backoffMs);
 				backoffMs = Math.min(30_000, backoffMs * 2);
 				reconnectTimer = setTimeout(open, delay);
 			}
@@ -1534,6 +1717,10 @@ export function connectLiveStream(params: {
 				open();
 				return;
 			}
+			// When SSE is open, the Go hub updates subscriber coordinates in-place on /heartbeat and /groups/{code}/ping!
+			if (es && markedOpen) {
+				return;
+			}
 			const dLat = (lat - openedLat) * 111_132;
 			const dLon = (lon - openedLon) * 111_132 * Math.cos((lat * Math.PI) / 180);
 			if (Math.hypot(dLat, dLon) > 1200) {
@@ -1545,12 +1732,14 @@ export function connectLiveStream(params: {
 			if (next === curGroupCode) return;
 			curGroupCode = next;
 			backoffMs = 2000;
+			markStreamClosed();
 			if (!closed) {
 				open();
 			}
 		},
 		close() {
 			closed = true;
+			markStreamClosed();
 			clearTimer();
 			try {
 				es?.close();

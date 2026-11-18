@@ -10,6 +10,8 @@ import (
 	"github.com/pocketbase/pocketbase/core"
 	"github.com/pocketbase/pocketbase/tools/filesystem"
 	"github.com/tkrajina/gpxgo/gpx"
+
+	"pocketbase/util/gpxstream"
 )
 
 // placeholderName is the stored name of a generated photo up to PocketBase's
@@ -48,20 +50,15 @@ func Apply(app core.App, record *core.Record) (err error) {
 	if !needsPlaceholder(record) || !outdated(record) {
 		return nil
 	}
-	content, err := readGPX(app, record)
+	segments, routeSeed, err := streamGPXSegmentsAndSeed(app, record)
 	if err != nil {
 		return err
 	}
-	data, err := gpx.ParseBytes(content)
-	if err != nil {
-		return fmt.Errorf("parse gpx: %w", err)
-	}
-	segments := Segments(data)
 	if len(segments) == 0 {
 		return nil
 	}
 
-	file, err := filesystem.NewFileFromBytes(Render(segments, seed(content)), placeholderName+".svg")
+	file, err := filesystem.NewFileFromBytes(Render(segments, routeSeed), placeholderName+".svg")
 	if err != nil {
 		return err
 	}
@@ -103,34 +100,53 @@ func hasGPX(record *core.Record) bool {
 	return record.GetString("gpx") != "" || len(record.GetUnsavedFiles("gpx")) > 0
 }
 
-// readGPX reads the route uploaded with this save, or else the stored one.
-func readGPX(app core.App, record *core.Record) ([]byte, error) {
+// streamGPXSegmentsAndSeed streams the route uploaded with this save, or else the stored one.
+func streamGPXSegmentsAndSeed(app core.App, record *core.Record) ([][]Point, float64, error) {
 	var reader io.ReadCloser
 	if uploads := record.GetUnsavedFiles("gpx"); len(uploads) > 0 {
 		r, err := uploads[len(uploads)-1].Reader.Open()
 		if err != nil {
-			return nil, fmt.Errorf("open uploaded gpx: %w", err)
+			return nil, 0, fmt.Errorf("open uploaded gpx: %w", err)
 		}
 		reader = r
 	} else {
 		fsys, err := app.NewFilesystem()
 		if err != nil {
-			return nil, fmt.Errorf("open filesystem: %w", err)
+			return nil, 0, fmt.Errorf("open filesystem: %w", err)
 		}
 		defer fsys.Close()
 		r, err := fsys.GetReader(record.BaseFilesPath() + "/" + record.GetString("gpx"))
 		if err != nil {
-			return nil, fmt.Errorf("open gpx: %w", err)
+			return nil, 0, fmt.Errorf("open gpx: %w", err)
 		}
 		reader = r
 	}
 	defer reader.Close()
 
-	content, err := io.ReadAll(reader)
+	hasher := fnv.New32a()
+	tr := io.TeeReader(reader, hasher)
+	streamed, err := gpxstream.StreamGPXData(tr)
 	if err != nil {
-		return nil, fmt.Errorf("read gpx: %w", err)
+		return nil, 0, fmt.Errorf("parse gpx: %w", err)
 	}
-	return content, nil
+	_, _ = io.Copy(io.Discard, tr)
+
+	rawSegs := streamed.TrackSegments
+	if len(rawSegs) == 0 {
+		rawSegs = streamed.RouteSegments
+	}
+	segments := make([][]Point, 0, len(rawSegs))
+	for _, raw := range rawSegs {
+		if len(raw) == 0 {
+			continue
+		}
+		pts := make([]Point, len(raw))
+		for i, c := range raw {
+			pts[i] = Point{Lat: c[0], Lon: c[1]}
+		}
+		segments = append(segments, pts)
+	}
+	return segments, float64(hasher.Sum32()%10000) / 100, nil
 }
 
 // DropPlaceholder removes a generated photo once the author adds their own.
@@ -212,12 +228,4 @@ func appendSegment(segments [][]Point, points []gpx.GPXPoint) [][]Point {
 		seg[i] = Point{Lat: p.Latitude, Lon: p.Longitude}
 	}
 	return append(segments, seg)
-}
-
-// seed gives every route its own contour pattern that stays the same when
-// the placeholder is rendered again.
-func seed(gpxContent []byte) float64 {
-	h := fnv.New32a()
-	h.Write(gpxContent)
-	return float64(h.Sum32()%10000) / 100
 }

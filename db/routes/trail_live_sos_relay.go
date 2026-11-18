@@ -135,6 +135,7 @@ func (h *TrailLiveHandler) RelaySos(e *core.RequestEvent) error {
 	}
 
 	now := h.nowUTC()
+	store := h.readyStore(e.App)
 	isResolution := status == "resolved" || status == "cancelled"
 
 	if isResolution {
@@ -204,10 +205,14 @@ func (h *TrailLiveHandler) RelaySos(e *core.RequestEvent) error {
 			return txErr
 		}
 
+		store.UpsertSos(recordToCachedSos(sosRec))
 		if shouldBroadcast {
 			h.broadcastSosRecord(sosRec, respondingDevices)
 		}
 		dto := toSosAlertDto(sosRec, muleDeviceHash, respondingDevices)
+		if isTrustedPublicLiveRequest(e.Request) {
+			return e.JSON(http.StatusOK, map[string]any{"sos": dto})
+		}
 		return e.JSON(http.StatusOK, map[string]any{
 			"sos":         dto,
 			"pushTargets": []PushTargetDto{},
@@ -343,22 +348,17 @@ func (h *TrailLiveHandler) RelaySos(e *core.RequestEvent) error {
 		return txErr
 	}
 
+	store.UpsertSos(recordToCachedSos(sosRec))
 	pushTargets := []PushTargetDto{}
 	if created {
-		pts, ptErr := selectSosPushTargets(
-			e.App,
+		pushTargets = selectSosPushTargetsFromStore(
+			store,
 			muleDeviceHash,
 			sosRec.GetString("trail_id"),
 			sosRec.GetFloat("lat"),
 			sosRec.GetFloat("lon"),
 			now,
 		)
-		if ptErr != nil {
-			return ptErr
-		}
-		if len(pts) > 0 {
-			pushTargets = pts
-		}
 	}
 
 	if shouldBroadcast {
@@ -366,6 +366,12 @@ func (h *TrailLiveHandler) RelaySos(e *core.RequestEvent) error {
 	}
 
 	dto := toSosAlertDto(sosRec, muleDeviceHash, respondingDevices)
+	if created && h.dispatchNativeSosPushIfPublic(e.App, e.Request, dto, pushTargets) {
+		return e.JSON(http.StatusOK, map[string]any{"sos": dto})
+	}
+	if isTrustedPublicLiveRequest(e.Request) {
+		return e.JSON(http.StatusOK, map[string]any{"sos": dto})
+	}
 	return e.JSON(http.StatusOK, map[string]any{
 		"sos":         dto,
 		"pushTargets": pushTargets,

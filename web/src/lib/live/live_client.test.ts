@@ -1203,3 +1203,264 @@ describe("live_client groups API, SSE group events, localStorage persistence, an
 		});
 	});
 });
+
+
+import {
+	computeJitteredBackoffMs,
+	isLiveStreamConnected,
+	quantizeCoord6,
+	resetLiveWireStateForTests,
+} from "./live_client.ts";
+
+describe("Phase 2 compact wire protocol & resilient SSE stream", () => {
+	const origEventSource = globalThis.EventSource;
+	const origFetch = globalThis.fetch;
+
+	afterEach(() => {
+		globalThis.EventSource = origEventSource;
+		globalThis.fetch = origFetch;
+		resetLiveWireStateForTests();
+		vi.useRealTimers();
+	});
+
+	it("applies +-30% bounded jitter and quantizes coordinates to 6 decimals", () => {
+		expect(computeJitteredBackoffMs(2000, () => 0)).toBe(1400);
+		expect(computeJitteredBackoffMs(2000, () => 0.5)).toBe(2000);
+		expect(computeJitteredBackoffMs(2000, () => 1)).toBe(2600);
+		expect(quantizeCoord6(45.40839182736451)).toBe(45.408392);
+	});
+
+	it("caches stateHash on sendHeartbeat, forwards stationary flag, and reuses cached reports on unchanged: true", async () => {
+		resetLiveWireStateForTests();
+		const requests: Array<Record<string, unknown>> = [];
+		let callIdx = 0;
+
+		globalThis.fetch = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+			callIdx++;
+			requests.push(JSON.parse(String(init?.body ?? "{}")));
+			if (callIdx === 1) {
+				return new Response(
+					JSON.stringify({
+						trailId: "bucegi-1",
+						activeHikers30m: 5,
+						stateHash: "hash-v1",
+						reports: [
+							{
+								id: "rep-spring-1",
+								trailId: "bucegi-1",
+								category: "spring",
+								isPermanent: true,
+								conditionStatus: "active",
+								lat: 45.41,
+								lon: 25.54,
+								confirmCount: 3,
+							},
+						],
+						sosAlerts: [],
+					}),
+					{ status: 200, headers: { "content-type": "application/json" } },
+				);
+			}
+			return new Response(
+				JSON.stringify({
+					activeHikers30m: 7,
+					unchanged: true,
+					stateHash: "hash-v1",
+				}),
+				{ status: 200, headers: { "content-type": "application/json" } },
+			);
+		}) as unknown as typeof fetch;
+
+		const first = await sendHeartbeat({
+			trailId: "bucegi-1",
+			lat: 45.408123456,
+			lon: 25.542987654,
+			ele: 2050.44,
+			inNavigation: true,
+		});
+		expect(first?.activeHikers30m).toBe(5);
+		expect(first?.reports).toHaveLength(1);
+		expect(requests[0].stateHash).toBeUndefined();
+		expect(requests[0].lat).toBe(45.408123);
+
+		const second = await sendHeartbeat({
+			trailId: "bucegi-1",
+			lat: 45.4082,
+			lon: 25.543,
+			inNavigation: true,
+			stationary: true,
+		});
+		expect(requests[1].stateHash).toBe("hash-v1");
+		expect(requests[1].stationary).toBe(true);
+		expect(second?.activeHikers30m).toBe(7);
+		expect(second?.reports).toHaveLength(1);
+		expect(second?.reports[0].id).toBe("rep-spring-1");
+	});
+
+	it("preserves lastEventId across reconnects, avoids 1200m teardown when open, and uses ?ack=1 on pingLiveGroup", async () => {
+		vi.useFakeTimers();
+		resetLiveWireStateForTests();
+
+		class FakeEventSource {
+			static instances: FakeEventSource[] = [];
+			static OPEN = 1;
+			url: string;
+			readyState = 0;
+			closed = false;
+			onerror: (() => void) | null = null;
+			private listeners = new Map<string, Array<(e: unknown) => void>>();
+
+			constructor(url: string) {
+				this.url = url;
+				FakeEventSource.instances.push(this);
+			}
+			addEventListener(type: string, fn: (e: unknown) => void) {
+				const arr = this.listeners.get(type) ?? [];
+				arr.push(fn);
+				this.listeners.set(type, arr);
+			}
+			emitOpen() {
+				this.readyState = 1;
+				for (const fn of this.listeners.get("open") ?? []) fn({});
+			}
+			emitNamed(type: string, data: unknown, lastEventId = "") {
+				for (const fn of this.listeners.get(type) ?? []) {
+					fn({ data: JSON.stringify(data), lastEventId });
+				}
+			}
+			close() {
+				this.closed = true;
+				this.readyState = 2;
+			}
+		}
+
+		globalThis.EventSource = FakeEventSource as unknown as typeof EventSource;
+
+		const receivedMembers: GroupMemberDto[] = [];
+		let resyncCount = 0;
+		const handle = connectLiveStream({
+			trailId: "bucegi-1",
+			lat: 45.4,
+			lon: 25.5,
+			groupCode: "AB23CD",
+			callbacks: {
+				onGroupMemberUpdate: (m) => receivedMembers.push(m),
+				onResyncRequired: () => {
+					resyncCount++;
+				},
+			},
+		});
+
+		expect(FakeEventSource.instances).toHaveLength(1);
+		const es1 = FakeEventSource.instances[0];
+		es1.emitOpen();
+		expect(isLiveStreamConnected()).toBe(true);
+
+		// Moving > 2,500 m while SSE is open MUST NOT close or reconnect EventSource!
+		handle.updateCoords(45.43, 25.53);
+		expect(FakeEventSource.instances).toHaveLength(1);
+		expect(es1.closed).toBe(false);
+
+		es1.emitNamed(
+			"group_member_update",
+			{
+				groupCode: "AB23CD",
+				memberId: "m-peer",
+				displayName: "Ioana",
+				colorHex: "#0f766e",
+				lat: 45.41,
+				lon: 25.51,
+				ele: 1900,
+				accuracy: 8,
+				stationary: true,
+			},
+			"9041",
+		);
+		es1.emitNamed(
+			"group_member_update",
+			{
+				groupCode: "AB23CD",
+				memberId: "m-departing",
+				displayName: "Matei",
+				colorHex: "#1d4ed8",
+				lat: 45.42,
+				lon: 25.52,
+				ele: 1950,
+				accuracy: 9,
+			},
+			"9042",
+		);
+		es1.emitNamed(
+			"group_member_left",
+			{
+				groupCode: "AB23CD",
+				memberId: "m-departing",
+			},
+			"9043",
+		);
+		expect(receivedMembers).toHaveLength(2);
+		expect(receivedMembers[0].stationary).toBe(true);
+
+		saveGroupSession({
+			code: "AB23CD",
+			trailId: "bucegi-1",
+			displayName: "Vlad",
+			selfMemberId: "m-self",
+			expiresAt: "2099-01-01T00:00:00Z",
+		});
+		const pingUrls: string[] = [];
+		globalThis.fetch = vi.fn(async (input: RequestInfo | URL) => {
+			pingUrls.push(String(input));
+			return new Response(
+				JSON.stringify({
+					ok: true,
+					code: "AB23CD",
+					selfMemberId: "m-self-srv",
+					expiresAt: "2099-06-01T00:00:00Z",
+					memberCount: 2,
+				}),
+				{
+					status: 200,
+					headers: { "content-type": "application/json" },
+				},
+			);
+		}) as unknown as typeof fetch;
+
+		const ackRes = await pingLiveGroup("AB23CD", {
+			lat: 45.43,
+			lon: 25.53,
+			ele: 2010,
+			accuracy: 6,
+		});
+		expect(pingUrls[0]).toContain("/api/v1/live/groups/AB23CD/ping?ack=1");
+		expect(ackRes?.code).toBe("AB23CD");
+		expect(ackRes?.selfMemberId).toBe("m-self-srv");
+		expect(ackRes?.expiresAt).toBe("2099-06-01T00:00:00Z");
+		expect(ackRes?.members).toHaveLength(1);
+		expect(ackRes?.members[0].memberId).toBe("m-peer");
+		expect(ackRes?.members[0].stationary).toBe(true);
+
+		es1.emitNamed("resync_required", { reason: "ring_gap" }, "9050");
+		expect(resyncCount).toBe(1);
+
+		es1.onerror?.();
+		expect(isLiveStreamConnected()).toBe(false);
+		await vi.advanceTimersByTimeAsync(3000);
+		expect(FakeEventSource.instances).toHaveLength(2);
+		expect(FakeEventSource.instances[1].url).toContain("lastEventId=9050");
+		expect(FakeEventSource.instances[1].url).toContain("lat=45.430000");
+
+		handle.close();
+
+		const handleReopened = connectLiveStream({
+			trailId: "bucegi-1",
+			lat: 45.43,
+			lon: 25.53,
+			groupCode: "AB23CD",
+			callbacks: {},
+		});
+		expect(FakeEventSource.instances).toHaveLength(3);
+		expect(FakeEventSource.instances[2].url).toContain("lastEventId=9050");
+		handleReopened.close();
+	});
+});

@@ -3,6 +3,7 @@ module pocketbase
 go 1.25.0
 
 require (
+	github.com/SherClockHolmes/webpush-go v1.4.0
 	github.com/doyensec/safeurl v0.2.5
 	github.com/extism/go-sdk v1.7.1
 	github.com/gabriel-vasile/mimetype v1.4.13
@@ -63,5 +64,5 @@ require (
 	modernc.org/libc v1.72.0 // indirect
 	modernc.org/mathutil v1.7.1 // indirect
 	modernc.org/memory v1.11.0 // indirect
-	modernc.org/sqlite v1.50.0 // indirect
+	modernc.org/sqlite v1.50.0
 )

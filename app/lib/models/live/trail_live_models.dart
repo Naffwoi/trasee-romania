@@ -662,12 +662,34 @@ class TrailLiveSummary {
     required this.activeHikers30m,
     this.reports = const [],
     this.sosAlerts = const [],
+    this.stateHash,
+    this.unchanged = false,
   });
 
   final String? trailId;
   final int activeHikers30m;
   final List<TrailReportModel> reports;
   final List<SosAlertModel> sosAlerts;
+  final String? stateHash;
+  final bool unchanged;
+
+  TrailLiveSummary copyWith({
+    String? trailId,
+    int? activeHikers30m,
+    List<TrailReportModel>? reports,
+    List<SosAlertModel>? sosAlerts,
+    String? stateHash,
+    bool? unchanged,
+  }) {
+    return TrailLiveSummary(
+      trailId: trailId ?? this.trailId,
+      activeHikers30m: activeHikers30m ?? this.activeHikers30m,
+      reports: reports ?? this.reports,
+      sosAlerts: sosAlerts ?? this.sosAlerts,
+      stateHash: stateHash ?? this.stateHash,
+      unchanged: unchanged ?? this.unchanged,
+    );
+  }
 
   List<TrailReportModel> visibleReports({DateTime? now}) {
     final ts = now ?? DateTime.now();
@@ -743,6 +765,8 @@ class TrailLiveSummary {
       ),
       reports: parsedReports,
       sosAlerts: parsedSos,
+      stateHash: _parseOptionalString(json['stateHash'] ?? json['state_hash']),
+      unchanged: _parseBool(json['unchanged'], false),
     );
   }
 
@@ -751,6 +775,8 @@ class TrailLiveSummary {
     'activeHikers30m': activeHikers30m,
     'reports': reports.map((r) => r.toJson()).toList(growable: false),
     'sosAlerts': sosAlerts.map((s) => s.toJson()).toList(growable: false),
+    if (stateHash != null) 'stateHash': stateHash,
+    if (unchanged) 'unchanged': true,
   };
 }
 
@@ -767,6 +793,7 @@ class GroupMemberModel {
     this.speed,
     this.alongTrackM,
     this.inNavigation = false,
+    this.isStationary = false,
     this.isSelf = false,
     this.updatedAt,
     this.viaBluetooth = false,
@@ -784,6 +811,7 @@ class GroupMemberModel {
   final double? speed;
   final double? alongTrackM;
   final bool inNavigation;
+  final bool isStationary;
   final bool isSelf;
   final DateTime? updatedAt;
   final bool viaBluetooth;
@@ -820,6 +848,7 @@ class GroupMemberModel {
     double? speed,
     double? alongTrackM,
     bool? inNavigation,
+    bool? isStationary,
     bool? isSelf,
     DateTime? updatedAt,
     bool? viaBluetooth,
@@ -837,6 +866,7 @@ class GroupMemberModel {
       speed: speed ?? this.speed,
       alongTrackM: alongTrackM ?? this.alongTrackM,
       inNavigation: inNavigation ?? this.inNavigation,
+      isStationary: isStationary ?? this.isStationary,
       isSelf: isSelf ?? this.isSelf,
       updatedAt: updatedAt ?? this.updatedAt,
       viaBluetooth: viaBluetooth ?? this.viaBluetooth,
@@ -865,6 +895,10 @@ class GroupMemberModel {
       ),
       inNavigation: _parseBool(
         json['inNavigation'] ?? json['in_navigation'],
+        false,
+      ),
+      isStationary: _parseBool(
+        json['stationary'] ?? json['isStationary'] ?? json['is_stationary'],
         false,
       ),
       isSelf: _parseBool(json['isSelf'] ?? json['is_self'], false),
@@ -897,6 +931,7 @@ class GroupMemberModel {
     'speed': speed,
     'alongTrackM': alongTrackM,
     'inNavigation': inNavigation,
+    if (isStationary) 'stationary': true,
     'isSelf': isSelf,
     'updatedAt': updatedAt?.toUtc().toIso8601String(),
     if (viaBluetooth) 'viaBluetooth': viaBluetooth,
@@ -911,6 +946,7 @@ class GroupSessionModel {
     this.expiresAt,
     required this.selfMemberId,
     this.members = const [],
+    this.hasMembersSnapshot = true,
     this.isOfflineBleGroup = false,
   });
 
@@ -919,6 +955,7 @@ class GroupSessionModel {
   final DateTime? expiresAt;
   final String selfMemberId;
   final List<GroupMemberModel> members;
+  final bool hasMembersSnapshot;
   final bool isOfflineBleGroup;
 
   List<GroupMemberModel> get peers => members
@@ -931,6 +968,7 @@ class GroupSessionModel {
     DateTime? expiresAt,
     String? selfMemberId,
     List<GroupMemberModel>? members,
+    bool? hasMembersSnapshot,
     bool? isOfflineBleGroup,
   }) {
     return GroupSessionModel(
@@ -939,6 +977,7 @@ class GroupSessionModel {
       expiresAt: expiresAt ?? this.expiresAt,
       selfMemberId: selfMemberId ?? this.selfMemberId,
       members: members ?? this.members,
+      hasMembersSnapshot: hasMembersSnapshot ?? this.hasMembersSnapshot,
       isOfflineBleGroup: isOfflineBleGroup ?? this.isOfflineBleGroup,
     );
   }
@@ -980,6 +1019,7 @@ class GroupSessionModel {
       ),
       selfMemberId: selfId,
       members: parsedMembers,
+      hasMembersSnapshot: rawMembers is List,
       isOfflineBleGroup: _parseBool(
         source['isOfflineBleGroup'] ?? source['is_offline_ble_group'],
         false,
@@ -993,6 +1033,7 @@ class GroupSessionModel {
     'expiresAt': expiresAt?.toUtc().toIso8601String(),
     'selfMemberId': selfMemberId,
     'members': members.map((m) => m.toJson()).toList(growable: false),
+    if (!hasMembersSnapshot) 'hasMembersSnapshot': false,
     if (isOfflineBleGroup) 'isOfflineBleGroup': isOfflineBleGroup,
   };
 }
@@ -1000,6 +1041,7 @@ class GroupSessionModel {
 class TrailLiveSseEvent {
   const TrailLiveSseEvent({
     required this.type,
+    this.eventId,
     this.report,
     this.sos,
     this.groupMember,
@@ -1010,8 +1052,10 @@ class TrailLiveSseEvent {
 
   static const String groupMemberUpdate = 'group_member_update';
   static const String groupMemberLeft = 'group_member_left';
+  static const String resyncRequired = 'resync_required';
 
   final String type;
+  final String? eventId;
   final TrailReportModel? report;
   final SosAlertModel? sos;
   final GroupMemberModel? groupMember;
@@ -1021,6 +1065,7 @@ class TrailLiveSseEvent {
 
   static TrailLiveSseEvent? tryParse({
     String? eventName,
+    String? eventId,
     required String data,
   }) {
     final trimmed = data.trim();
@@ -1074,6 +1119,7 @@ class TrailLiveSseEvent {
 
       return TrailLiveSseEvent(
         type: effectiveType,
+        eventId: _parseOptionalString(eventId),
         report: report,
         sos: sos,
         groupMember: groupMember,

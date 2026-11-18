@@ -12,6 +12,12 @@ build*.sh
 start*.*
 
 data*/
+!web/src/lib/data/
+!web/src/lib/data/**
+!web/static/data/
+!web/static/data/**
+!app/assets/data/
+!app/assets/data/**
 .env
 
 plugins/*/dist/

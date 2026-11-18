@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { defaultMapState, overlays } from "#lib/vendor/maplibre-layer-manager/layers";
+import { defaultMapState, overlays } from "#lib/vendor/maplibre-layer-manager/layers.ts";
 import { parseTerrainProtocolUrl, quantizeSunTileQuery } from "./terrain_intel_protocol";
 
 describe("terrain_intel_protocol & MapState overlay definitions", () => {

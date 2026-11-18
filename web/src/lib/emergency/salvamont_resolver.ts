@@ -1,4 +1,4 @@
-import rawDataset from "#lib/data/salvamont_ro.json";
+import rawDataset from "#lib/data/salvamont_ro.json" with { type: "json" };
 import { bearingDegrees, cardinalDirection, haversineMeters } from "#lib/navigation/geo_math.ts";
 
 export type SalvamontPointKind = "base" | "post" | "refuge" | "dispatch_hq";

@@ -12,6 +12,7 @@ dependencies:
   crypto: ^3.0.7
   dio: ^5.9.2
   dio_cookie_manager: ^3.4.0
+  native_dio_adapter: ^1.5.0
   disk_space_2: ^1.0.12
   duration: ^4.0.3
   exif: ^3.3.0

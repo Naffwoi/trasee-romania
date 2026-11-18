@@ -240,7 +240,10 @@ class OfflinePeakFinder {
       var occluded = false;
       var anyDem = false;
       var s = 40.0;
-      final stopDist = distM - 90.0;
+      final stopDist = math.max(
+        0.0,
+        distM - math.min(350.0, math.max(120.0, distM * 0.085)),
+      );
       while (s < stopDist) {
         final z = dem.sampleElevation(
           lat + (dirN * s) / metersPerDegLat,

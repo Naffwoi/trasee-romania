@@ -13,7 +13,7 @@ void main() {
             name: 'Vf. Apropiat',
             lat: 45.48170,
             lon: 25.45628,
-            ele: 1950,
+            ele: 1750,
             prominenceM: 300,
             kind: 'peak',
           ),
@@ -38,7 +38,7 @@ void main() {
         ];
         final dem = DemTileGrid(
           customSampler: (lat, _) =>
-              (lat - 45.4817).abs() < 0.0025 ? 1950.0 : 1500.0,
+              (lat - 45.4817).abs() < 0.0025 ? 1750.0 : 1500.0,
         );
         final finder = OfflinePeakFinder.fromPeaks(peaks);
         final pano = finder.computePanorama(dem, 45.44572, 25.45628, 1500.0);

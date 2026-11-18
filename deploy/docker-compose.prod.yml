@@ -41,6 +41,7 @@ services:
     environment:
       <<: *env
       GOMEMLIMIT: "420MiB"
+      VAPID_LEGACY_KEY_FILE: /pb_data/legacy_vapid_keys.json
     ports:
       - "127.0.0.1:8090:8090"
     networks:
@@ -59,6 +60,7 @@ services:
 
   web:
     container_name: wanderer-web
+    init: true
     build:
       context: ../web
       dockerfile: ../deploy/Dockerfile.web

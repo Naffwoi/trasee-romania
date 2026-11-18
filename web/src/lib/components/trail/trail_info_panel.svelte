@@ -38,7 +38,7 @@
     import { show_toast } from "#lib/stores/toast_store.svelte.ts";
     import * as M from "maplibre-gl";
     import "photoswipe/style.css";
-    import { onMount, tick, untrack } from "svelte";
+    import { onMount, tick, untrack, type Component } from "svelte";
     import { _, locale } from "svelte-i18n";
     import Button from "../base/button.svelte";
     import Chip from "../base/chip.svelte";
@@ -50,10 +50,7 @@
     import ShareInfo from "../share_info.svelte";
     import SummitLogTable from "../summit_log/summit_log_table.svelte";
     import MapWithElevationMaplibre from "./map_with_elevation_maplibre.svelte";
-    import TrailEnvironmentCard from "./trail_environment_card.svelte";
-    import TrailSalvamontCard from "./trail_salvamont_card.svelte";
     import TrailTimeline from "./trail_timeline.svelte";
-    import TrailheadStreetPreview from "./trailhead_street_preview.svelte";
     import {
         summit_logs_create,
         summit_logs_delete,
@@ -99,6 +96,9 @@
 
     let summitLogModal: SummitLogModalType | undefined = $state();
     let SummitLogModalComponent = $state<typeof SummitLogModalType | null>(null);
+    let LoadedSalvamontCard = $state<Component<{ trail: Trail }> | null>(null);
+    let LoadedEnvironmentCard = $state<Component<{ trailId: string; maxElevationM?: number | null }> | null>(null);
+    let LoadedStreetPreview = $state<Component<{ lat?: number; lon?: number }> | null>(null);
     let confirmModal: ConfirmModal;
     let markTrailAsCompletedModal: ConfirmModal;
 
@@ -170,6 +170,15 @@
     );
 
     onMount(async () => {
+        void import("./trail_salvamont_card.svelte").then((m) => {
+            LoadedSalvamontCard = m.default;
+        });
+        void import("./trail_environment_card.svelte").then((m) => {
+            LoadedEnvironmentCard = m.default;
+        });
+        void import("./trailhead_street_preview.svelte").then((m) => {
+            LoadedStreetPreview = m.default;
+        });
         if (mode === "overview" && !trail.expand?.gpx_data && trail.gpx) {
             void fetchGPX(trail).then((gpxData) => {
                 if (!gpxData) return;
@@ -852,9 +861,15 @@
                 </span>
             </div>
         {/if}
-        <TrailSalvamontCard {trail} />
-        <TrailEnvironmentCard trailId={trail.id ?? ""} maxElevationM={trail.max_ele ?? null} />
-        <TrailheadStreetPreview lat={trail.lat} lon={trail.lon} />
+        {#if LoadedSalvamontCard}
+            <LoadedSalvamontCard {trail} />
+        {/if}
+        {#if LoadedEnvironmentCard}
+            <LoadedEnvironmentCard trailId={trail.id ?? ""} maxElevationM={trail.max_ele ?? null} />
+        {/if}
+        {#if LoadedStreetPreview}
+            <LoadedStreetPreview lat={trail.lat} lon={trail.lon} />
+        {/if}
         <div
             class="grid grid-cols-1 my-4 gap-8"
             class:xl:grid-cols-[1fr_18rem]={mode == "overview"}

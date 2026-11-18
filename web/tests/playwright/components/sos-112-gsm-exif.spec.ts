@@ -26,7 +26,7 @@ test.describe("Salvamont 112 Pro Offline Suite & EXIF Waze Verification", () => 
 
 		const index = EmergencySpatialIndex.fromJson(seedData);
 		const landmark = index.findNearestLandmark(45.445833, 25.456389);
-		expect(landmark?.name).toBe("Vf. Omu");
+		expect(landmark?.name).toBe("Vârful Omu");
 
 		const bundle = formatRescueCoordinates({
 			lat: 45.445833,

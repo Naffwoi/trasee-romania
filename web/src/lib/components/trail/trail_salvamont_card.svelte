@@ -5,7 +5,7 @@
 	} from "#lib/emergency/salvamont_resolver.ts";
 	import GPX from "#lib/models/gpx/gpx.ts";
 	import type { Trail } from "#lib/models/trail.ts";
-	import { extractRawTrackPoints } from "#lib/navigation/index.ts";
+	import { extractRawTrackPoints } from "#lib/navigation/geo_math.ts";
 	import { formatDistance } from "#lib/util/format_util.ts";
 	import { decodePolyline } from "#lib/util/polyline_util.ts";
 	import { locale } from "svelte-i18n";

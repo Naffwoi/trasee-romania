@@ -3,7 +3,7 @@ import { DebugLayer } from "./debug-layer";
 import { baseMapStyles, defaultMapState, type BaseLayer, type MapState, type OverlayName } from "./layers";
 import { OverlayLayer } from "./overlay-layer";
 import { OverpassLayer, type OverpassPopupActionFactory } from "./overpass-layer";
-import { SalvamontLayer, type SalvamontLayerOptions } from "./salvamont-layer";
+import type { SalvamontLayerOptions } from "./salvamont-layer";
 import {
     buildGibsSnowOverlaySpec,
     buildGibsTrueColorOverlaySpec,
@@ -61,6 +61,7 @@ export class LayerManager {
     private addedListeners: Set<string> = new Set();
     private overpassActionFactory?: OverpassPopupActionFactory;
     private salvamontOptions?: SalvamontLayerOptions;
+    private salvamontLoadToken = 0;
 
     constructor(
         map: M.Map,
@@ -156,7 +157,20 @@ export class LayerManager {
 
             if (active && (!oldOverlayActive || initialize || ((name === "snowCover" || name === "dailySatellite") && dateChanged))) {
                 if (name === "salvamont") {
-                    this.addLayer("salvamont", new SalvamontLayer(this.map, this.salvamontOptions));
+                    const token = ++this.salvamontLoadToken;
+                    void import("./salvamont-layer").then(({ SalvamontLayer }) => {
+                        const mountSalvamont = () => {
+                            if (token !== this.salvamontLoadToken || !this.state.overlays.salvamont) {
+                                return;
+                            }
+                            this.addLayer("salvamont", new SalvamontLayer(this.map, this.salvamontOptions));
+                        };
+                        if (this.map.getStyle()) {
+                            mountSalvamont();
+                        } else {
+                            this.map.once("styledata", mountSalvamont);
+                        }
+                    });
                 } else if (name === "snowCover") {
                     this.addLayer(name, { spec: buildGibsSnowOverlaySpec(newState.satelliteDate ?? "default") });
                 } else if (name === "dailySatellite") {
@@ -165,6 +179,9 @@ export class LayerManager {
                     this.addLayer(name, new OverlayLayer(name));
                 }
             } else if (oldOverlayActive && !active) {
+                if (name === "salvamont") {
+                    this.salvamontLoadToken++;
+                }
                 this.removeLayer(name);
             }
         }
@@ -318,8 +335,12 @@ export class LayerManager {
 
     private restoreLayers() {
         for (const [id, layer] of Object.entries(this.layers)) {
-            if (id === "salvamont" && layer instanceof SalvamontLayer) {
-                layer.ensureImagesLoaded();
+            if (
+                id === "salvamont" &&
+                "ensureImagesLoaded" in layer &&
+                typeof (layer as { ensureImagesLoaded?: unknown }).ensureImagesLoaded === "function"
+            ) {
+                (layer as { ensureImagesLoaded: () => void }).ensureImagesLoaded();
             }
             this.addLayer(id, layer)
         }

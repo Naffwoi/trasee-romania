@@ -170,6 +170,15 @@ func registerTrailLiveRouterGroups(rtr *router.Router[*core.RequestEvent], handl
 	internal.POST("/heartbeat", handler.Heartbeat)
 	internal.DELETE("/heartbeat", handler.ClearHeartbeat)
 	internal.GET("/trail/{id}/summary", handler.TrailSummary)
+	internal.GET("/trail/{id}/environment", handler.TrailEnvironment)
+	internal.GET("/street-preview", handler.StreetPreview)
+	internal.GET("/env-hazards", handler.EnvHazardsSummary)
+	internal.GET("/map/ancpi-status", func(e *core.RequestEvent) error {
+		if err := verifyLiveInternalSecret(e); err != nil {
+			return err
+		}
+		return handler.Ancpi.Status(e)
+	})
 	internal.POST("/reports", handler.CreateReport)
 	internal.POST("/reports/{id}/vote", handler.VoteReport)
 	internal.POST("/sos", handler.CreateSos)
@@ -197,6 +206,16 @@ func registerTrailLiveRouterGroups(rtr *router.Router[*core.RequestEvent], handl
 	pub.GET("/trail/{id}/summary", handler.wrapPublicLiveRoute(publicLiveEdgePolicy{
 		optionalDevice: true,
 	}, handler.TrailSummary))
+	pub.GET("/trail/{id}/environment", handler.wrapPublicLiveRoute(publicLiveEdgePolicy{
+		optionalDevice: true,
+	}, handler.TrailEnvironment))
+	pub.GET("/street-preview", handler.wrapPublicLiveRoute(publicLiveEdgePolicy{
+		optionalDevice: true,
+	}, handler.StreetPreview))
+	pub.GET("/env-hazards", handler.wrapPublicLiveRoute(publicLiveEdgePolicy{
+		optionalDevice: true,
+	}, handler.EnvHazardsSummary))
+	pub.GET("/map/ancpi-status", handler.Ancpi.Status)
 
 	pub.POST("/reports", handler.wrapPublicLiveRoute(publicLiveEdgePolicy{
 		resolveActor:  true,

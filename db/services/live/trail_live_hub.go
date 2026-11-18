@@ -38,6 +38,7 @@ const (
 	replayGroup replayKind = iota + 1
 	replayReport
 	replaySos
+	replayEnvHazard
 )
 
 type replaySlot struct {
@@ -439,6 +440,36 @@ func (h *TrailLiveHub) BroadcastReportUpdate(target GeoTarget, reportDto any) {
 	}
 }
 
+// BroadcastEnvHazardUpdate sends a single-envelope `env_hazard_alert` SSE event to nearby / trail subscribers.
+func (h *TrailLiveHub) BroadcastEnvHazardUpdate(target GeoTarget, hazardDto any) {
+	if h == nil {
+		return
+	}
+	seq := h.nextSeq.Add(1)
+	frame, err := buildEnvelopeFrame(seq, "env_hazard_alert", "hazard", hazardDto)
+	if err != nil {
+		return
+	}
+	var cells []uint32
+	if target.HasCoords {
+		cells = GridCellsForRadius(target.Lat, target.Lon, LiveRadiusMeters+300.0)
+	}
+
+	h.mu.Lock()
+	h.storeReplayLocked(replaySlot{
+		seq:         seq,
+		kind:        replayEnvHazard,
+		target:      target,
+		sharedFrame: frame,
+	})
+	targets := h.collectGeoCandidatesLocked(target, cells)
+	h.mu.Unlock()
+
+	for _, sub := range targets {
+		pushNonBlocking(sub.Ch, frame)
+	}
+}
+
 // BroadcastSosUpdate pre-builds ONE shared []byte frame for bystanders (isMine:false, amResponding:false) outside lock,
 // and dispatches custom frames ONLY to the SOS owner and active responders.
 func (h *TrailLiveHub) BroadcastSosUpdate(
@@ -599,7 +630,7 @@ func (h *TrailLiveHub) replayMissedFrames(sub *Subscriber, lastSeq uint64) [][]b
 			if sub.GroupCode != "" && sub.GroupCode == slot.groupCode {
 				frames = append(frames, slot.sharedFrame)
 			}
-		case replayReport:
+		case replayReport, replayEnvHazard:
 			if matchesSubscriber(sub, slot.target) {
 				frames = append(frames, slot.sharedFrame)
 			}

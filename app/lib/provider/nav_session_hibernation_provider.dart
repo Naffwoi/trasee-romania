@@ -37,7 +37,7 @@ class NavSessionHibernation extends Notifier<bool> {
 /// (`TickerMode.of(context) == true`) AND no [NavigationScreen] owns the
 /// dedicated tracking pipeline.
 bool shouldAcquireForegroundMapSensors(BuildContext context, WidgetRef ref) {
-  final tickersEnabled = TickerMode.of(context);
+  final tickersEnabled = TickerMode.valuesOf(context).enabled;
   final hibernating = ref.watch(navSessionHibernationProvider);
   return tickersEnabled && !hibernating;
 }

@@ -2304,26 +2304,53 @@ abstract class AppLocalizations {
   /// **'Remove all recent searches?'**
   String get clear_search_history_confirm;
 
-  bool get _isRo => localeName.startsWith('ro');
+  /// No description provided for @nav_remaining.
+  ///
+  /// In en, this message translates to:
+  /// **'Remaining'**
+  String get nav_remaining;
 
-  String get nav_remaining => _isRo ? 'Rămas' : 'Remaining';
+  /// No description provided for @nav_arrival.
+  ///
+  /// In en, this message translates to:
+  /// **'Arrival'**
+  String get nav_arrival;
 
-  String get nav_arrival => _isRo ? 'Sosire' : 'Arrival';
+  /// No description provided for @nav_climb_left.
+  ///
+  /// In en, this message translates to:
+  /// **'Climb left'**
+  String get nav_climb_left;
 
-  String get nav_climb_left => _isRo ? 'Urcare rămasă' : 'Climb left';
+  /// No description provided for @nav_off_trail_title.
+  ///
+  /// In en, this message translates to:
+  /// **'Off trail'**
+  String get nav_off_trail_title;
 
-  String get nav_off_trail_title => _isRo ? 'În afara traseului' : 'Off trail';
+  /// No description provided for @nav_rejoin_in.
+  ///
+  /// In en, this message translates to:
+  /// **'Rejoin in {distance}'**
+  String nav_rejoin_in(String distance);
 
-  String nav_rejoin_in(String distance) =>
-      _isRo ? 'Revenire în $distance' : 'Rejoin in $distance';
+  /// No description provided for @nav_min_climb.
+  ///
+  /// In en, this message translates to:
+  /// **'Min climb'**
+  String get nav_min_climb;
 
-  String get nav_min_climb => _isRo ? 'Urcare minimă' : 'Min climb';
+  /// No description provided for @nav_shortest_path.
+  ///
+  /// In en, this message translates to:
+  /// **'Shortest safe'**
+  String get nav_shortest_path;
 
-  String get nav_shortest_path => _isRo ? 'Drum minim' : 'Shortest safe';
-
-  String nav_next_summit(String elevation, String distance) => _isRo
-      ? 'Vârf $elevation · peste $distance'
-      : 'Peak $elevation · in $distance';
+  /// No description provided for @nav_next_summit.
+  ///
+  /// In en, this message translates to:
+  /// **'Peak {elevation} · in {distance}'**
+  String nav_next_summit(String elevation, String distance);
 }
 
 class _AppLocalizationsDelegate

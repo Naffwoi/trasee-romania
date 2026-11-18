@@ -15,6 +15,7 @@ import 'package:wanderer/provider/online_status_provider.dart';
 import 'package:wanderer/provider/toast_provider.dart';
 import 'package:wanderer/util/gpx/conversion.dart';
 import 'package:wanderer/util/gpx/gpx.dart';
+import 'package:wanderer/util/gpx/offline_trail_transcoder.dart';
 import 'package:wanderer/util/geo/reverse_geocode.dart';
 
 /// Supported trail file extensions for both the in-app picker and inbound
@@ -73,10 +74,6 @@ Future<void> importTrailFile({
     showError(l10n.trail_source_import_error);
     return;
   }
-  if (ext != 'gpx' && isOffline) {
-    showError(l10n.trail_source_offline_import_error);
-    return;
-  }
 
   // The `try` deliberately ENDS after `buildLocalTrail`. It used to
   // span the navigation push too, so a throw from `navContext.push` — or from
@@ -85,16 +82,34 @@ Future<void> importTrailFile({
   // stale non-null `pendingImportedTrail` global behind.
   final Trail trail;
   try {
-    final gpxXml = ext == 'gpx'
-        ? await File(path).readAsString()
-        : await transcodeToGpx(ref, path, name);
-
-    // Off the UI thread: a file import is user-initiated with a spinner up,
-    // and a big GPX parse used to jank the whole frame right at the tap.
-    // compute (not a raw Isolate.run closure): a closure captures its
-    // enclosing scope frame — here that includes a BuildContext and the
-    // widget binding, which are unsendable; compute sends only the string.
-    final gpx = await compute(parseGpxSafely, gpxXml);
+    late final Gpx gpx;
+    late final String gpxXml;
+    if (ext == 'gpx') {
+      gpxXml = await File(path).readAsString();
+      gpx = await compute(parseGpxSafely, gpxXml);
+    } else {
+      try {
+        final rawBytes = await File(path).readAsBytes();
+        final local = await compute(transcodeTrailBytesIsolate, (
+          bytes: rawBytes,
+          ext: ext,
+          fallbackName: name,
+        ));
+        gpx = local.gpx;
+        gpxXml = local.gpxXml;
+      } catch (localErr, localSt) {
+        if (isOffline) {
+          debugPrint(
+            'importTrailFile offline transcode failed for "$name": $localErr\n$localSt',
+          );
+          showError(l10n.trail_source_offline_import_error);
+          return;
+        }
+        // Fallback to server transcoder only for exotic third-party dialects while online.
+        gpxXml = await transcodeToGpx(ref, path, name);
+        gpx = await compute(parseGpxSafely, gpxXml);
+      }
+    }
 
     final hasUsablePoint =
         gpx.allWaypoints.isNotEmpty ||
@@ -187,27 +202,10 @@ Future<String> transcodeToGpx(WidgetRef ref, String path, String name) async {
 /// called `searchLocationReverse` with an empty
 /// options object — i.e. `includeRoad` falsy — and used `fullLabel`,
 /// warning-and-continuing on failure).
-Future<Trail> buildLocalTrail(
+Future<Trail> enrichLocalTrailLocationIfOnline(
   WidgetRef ref,
-  Gpx gpx, {
-  String? fallbackName,
-  Duration? movingDuration,
-  String? gpxData,
-}) async {
-  // compute(): trailFromGpx runs the full ported metrics computation over
-  // every trackpoint (distance/elevation accumulation) — pure CPU that
-  // otherwise lands on the UI thread at exactly the moments that must stay
-  // responsive (recording Stop tap, planner finish, file import). The
-  // computation itself is byte-identical — only the thread changes. compute
-  // with an explicit args record, never a capturing closure: the enclosing
-  // scope holds a WidgetRef, which is unsendable.
-  final trail = await compute(trailFromGpxIsolate, (
-    gpx: gpx,
-    fallbackName: fallbackName,
-    movingDuration: movingDuration,
-    gpxData: gpxData,
-  ));
-
+  Trail trail,
+) async {
   final lat = trail.lat;
   final lon = trail.lon;
   if (ref.read(onlineStatusProvider) && lat != null && lon != null) {
@@ -225,6 +223,21 @@ Future<Trail> buildLocalTrail(
       // Best-effort only — never blocks the save.
     }
   }
-
   return trail;
+}
+
+Future<Trail> buildLocalTrail(
+  WidgetRef ref,
+  Gpx gpx, {
+  String? fallbackName,
+  Duration? movingDuration,
+  String? gpxData,
+}) async {
+  final trail = await compute(trailFromGpxIsolate, (
+    gpx: gpx,
+    fallbackName: fallbackName,
+    movingDuration: movingDuration,
+    gpxData: gpxData,
+  ));
+  return enrichLocalTrailLocationIfOnline(ref, trail);
 }

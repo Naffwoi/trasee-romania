@@ -1290,4 +1290,32 @@ class AppLocalizationsEs extends AppLocalizations {
 
   @override
   String get clear_search_history_confirm => 'Remove all recent searches?';
+
+  @override
+  String get nav_remaining => 'Remaining';
+
+  @override
+  String get nav_arrival => 'Arrival';
+
+  @override
+  String get nav_climb_left => 'Climb left';
+
+  @override
+  String get nav_off_trail_title => 'Off trail';
+
+  @override
+  String nav_rejoin_in(String distance) {
+    return 'Rejoin in $distance';
+  }
+
+  @override
+  String get nav_min_climb => 'Min climb';
+
+  @override
+  String get nav_shortest_path => 'Shortest safe';
+
+  @override
+  String nav_next_summit(String elevation, String distance) {
+    return 'Peak $elevation · in $distance';
+  }
 }

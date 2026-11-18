@@ -65,7 +65,7 @@ final class MapClusterSearchProvider
   }
 }
 
-String _$mapClusterSearchHash() => r'6bc581a57f0b4699562916ccb2854ad26be319a0';
+String _$mapClusterSearchHash() => r'647060ac76cd7df0b1bf03562ce57fe6ea9f284a';
 
 /// Debounced, bounds+zoom-keyed provider hitting `POST /search/trails/cluster`.
 /// Companion to [MapTrailSearch] — that provider still powers the

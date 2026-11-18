@@ -24,7 +24,15 @@
     "profile_followers_empty_other_body",
     "recent_searches",
     "clear_search_history",
-    "clear_search_history_confirm"
+    "clear_search_history_confirm",
+    "nav_remaining",
+    "nav_arrival",
+    "nav_climb_left",
+    "nav_off_trail_title",
+    "nav_rejoin_in",
+    "nav_min_climb",
+    "nav_shortest_path",
+    "nav_next_summit"
   ],
 
   "cs": [
@@ -52,7 +60,15 @@
     "profile_followers_empty_other_body",
     "recent_searches",
     "clear_search_history",
-    "clear_search_history_confirm"
+    "clear_search_history_confirm",
+    "nav_remaining",
+    "nav_arrival",
+    "nav_climb_left",
+    "nav_off_trail_title",
+    "nav_rejoin_in",
+    "nav_min_climb",
+    "nav_shortest_path",
+    "nav_next_summit"
   ],
 
   "de": [
@@ -77,7 +93,15 @@
     "profile_following_empty_other_body",
     "profile_followers_empty_title",
     "profile_followers_empty_own_body",
-    "profile_followers_empty_other_body"
+    "profile_followers_empty_other_body",
+    "nav_remaining",
+    "nav_arrival",
+    "nav_climb_left",
+    "nav_off_trail_title",
+    "nav_rejoin_in",
+    "nav_min_climb",
+    "nav_shortest_path",
+    "nav_next_summit"
   ],
 
   "es": [
@@ -105,7 +129,15 @@
     "profile_followers_empty_other_body",
     "recent_searches",
     "clear_search_history",
-    "clear_search_history_confirm"
+    "clear_search_history_confirm",
+    "nav_remaining",
+    "nav_arrival",
+    "nav_climb_left",
+    "nav_off_trail_title",
+    "nav_rejoin_in",
+    "nav_min_climb",
+    "nav_shortest_path",
+    "nav_next_summit"
   ],
 
   "eu": [
@@ -133,7 +165,15 @@
     "profile_followers_empty_other_body",
     "recent_searches",
     "clear_search_history",
-    "clear_search_history_confirm"
+    "clear_search_history_confirm",
+    "nav_remaining",
+    "nav_arrival",
+    "nav_climb_left",
+    "nav_off_trail_title",
+    "nav_rejoin_in",
+    "nav_min_climb",
+    "nav_shortest_path",
+    "nav_next_summit"
   ],
 
   "fr": [
@@ -161,7 +201,15 @@
     "profile_followers_empty_other_body",
     "recent_searches",
     "clear_search_history",
-    "clear_search_history_confirm"
+    "clear_search_history_confirm",
+    "nav_remaining",
+    "nav_arrival",
+    "nav_climb_left",
+    "nav_off_trail_title",
+    "nav_rejoin_in",
+    "nav_min_climb",
+    "nav_shortest_path",
+    "nav_next_summit"
   ],
 
   "hu": [
@@ -189,7 +237,15 @@
     "profile_followers_empty_other_body",
     "recent_searches",
     "clear_search_history",
-    "clear_search_history_confirm"
+    "clear_search_history_confirm",
+    "nav_remaining",
+    "nav_arrival",
+    "nav_climb_left",
+    "nav_off_trail_title",
+    "nav_rejoin_in",
+    "nav_min_climb",
+    "nav_shortest_path",
+    "nav_next_summit"
   ],
 
   "it": [
@@ -217,7 +273,15 @@
     "profile_followers_empty_other_body",
     "recent_searches",
     "clear_search_history",
-    "clear_search_history_confirm"
+    "clear_search_history_confirm",
+    "nav_remaining",
+    "nav_arrival",
+    "nav_climb_left",
+    "nav_off_trail_title",
+    "nav_rejoin_in",
+    "nav_min_climb",
+    "nav_shortest_path",
+    "nav_next_summit"
   ],
 
   "nl": [
@@ -245,7 +309,15 @@
     "profile_followers_empty_other_body",
     "recent_searches",
     "clear_search_history",
-    "clear_search_history_confirm"
+    "clear_search_history_confirm",
+    "nav_remaining",
+    "nav_arrival",
+    "nav_climb_left",
+    "nav_off_trail_title",
+    "nav_rejoin_in",
+    "nav_min_climb",
+    "nav_shortest_path",
+    "nav_next_summit"
   ],
 
   "no": [
@@ -273,7 +345,15 @@
     "profile_followers_empty_other_body",
     "recent_searches",
     "clear_search_history",
-    "clear_search_history_confirm"
+    "clear_search_history_confirm",
+    "nav_remaining",
+    "nav_arrival",
+    "nav_climb_left",
+    "nav_off_trail_title",
+    "nav_rejoin_in",
+    "nav_min_climb",
+    "nav_shortest_path",
+    "nav_next_summit"
   ],
 
   "pl": [
@@ -301,7 +381,15 @@
     "profile_followers_empty_other_body",
     "recent_searches",
     "clear_search_history",
-    "clear_search_history_confirm"
+    "clear_search_history_confirm",
+    "nav_remaining",
+    "nav_arrival",
+    "nav_climb_left",
+    "nav_off_trail_title",
+    "nav_rejoin_in",
+    "nav_min_climb",
+    "nav_shortest_path",
+    "nav_next_summit"
   ],
 
   "pt": [
@@ -329,7 +417,15 @@
     "profile_followers_empty_other_body",
     "recent_searches",
     "clear_search_history",
-    "clear_search_history_confirm"
+    "clear_search_history_confirm",
+    "nav_remaining",
+    "nav_arrival",
+    "nav_climb_left",
+    "nav_off_trail_title",
+    "nav_rejoin_in",
+    "nav_min_climb",
+    "nav_shortest_path",
+    "nav_next_summit"
   ],
 
   "ru": [
@@ -357,7 +453,15 @@
     "profile_followers_empty_other_body",
     "recent_searches",
     "clear_search_history",
-    "clear_search_history_confirm"
+    "clear_search_history_confirm",
+    "nav_remaining",
+    "nav_arrival",
+    "nav_climb_left",
+    "nav_off_trail_title",
+    "nav_rejoin_in",
+    "nav_min_climb",
+    "nav_shortest_path",
+    "nav_next_summit"
   ],
 
   "zh": [
@@ -385,6 +489,14 @@
     "profile_followers_empty_other_body",
     "recent_searches",
     "clear_search_history",
-    "clear_search_history_confirm"
+    "clear_search_history_confirm",
+    "nav_remaining",
+    "nav_arrival",
+    "nav_climb_left",
+    "nav_off_trail_title",
+    "nav_rejoin_in",
+    "nav_min_climb",
+    "nav_shortest_path",
+    "nav_next_summit"
   ]
 }

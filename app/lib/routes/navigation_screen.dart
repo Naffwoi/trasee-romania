@@ -14,7 +14,7 @@ import 'package:flutter_rotation_sensor/flutter_rotation_sensor.dart';
 import 'package:font_awesome_flutter/font_awesome_flutter.dart';
 import 'package:geolocator/geolocator.dart' as geo;
 import 'package:go_router/go_router.dart';
-import 'package:flutter/foundation.dart' show ValueListenable, compute;
+import 'package:flutter/foundation.dart' show ValueListenable;
 import 'package:gpx/gpx.dart';
 import 'package:maplibre/maplibre.dart' as ml;
 import 'package:objectbox/objectbox.dart';
@@ -66,7 +66,6 @@ import 'package:wanderer/store/current_account.dart';
 import 'package:wanderer/store/local_trail_store.dart';
 import 'package:wanderer/util/local/id.dart';
 import 'package:wanderer/util/format.dart';
-import 'package:wanderer/util/gpx/conversion.dart' show serializeGpxToXml;
 import 'package:wanderer/util/gpx/gpx.dart';
 import 'package:wanderer/util/region/proxy_style_rewriter.dart';
 import 'package:wanderer/util/geo/polyline.dart';
@@ -3925,7 +3924,6 @@ class _NavigationScreenState extends ConsumerState<NavigationScreen>
       // The full recorded breadcrumb, times and all, doubling as the
       // draft's original track.
       final gpx = buildGpxFromPoints(navState.breadcrumb);
-      final recordedXml = await compute(serializeGpxToXml, gpx);
 
       // For a real trail, keep its own category/subcategory. For a trail-less
       // recording, derive a (sub)category from the chosen travel profile
@@ -3973,7 +3971,9 @@ class _NavigationScreenState extends ConsumerState<NavigationScreen>
         subcategory: subcategory,
         movingDuration: navStats.elapsed,
       );
-      final trail = draft.copyWith(originalGpxData: recordedXml);
+      final trail = draft.copyWith(
+        originalGpxData: draft.expand?.gpxData ?? '',
+      );
 
       // Durability ordering: the draft row is written BEFORE the session row
       // is released, so an OS kill in between can never lose the recording.

@@ -50,7 +50,7 @@ final class MapTrailSearchProvider
   }
 }
 
-String _$mapTrailSearchHash() => r'1c980d29f68487b8f87a773c29dfe58c9d69e01c';
+String _$mapTrailSearchHash() => r'44bb3116400449427cc8e935f598102aab44dfbe';
 
 final class MapTrailSearchFamily extends $Family
     with

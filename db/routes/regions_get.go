@@ -213,20 +213,20 @@ func RegionsList(e *core.RequestEvent) error {
 // e.FileFS serves via the stdlib file server, which supports HTTP Range
 // requests — the resumable download engine relies on this.
 func RegionArchiveDownload(e *core.RequestEvent) error {
-	return serveRegionArchive(e, "vector.pmtiles", "Region archive not ready yet")
+	return serveRegionArchive(e, "vector.pmtiles", "-vector.pmtiles", "Region archive not ready yet")
 }
 
 // RegionArchiveDownloadDem streams a region's pre-built DEM archive bytes.
 // Same Range-support note as RegionArchiveDownload applies here.
 func RegionArchiveDownloadDem(e *core.RequestEvent) error {
-	return serveRegionArchive(e, "dem.pmtiles", "Region DEM archive not ready yet")
+	return serveRegionArchive(e, "dem.pmtiles", "-dem.pmtiles", "Region DEM archive not ready yet")
 }
 
 // serveRegionArchive serves one archive file with a strong ETag. Archives are
 // replaced by an atomic rename on every rebuild, so size and modification time
 // identify a build; the ETag lets If-Range reject a resumed download that would
 // otherwise splice two different builds together.
-func serveRegionArchive(e *core.RequestEvent, file, notReady string) error {
+func serveRegionArchive(e *core.RequestEvent, file, downloadSuffix, notReady string) error {
 	id := e.Request.PathValue("id")
 	if !regions.IsValidRegionID(id) {
 		return e.BadRequestError("invalid region id", nil)
@@ -246,6 +246,8 @@ func serveRegionArchive(e *core.RequestEvent, file, notReady string) error {
 	}
 
 	e.Response.Header().Set("ETag", fmt.Sprintf(`"%x-%x"`, info.Size(), info.ModTime().UnixNano()))
+	e.Response.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="%s%s"`, id, downloadSuffix))
+	e.Response.Header().Set("Cache-Control", "private, no-cache")
 	useRollingWriteDeadline(e)
 	http.ServeContent(e.Response, e.Request, file, info.ModTime(), archive)
 	return nil

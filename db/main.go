@@ -309,6 +309,7 @@ func setupEventHandlers(app *pocketbase.PocketBase, client meilisearch.ServiceMa
 	app.OnBackupCreate().BindFunc(hooks.ExcludeRegionArchivesFromBackupHandler())
 
 	app.OnRecordValidate().BindFunc(util.SanitizeHTML())
+	routes.RegisterZeroCopyFileDownloadHook(app)
 
 	app.OnServe().BindFunc(onBeforeServeHandler(client))
 
@@ -455,6 +456,7 @@ func registerRoutes(se *core.ServeEvent, client meilisearch.ServiceManager) {
 	// superuser-bound registrations above (RegionArchiveDelete,
 	// RegionSyncStart, RegionSyncStatus).
 	se.Router.GET("/regions/{id}/geometry", routes.RegionGeometryGet).Bind(apis.RequireSuperuserAuth())
+	routes.RegisterPublicFilesAndRegionsRoutes(se)
 
 	// Trail Live Community endpoints: direct public /api/v1/live/* (HMAC device
 	// auth + sharded rate limiter + native Go VAPID push) alongside internal /live/*.

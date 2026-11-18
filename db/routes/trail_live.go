@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/microcosm-cc/bluemonday"
@@ -121,9 +122,13 @@ type PushTargetDto struct {
 // TrailLiveHandler groups the internal `/live/*` endpoints with an injectable
 // SSE hub and clock for deterministic unit tests.
 type TrailLiveHandler struct {
-	Hub   *live.TrailLiveHub
-	Store *live.LiveMemoryStore
-	Now   func() time.Time
+	Hub          *live.TrailLiveHub
+	Store        *live.LiveMemoryStore
+	Now          func() time.Time
+	RateLimiters *live.LiveRateLimiterSet
+	Vapid        *live.VapidDispatcher
+	ActorCache   *ActorIDCache
+	vapidOnce    sync.Once
 }
 
 // NewTrailLiveHandler creates a handler backed by hub (or live.DefaultHub() if nil).
@@ -132,10 +137,31 @@ func NewTrailLiveHandler(hub *live.TrailLiveHub) *TrailLiveHandler {
 		hub = live.DefaultHub()
 	}
 	return &TrailLiveHandler{
-		Hub:   hub,
-		Store: storeForHub(hub),
-		Now:   func() time.Time { return time.Now().UTC() },
+		Hub:          hub,
+		Store:        storeForHub(hub),
+		Now:          func() time.Time { return time.Now().UTC() },
+		RateLimiters: live.NewDefaultLiveRateLimiterSet(),
+		ActorCache:   defaultActorIDCache,
 	}
+}
+
+func (h *TrailLiveHandler) rateLimiters() *live.LiveRateLimiterSet {
+	if h != nil && h.RateLimiters != nil {
+		return h.RateLimiters
+	}
+	return live.NewDefaultLiveRateLimiterSet()
+}
+
+func (h *TrailLiveHandler) vapidDispatcher(app core.App) *live.VapidDispatcher {
+	if h.Vapid != nil {
+		return h.Vapid
+	}
+	h.vapidOnce.Do(func() {
+		if h.Vapid == nil {
+			h.Vapid = live.NewVapidDispatcher(app.DataDir(), nil)
+		}
+	})
+	return h.Vapid
 }
 
 func (h *TrailLiveHandler) nowUTC() time.Time {
@@ -165,32 +191,16 @@ func (h *TrailLiveHandler) readyStore(app core.App) *live.LiveMemoryStore {
 	return st
 }
 
-// RegisterTrailLiveRoutes wires all `/live/*` routes on se.Router.
+// RegisterTrailLiveRoutes wires both internal `/live/*` and direct public `/api/v1/live/*` routes on se.Router.
 func RegisterTrailLiveRoutes(se *core.ServeEvent, hub *live.TrailLiveHub) {
 	handler := NewTrailLiveHandler(hub)
-	group := se.Router.Group("/live")
-	group.BindFunc(RequireLiveInternalProxy)
-
-	group.POST("/heartbeat", handler.Heartbeat)
-	group.DELETE("/heartbeat", handler.ClearHeartbeat)
-	group.GET("/trail/{id}/summary", handler.TrailSummary)
-	group.POST("/reports", handler.CreateReport)
-	group.POST("/reports/{id}/vote", handler.VoteReport)
-	group.POST("/sos", handler.CreateSos)
-	group.POST("/sos/relay", handler.RelaySos)
-	group.PATCH("/sos/{id}", handler.UpdateSos)
-	group.POST("/sos/{id}/respond", handler.RespondSos)
-	group.POST("/push/subscribe", handler.PushSubscribe)
-	group.DELETE("/push/subscribe", handler.PushUnsubscribe)
-	group.POST("/groups", handler.CreateGroup)
-	group.GET("/groups/{code}", handler.GetGroup)
-	group.POST("/groups/{code}/join", handler.JoinGroup)
-	group.POST("/groups/{code}/ping", handler.PingGroup)
-	group.POST("/groups/{code}/leave", handler.LeaveGroup)
-	group.GET("/stream", handler.Stream)
+	registerTrailLiveRouterGroups(se.Router, handler)
 }
 
 func verifyLiveInternalSecret(e *core.RequestEvent) error {
+	if isTrustedPublicLiveRequest(e.Request) {
+		return nil
+	}
 	if err := util.VerifyInternalProxySecret(e.Request); err != nil {
 		if errors.Is(err, util.ErrProxySecretNotConfigured) {
 			return e.UnauthorizedError("POCKETBASE_PROXY_SECRET not configured", nil)
@@ -210,7 +220,7 @@ func RequireLiveInternalProxy(e *core.RequestEvent) error {
 
 func readDeviceHash(r *http.Request, allowQuery bool) string {
 	val := strings.TrimSpace(r.Header.Get("X-Device-Hash"))
-	if val == "" && allowQuery {
+	if val == "" && allowQuery && !isTrustedPublicLiveRequest(r) {
 		val = strings.TrimSpace(r.URL.Query().Get("deviceHash"))
 	}
 	return val
@@ -992,6 +1002,9 @@ func (h *TrailLiveHandler) CreateSos(e *core.RequestEvent) error {
 
 		h.broadcastSosRecord(sosRec, respondingDevices)
 		dto := toSosAlertDto(sosRec, deviceHash, respondingDevices)
+		if h.dispatchNativeSosPushIfPublic(e.App, e.Request, dto, pushTargets) {
+			return e.JSON(http.StatusOK, map[string]any{"sos": dto})
+		}
 		return e.JSON(http.StatusOK, map[string]any{
 			"sos":         dto,
 			"pushTargets": pushTargets,
@@ -1026,6 +1039,9 @@ func (h *TrailLiveHandler) CreateSos(e *core.RequestEvent) error {
 	h.broadcastSosRecord(sosRec, respondingDevices)
 
 	dto := toSosAlertDto(sosRec, deviceHash, respondingDevices)
+	if h.dispatchNativeSosPushIfPublic(e.App, e.Request, dto, pushTargets) {
+		return e.JSON(http.StatusOK, map[string]any{"sos": dto})
+	}
 	return e.JSON(http.StatusOK, map[string]any{
 		"sos":         dto,
 		"pushTargets": pushTargets,

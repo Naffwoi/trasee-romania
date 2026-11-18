@@ -456,8 +456,8 @@ func registerRoutes(se *core.ServeEvent, client meilisearch.ServiceManager) {
 	// RegionSyncStart, RegionSyncStatus).
 	se.Router.GET("/regions/{id}/geometry", routes.RegionGeometryGet).Bind(apis.RequireSuperuserAuth())
 
-	// Internal-only Trail Live Community endpoints (/live/*), gated by
-	// X-Internal-Secret from the SvelteKit /api/v1/live/* proxy.
+	// Trail Live Community endpoints: direct public /api/v1/live/* (HMAC device
+	// auth + sharded rate limiter + native Go VAPID push) alongside internal /live/*.
 	routes.RegisterTrailLiveRoutes(se, live.DefaultHub())
 }
 

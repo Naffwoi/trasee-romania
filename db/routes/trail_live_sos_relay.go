@@ -210,6 +210,9 @@ func (h *TrailLiveHandler) RelaySos(e *core.RequestEvent) error {
 			h.broadcastSosRecord(sosRec, respondingDevices)
 		}
 		dto := toSosAlertDto(sosRec, muleDeviceHash, respondingDevices)
+		if isTrustedPublicLiveRequest(e.Request) {
+			return e.JSON(http.StatusOK, map[string]any{"sos": dto})
+		}
 		return e.JSON(http.StatusOK, map[string]any{
 			"sos":         dto,
 			"pushTargets": []PushTargetDto{},
@@ -363,6 +366,12 @@ func (h *TrailLiveHandler) RelaySos(e *core.RequestEvent) error {
 	}
 
 	dto := toSosAlertDto(sosRec, muleDeviceHash, respondingDevices)
+	if created && h.dispatchNativeSosPushIfPublic(e.App, e.Request, dto, pushTargets) {
+		return e.JSON(http.StatusOK, map[string]any{"sos": dto})
+	}
+	if isTrustedPublicLiveRequest(e.Request) {
+		return e.JSON(http.StatusOK, map[string]any{"sos": dto})
+	}
 	return e.JSON(http.StatusOK, map[string]any{
 		"sos":         dto,
 		"pushTargets": pushTargets,

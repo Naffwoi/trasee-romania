@@ -279,6 +279,23 @@
                     fc = t.expand.gpx.toGeoJSON();
                 } else if (t.expand?.gpx_data) {
                     fc = GPX.parse(t.expand.gpx_data).toGeoJSON();
+                } else if (!clusterTrails && t.polyline) {
+                    const coords = decodePolyline(t.polyline, 5);
+                    if (coords.length >= 2) {
+                        fc = {
+                            type: "FeatureCollection",
+                            features: [
+                                {
+                                    type: "Feature",
+                                    properties: {},
+                                    geometry: {
+                                        type: "LineString",
+                                        coordinates: coords,
+                                    },
+                                },
+                            ],
+                        };
+                    }
                 }
 
                 if (fc) {

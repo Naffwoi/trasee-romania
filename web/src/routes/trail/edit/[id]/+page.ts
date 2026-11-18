@@ -43,6 +43,7 @@ export const load: Load = async ({ params, fetch, url }) => {
                 undefined,
                 true,
                 fetch,
+                Boolean(duplicateOptions?.summitLogs),
             );
             if (hasDuplicatePhotos(duplicateOptions)) {
                 duplicateSourceTrail = originalTrail;

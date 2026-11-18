@@ -1,7 +1,7 @@
 import type { FeedItem } from "#lib/models/feed.ts";
 import type { ListFilter } from "#lib/models/list.ts";
 import type { SummitLogFilter } from "#lib/models/summit_log.ts";
-import { defaultTrailSearchAttributes, Trail, type TrailFilter, type TrailSearchResult } from "#lib/models/trail.ts";
+import { trailCardSearchAttributes, Trail, type TrailFilter, type TrailSearchResult } from "#lib/models/trail.ts";
 import { APIError } from "#lib/util/api_util.ts";
 import type { Hits } from "meilisearch";
 import type { ListResult } from "pocketbase";
@@ -87,7 +87,7 @@ export async function profile_trails_index(handle: string, filter: TrailFilter, 
         body: JSON.stringify({
             q: filter.q,
             options: {
-                attributesToRetrieve: defaultTrailSearchAttributes,
+                attributesToRetrieve: trailCardSearchAttributes,
                 sort: [`${filter.sort}:${filter.sortOrder == "+" ? "asc" : "desc"}`],
                 hitsPerPage: perPage,
                 page: page

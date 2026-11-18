@@ -16,7 +16,7 @@
         comments_update,
     } from "#lib/stores/comment_store.ts";
     import { currentUser } from "#lib/stores/user_store.ts";
-    import { getFileURL, isVideoURL } from "#lib/util/file_util.ts";
+    import { fetchGPX, getFileURL, isVideoURL } from "#lib/util/file_util.ts";
     import {
         formatDistance,
         formatElevation,
@@ -164,7 +164,14 @@
         ),
     );
 
-    onMount(async () => {});
+    onMount(async () => {
+        if (mode === "overview" && !trail.expand?.gpx_data && trail.gpx) {
+            void fetchGPX(trail).then((gpxData) => {
+                if (!gpxData) return;
+                trail.expand = { ...(trail.expand ?? {}), gpx_data: gpxData };
+            });
+        }
+    });
 
     function openMarkerPopup(i: number) {
         if ((markers[i] as M.Marker).getPopup().isOpen()) {

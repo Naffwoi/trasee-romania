@@ -117,3 +117,41 @@ export function objectToFormData(data: Object, exclude?: string[]) {
 
     return formData;
 }
+
+const GPX_CACHE_NAME = "wanderer-gpx-v1";
+
+export async function fetchGPX(
+    trail: { gpx?: string } & Record<string, any>,
+    f: (url: RequestInfo | URL, config?: RequestInit) => Promise<Response> = fetch,
+) {
+    if (!trail.gpx) {
+        return "";
+    }
+    const gpxUrl = getFileURL(trail, trail.gpx);
+    const canUseBrowserCache =
+        typeof window !== "undefined" &&
+        typeof caches !== "undefined" &&
+        f === fetch;
+
+    if (canUseBrowserCache) {
+        try {
+            const cache = await caches.open(GPX_CACHE_NAME);
+            const hit = await cache.match(gpxUrl);
+            if (hit && hit.ok) {
+                return await hit.text();
+            }
+            const response = await f(gpxUrl);
+            if (response.ok) {
+                await cache.put(gpxUrl, response.clone());
+            }
+            return await response.text();
+        } catch {
+            // Fall through to direct fetch when CacheStorage is unavailable or quota-limited
+        }
+    }
+
+    const response: Response = await f(gpxUrl);
+    const gpxData = await response.text();
+
+    return gpxData;
+}

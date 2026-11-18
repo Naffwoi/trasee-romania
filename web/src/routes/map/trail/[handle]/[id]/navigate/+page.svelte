@@ -81,6 +81,7 @@
         type PeerGpsObservation,
     } from "#lib/navigation/index.ts";
     import { PwaPowerGovernor } from "#lib/navigation/pwa_power_governor.ts";
+    import { fetchGPX } from "#lib/util/file_util.ts";
     import { decodePolyline } from "#lib/util/polyline_util.ts";
     import { AccuracyLayer } from "#lib/vendor/maplibre-user-location/accuracy-layer.ts";
     import { CompassSensor } from "#lib/vendor/maplibre-user-location/compass-sensor.ts";
@@ -2066,6 +2067,22 @@
 
         if (base.length > 0) {
             void terrainClient.setTrack(activePoints, true);
+        }
+
+        if (!trail.expand?.gpx && !trail.expand?.gpx_data && trail.gpx) {
+            void fetchGPX(trail).then(async (xml) => {
+                if (!xml || !terrainClient) return;
+                const pts3d = await terrainClient.parseGpxText(xml);
+                if (pts3d.length >= 2) {
+                    cachedBasePoints = pts3d;
+                    rebuildRouteEngines(pts3d, reversed);
+                    routeSourceDirty = true;
+                    lastPaintedProgressRatio = -1;
+                    await terrainClient.setTrack(activePoints, true);
+                    syncNavGeoJson();
+                    syncStartEndMarkers();
+                }
+            });
         }
 
         const initialCoord: [number, number] =

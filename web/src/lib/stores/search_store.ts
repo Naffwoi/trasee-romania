@@ -1,5 +1,5 @@
 import type { ActorSearchResult } from "#lib/models/activitypub/actor.ts";
-import { defaultTrailSearchAttributes, type TrailSearchResult } from "#lib/models/trail.ts";
+import { trailCardSearchAttributes, type TrailSearchResult } from "#lib/models/trail.ts";
 import { APIError } from "#lib/util/api_util.ts";
 import type { Hits, MultiSearchParams, MultiSearchResponse, MultiSearchResult, SearchParams, SearchResponse } from "meilisearch";
 
@@ -87,7 +87,7 @@ export async function searchTrails(q: string, options: SearchParams, f: typeof f
         body: JSON.stringify({
             q,
             options: {
-                attributesToRetrieve: defaultTrailSearchAttributes,
+                attributesToRetrieve: trailCardSearchAttributes,
                 ...options,
             }
         }),

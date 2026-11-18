@@ -25,7 +25,7 @@
         syncSosMapMarkers,
     } from "#lib/live/report_markers.ts";
     import { currentUser } from "#lib/stores/user_store.ts";
-    import { getFileURL } from "#lib/util/file_util.ts";
+    import { fetchGPX, getFileURL } from "#lib/util/file_util.ts";
     import {
         formatDistance,
         formatElevation,
@@ -159,6 +159,12 @@
     });
 
     onMount(() => {
+        if (!trail.expand?.gpx_data && trail.gpx) {
+            void fetchGPX(trail).then((gpxData) => {
+                if (!gpxData) return;
+                trail.expand = { ...(trail.expand ?? {}), gpx_data: gpxData };
+            });
+        }
         void loadLiveSummary();
 
         summaryPollTimer = setInterval(() => {

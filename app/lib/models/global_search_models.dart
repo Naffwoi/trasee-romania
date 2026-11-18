@@ -52,6 +52,12 @@ abstract class TrailSearchResult
     String? iri,
     required String gpx,
     @JsonKey(name: '_geo') required GeoLocation geo,
+    @JsonKey(name: 'train_accessible') @Default(false) bool trainAccessible,
+    @JsonKey(name: 'rail_station_name') @Default('') String railStationName,
+    @JsonKey(name: 'rail_station_distance_m')
+    @Default(0)
+    double railStationDistanceM,
+    @JsonKey(name: 'is_water_gorge') @Default(false) bool isWaterGorge,
   }) = _TrailSearchResult;
 
   const TrailSearchResult._();

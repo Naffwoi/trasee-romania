@@ -19,6 +19,8 @@ import 'package:wanderer/components/map/cluster_layer.dart';
 import 'package:wanderer/components/map/center_on_location_button.dart';
 import 'package:wanderer/components/map/location_follow_controller.dart';
 import 'package:wanderer/components/map/location_marker_layer.dart';
+import 'package:wanderer/components/map/map_layers_sheet.dart';
+import 'package:wanderer/components/map/salvamont_map_layer.dart';
 import 'package:wanderer/components/map/trail_layer.dart'
     show trailPolylineLayers;
 import 'package:wanderer/components/map/trail_markers.dart';
@@ -698,6 +700,7 @@ class _MapScreenState extends ConsumerState<MapScreen>
                       ),
                     ],
                   ),
+                const SalvamontMapLayer(),
                 const LocationMarkerLayer(),
                 LocationFollowController(trackingMode: _trackingMode),
                 // Clears the search bar below the status bar.
@@ -716,6 +719,30 @@ class _MapScreenState extends ConsumerState<MapScreen>
                                 LocationTrackingMode.followNorthUp;
                           }
                         },
+                      ),
+                      const SizedBox(height: 8),
+                      SizedBox(
+                        width: 40,
+                        height: 40,
+                        child: IconButton(
+                          key: const ValueKey('map-screen-layers-btn'),
+                          onPressed: () => showMapLayersSheet(context),
+                          icon: FaIcon(
+                            FontAwesomeIcons.layerGroup,
+                            size: 16,
+                            color: Theme.of(context).colorScheme.onSurface,
+                          ),
+                          style: IconButton.styleFrom(
+                            backgroundColor: Theme.of(
+                              context,
+                            ).colorScheme.surface.withValues(alpha: 0.94),
+                            side: BorderSide(
+                              color: Theme.of(
+                                context,
+                              ).colorScheme.outline.withValues(alpha: 0.4),
+                            ),
+                          ),
+                        ),
                       ),
                     ],
                   ),

@@ -207,6 +207,17 @@ class TrailLiveService {
     return host.isNotEmpty && !host.contains(kUnconfiguredApiHost);
   }
 
+  TrailReportModel _normalizeReport(TrailReportModel report) =>
+      isConfigured ? report.withResolvedPhotoUrls(_dio.options.baseUrl) : report;
+
+  TrailLiveSummary _normalizeSummary(TrailLiveSummary summary) {
+    if (!isConfigured || summary.reports.isEmpty) return summary;
+    final resolvedReports = summary.reports
+        .map(_normalizeReport)
+        .toList(growable: false);
+    return summary.copyWith(reports: resolvedReports);
+  }
+
   /// Returns the installation's persistent anonymous device token.
   Future<String> getDeviceToken() => _tokenLoader();
 
@@ -356,9 +367,11 @@ class TrailLiveService {
         );
       }
     } else {
-      summary = TrailLiveSummary.fromJson(bodyMap).copyWith(
-        trailId: cleanTrailId.isNotEmpty ? cleanTrailId : null,
-        unchanged: false,
+      summary = _normalizeSummary(
+        TrailLiveSummary.fromJson(bodyMap).copyWith(
+          trailId: cleanTrailId.isNotEmpty ? cleanTrailId : null,
+          unchanged: false,
+        ),
       );
     }
     _lastHeartbeatSummary = summary;
@@ -408,7 +421,7 @@ class TrailLiveService {
       queryParameters: queryParams.isEmpty ? null : queryParams,
       options: options,
     );
-    return TrailLiveSummary.fromJson(_asMap(response.data));
+    return _normalizeSummary(TrailLiveSummary.fromJson(_asMap(response.data)));
   }
 
   Future<TrailReportModel> createReport({
@@ -419,32 +432,60 @@ class TrailLiveService {
     required double lon,
     double? ele,
     double? alongTrackM,
+    Uint8List? photoJpegBytes,
+    bool photoVerified = false,
   }) async {
     final options = await _liveOptions();
     final trimmedNote = note?.trim() ?? '';
     final safeNote = trimmedNote.length > 160
         ? trimmedNote.substring(0, 160)
         : trimmedNote;
-    final response = await _dio.post<Object?>(
-      '/live/reports',
-      data: <String, Object?>{
+    final safeEle = (ele != null && ele.isFinite) ? ele : 0.0;
+
+    final Object requestData;
+    if (photoJpegBytes != null && photoJpegBytes.isNotEmpty) {
+      requestData = FormData.fromMap(<String, dynamic>{
+        if (trailId != null && trailId.isNotEmpty) 'trailId': trailId,
+        'category': category.apiValue,
+        if (safeNote.isNotEmpty) 'note': safeNote,
+        'lat': lat.toString(),
+        'lon': lon.toString(),
+        'ele': safeEle.toString(),
+        if (alongTrackM != null && alongTrackM.isFinite)
+          'alongTrackM': alongTrackM.toString(),
+        'photoVerified': photoVerified ? 'true' : 'false',
+        'photo': MultipartFile.fromBytes(
+          photoJpegBytes,
+          filename: 'report.jpg',
+          contentType: DioMediaType('image', 'jpeg'),
+        ),
+      });
+    } else {
+      requestData = <String, Object?>{
         if (trailId != null && trailId.isNotEmpty) 'trailId': trailId,
         'category': category.apiValue,
         if (safeNote.isNotEmpty) 'note': safeNote,
         'lat': lat,
         'lon': lon,
-        'ele': (ele != null && ele.isFinite) ? ele : 0.0,
+        'ele': safeEle,
         if (alongTrackM != null && alongTrackM.isFinite)
           'alongTrackM': alongTrackM,
-      },
+      };
+    }
+
+    final response = await _dio.post<Object?>(
+      '/live/reports',
+      data: requestData,
       options: options,
     );
     final body = _asMap(response.data);
     final rawReport = body['report'];
     if (rawReport is Map) {
-      return TrailReportModel.fromJson(Map<String, dynamic>.from(rawReport));
+      return _normalizeReport(
+        TrailReportModel.fromJson(Map<String, dynamic>.from(rawReport)),
+      );
     }
-    return TrailReportModel.fromJson(body);
+    return _normalizeReport(TrailReportModel.fromJson(body));
   }
 
   Future<TrailReportModel> voteReport({
@@ -460,9 +501,11 @@ class TrailLiveService {
     final body = _asMap(response.data);
     final rawReport = body['report'];
     if (rawReport is Map) {
-      return TrailReportModel.fromJson(Map<String, dynamic>.from(rawReport));
+      return _normalizeReport(
+        TrailReportModel.fromJson(Map<String, dynamic>.from(rawReport)),
+      );
     }
-    return TrailReportModel.fromJson(body);
+    return _normalizeReport(TrailReportModel.fromJson(body));
   }
 
   Future<SosAlertModel> triggerSos({
@@ -829,7 +872,9 @@ class TrailLiveService {
                 isRo: isRo,
               );
             }
-            yield parsed;
+            yield isConfigured
+                ? parsed.withResolvedPhotoUrls(_dio.options.baseUrl)
+                : parsed;
           }
         } else {
           currentEvent = null;
@@ -869,7 +914,9 @@ class TrailLiveService {
             isRo: isRo,
           );
         }
-        yield parsed;
+        yield isConfigured
+            ? parsed.withResolvedPhotoUrls(_dio.options.baseUrl)
+            : parsed;
       }
     }
   }

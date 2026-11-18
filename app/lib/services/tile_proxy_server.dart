@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:isolate';
 import 'dart:typed_data';
 
 import 'package:flutter/foundation.dart'
@@ -14,6 +15,8 @@ import 'package:wanderer/services/map_source_persistence.dart';
 import 'package:wanderer/services/tile_proxy_identity.dart';
 import 'package:wanderer/services/tile_repository_manager.dart';
 import 'package:wanderer/util/geo/xyz_tile_bounds.dart';
+import 'package:wanderer/util/navigation/dem_tile_grid.dart';
+import 'package:wanderer/util/navigation/terrain_raster_renderer.dart';
 import 'package:wanderer/util/region/map_cache_path.dart';
 
 /// TileJSON document for the operator's hillshade DEM source. Must stay
@@ -317,8 +320,81 @@ class TileProxyServer {
     if (kind == 'sprite') {
       return _handleSpriteRequest(request, segments);
     }
+    if (kind == 'slope' || kind == 'shade') {
+      return _handleTerrainRasterRequest(request, kind, segments);
+    }
 
     request.response.statusCode = HttpStatus.notFound;
+    return request.response.close();
+  }
+
+  DemTileGrid? terrainDemGrid;
+  final Map<String, Uint8List> _generatedPngLru = {};
+
+  Future<void> _handleTerrainRasterRequest(
+    HttpRequest request,
+    String kind,
+    List<String> segments,
+  ) async {
+    final dem = terrainDemGrid;
+    if (dem == null || segments.length != 5) {
+      request.response.statusCode = HttpStatus.serviceUnavailable;
+      return request.response.close();
+    }
+    final z = int.tryParse(segments[2]);
+    final x = int.tryParse(segments[3]);
+    final y = int.tryParse(segments[4].split('.').first);
+    if (z == null || x == null || y == null || z < 12 || z > 14) {
+      request.response.statusCode = HttpStatus.badRequest;
+      return request.response.close();
+    }
+    final az = double.tryParse(request.uri.queryParameters['az'] ?? '') ?? 215.0;
+    final alt =
+        double.tryParse(request.uri.queryParameters['alt'] ?? '') ?? 28.0;
+    final cacheKey = kind == 'slope'
+        ? 'slope:$z/$x/$y'
+        : 'shade:$z/$x/$y:${az.round()}:${alt.round()}';
+
+    final cached = _generatedPngLru.remove(cacheKey);
+    final Uint8List png;
+    if (cached != null) {
+      png = cached;
+      _generatedPngLru[cacheKey] = png;
+    } else {
+      final scale = 1 << (z - 12);
+      final zx = x ~/ scale;
+      final zy = y ~/ scale;
+      await Future.wait([
+        for (var dy = -1; dy <= 1; dy++)
+          for (var dx = -1; dx <= 1; dx++) dem.ensureTileLoaded(zx + dx, zy + dy),
+      ]);
+      final rgba = kind == 'slope'
+          ? renderAvalancheSlopeRgba(z, x, y, dem)
+          : renderCastShadowRgba(
+              z,
+              x,
+              y,
+              dem,
+              sunAzimuthDeg: az,
+              sunAltitudeDeg: alt,
+            );
+      if (rgba == null) {
+        request.response.statusCode = HttpStatus.serviceUnavailable;
+        return request.response.close();
+      }
+      png = await Isolate.run(() => encodeRgbaToPng(rgba, 256, 256));
+      _generatedPngLru[cacheKey] = png;
+      while (_generatedPngLru.length > 24) {
+        _generatedPngLru.remove(_generatedPngLru.keys.first);
+      }
+    }
+
+    request.response.headers.contentType = ContentType('image', 'png');
+    request.response.headers.set(
+      HttpHeaders.cacheControlHeader,
+      'public, max-age=300',
+    );
+    request.response.add(png);
     return request.response.close();
   }
 

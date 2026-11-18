@@ -16,7 +16,10 @@ import 'package:wanderer/components/trail/photo_collage.dart';
 import 'package:wanderer/components/trail/stat_chip.dart';
 import 'package:wanderer/components/trail/sync_status_section.dart';
 import 'package:wanderer/components/trail/summit_log_list.dart';
+import 'package:wanderer/components/trail/trail_environment_section.dart';
+import 'package:wanderer/components/trail/trail_salvamont_card.dart';
 import 'package:wanderer/components/trail/trail_timeline.dart';
+import 'package:wanderer/components/trail/trailhead_street_preview_strip.dart';
 import 'package:wanderer/i18n/app_localizations.dart';
 import 'package:wanderer/models/trail.dart';
 import 'package:wanderer/models/trail_sync_state.dart';
@@ -129,6 +132,22 @@ class TrailPanel extends ConsumerWidget {
               l18n.no_description_for_now,
               style: Theme.of(context).textTheme.bodyMedium,
             ),
+          if (trail.trainAccessible && trail.railStationName.isNotEmpty)
+            Padding(
+              padding: const EdgeInsets.only(top: 12),
+              child: Chip(
+                avatar: const FaIcon(FontAwesomeIcons.train, size: 13),
+                label: Text(
+                  'Gara ${trail.railStationName} (${trail.railStationDistanceM.round()} m)',
+                ),
+              ),
+            ),
+          if (showsServerTabs && trail.id.isNotEmpty) ...[
+            const SizedBox(height: 12),
+            TrailEnvironmentSection(trailId: trail.id),
+          ],
+          if (showsServerTabs)
+            TrailheadStreetPreviewStrip(lat: trail.lat, lon: trail.lon),
           SizedBox(height: 16),
           Text(
             l18n.route(1),
@@ -216,6 +235,11 @@ class TrailPanel extends ConsumerWidget {
                   ),
                 ),
               ),
+            ),
+          if (!isSkeleton)
+            TrailSalvamontCard(
+              trail: trail,
+              gpx: trail.expand?.gpx,
             ),
           TrailTimeline(
             waypoints: trail.expand?.waypointsViaTrail ?? [],

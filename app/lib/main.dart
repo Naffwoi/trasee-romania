@@ -85,6 +85,7 @@ void main() async {
       overrides: [
         objectBoxProvider.overrideWithValue(store),
         tileProxyBaseUrlProvider.overrideWithValue(proxyServer.baseUrl),
+        tileProxyServerProvider.overrideWithValue(proxyServer),
         cookieJarProvider.overrideWithValue(jar),
         breadcrumbSlabStoreProvider.overrideWithValue(breadcrumbSlabStore),
       ],

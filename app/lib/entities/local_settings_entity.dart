@@ -51,6 +51,17 @@ class LocalSettingsEntity {
   /// `250ms` compass only in heading-up, `30 FPS` cap, wider radio coalescing).
   bool expeditionBatteryMode;
 
+  /// Phase 1: Salvamont offline rescue bases & refuges layer (on by default).
+  bool showSalvamontLayer;
+
+  /// Phase 3: Client-side DEM terrain intelligence overlays.
+  bool showAvalancheSlope;
+  bool showSolarShadows;
+
+  /// Phase 4: Base map style & dynamic environmental raster overlays JSON.
+  String mapBaseStyle;
+  String mapOverlaysJson;
+
   LocalSettingsEntity({
     this.themeMode = 'system',
     this.backgroundLocationAsked = false,
@@ -60,5 +71,11 @@ class LocalSettingsEntity {
     this.demTileTemplate = '',
     this.recentServersJson = '',
     this.expeditionBatteryMode = false,
+    this.showSalvamontLayer = true,
+    this.showAvalancheSlope = false,
+    this.showSolarShadows = false,
+    this.mapBaseStyle = 'default',
+    this.mapOverlaysJson =
+        '{"snowCover":false,"dailySatellite":false,"weatherRadar":false,"forestDisturbance":false,"waymarkedHiking":false,"satelliteDate":"default"}',
   });
 }

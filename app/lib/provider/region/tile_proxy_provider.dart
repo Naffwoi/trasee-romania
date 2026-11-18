@@ -1,4 +1,6 @@
+import 'package:flutter_riverpod/flutter_riverpod.dart' show Provider;
 import 'package:riverpod_annotation/riverpod_annotation.dart';
+import 'package:wanderer/services/tile_proxy_server.dart';
 
 part 'tile_proxy_provider.g.dart';
 
@@ -17,3 +19,7 @@ class TileProxyBaseUrl extends _$TileProxyBaseUrl {
     throw UnimplementedError();
   }
 }
+
+/// Optional live reference to the app-wide [TileProxyServer] (overridden in
+/// `main.dart`), used to bind [DemTileGrid] for `/slope` & `/shade` raster tiles.
+final tileProxyServerProvider = Provider<TileProxyServer?>((ref) => null);

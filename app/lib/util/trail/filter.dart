@@ -101,6 +101,10 @@ List<Trail> applyTrailFilter(
       return false;
     }
 
+    if (filter.trainAccessible && !trail.trainAccessible) {
+      return false;
+    }
+
     // Category / subcategory
     if (hasCategoryConstraint) {
       final matchesCategory =

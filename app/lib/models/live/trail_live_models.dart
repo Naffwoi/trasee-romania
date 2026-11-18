@@ -15,6 +15,24 @@ String? _parseOptionalString(Object? raw) {
   return text.isEmpty ? null : text;
 }
 
+/// Resolves relative backend file paths (e.g. `/api/v1/files/...`) against
+/// [serverBaseUrl] origin so Flutter's `Image.network` receives a full URL.
+String? resolveLivePhotoUrl(String? rawUrl, {String? serverBaseUrl}) {
+  final raw = rawUrl?.trim();
+  if (raw == null || raw.isEmpty) return null;
+  if (raw.startsWith('http://') || raw.startsWith('https://')) return raw;
+  final base = serverBaseUrl?.trim();
+  if (base == null || base.isEmpty) return null;
+  final baseUri = Uri.tryParse(base);
+  if (baseUri == null ||
+      !baseUri.hasScheme ||
+      baseUri.host.isEmpty ||
+      baseUri.host.contains('unknown-server.local')) {
+    return null;
+  }
+  return baseUri.resolve(raw).toString();
+}
+
 double _parseDouble(Object? raw, [double fallback = 0.0]) {
   if (raw is num) {
     final val = raw.toDouble();
@@ -211,6 +229,9 @@ class TrailReportModel {
     required this.lon,
     this.ele = 0.0,
     this.alongTrackM,
+    this.photoUrl,
+    this.photoThumbUrl,
+    this.photoVerified = false,
     this.confirmCount = 1,
     this.dismissCount = 0,
     this.createdAt,
@@ -229,6 +250,9 @@ class TrailReportModel {
   final double lon;
   final double ele;
   final double? alongTrackM;
+  final String? photoUrl;
+  final String? photoThumbUrl;
+  final bool photoVerified;
   final int confirmCount;
   final int dismissCount;
   final DateTime? createdAt;
@@ -334,6 +358,9 @@ class TrailReportModel {
     double? lon,
     double? ele,
     double? alongTrackM,
+    String? photoUrl,
+    String? photoThumbUrl,
+    bool? photoVerified,
     int? confirmCount,
     int? dismissCount,
     DateTime? createdAt,
@@ -353,12 +380,27 @@ class TrailReportModel {
       lon: lon ?? this.lon,
       ele: ele ?? this.ele,
       alongTrackM: alongTrackM ?? this.alongTrackM,
+      photoUrl: photoUrl ?? this.photoUrl,
+      photoThumbUrl: photoThumbUrl ?? this.photoThumbUrl,
+      photoVerified: photoVerified ?? this.photoVerified,
       confirmCount: confirmCount ?? this.confirmCount,
       dismissCount: dismissCount ?? this.dismissCount,
       createdAt: createdAt ?? this.createdAt,
       lastConfirmedAt: lastConfirmedAt ?? this.lastConfirmedAt,
       expiresAt: clearExpiresAt ? null : (expiresAt ?? this.expiresAt),
     );
+  }
+
+  TrailReportModel withResolvedPhotoUrls(String? serverBaseUrl) {
+    final resolvedPhoto =
+        resolveLivePhotoUrl(photoUrl, serverBaseUrl: serverBaseUrl) ?? photoUrl;
+    final resolvedThumb =
+        resolveLivePhotoUrl(photoThumbUrl, serverBaseUrl: serverBaseUrl) ??
+        photoThumbUrl;
+    if (resolvedPhoto == photoUrl && resolvedThumb == photoThumbUrl) {
+      return this;
+    }
+    return copyWith(photoUrl: resolvedPhoto, photoThumbUrl: resolvedThumb);
   }
 
   factory TrailReportModel.fromJson(Map<String, dynamic> json) {
@@ -391,6 +433,14 @@ class TrailReportModel {
       alongTrackM: _parseOptionalDouble(
         json['alongTrackM'] ?? json['along_track_m'],
       ),
+      photoUrl: _parseOptionalString(json['photoUrl'] ?? json['photo_url']),
+      photoThumbUrl: _parseOptionalString(
+        json['photoThumbUrl'] ?? json['photo_thumb_url'],
+      ),
+      photoVerified: _parseBool(
+        json['photoVerified'] ?? json['photo_verified'],
+        false,
+      ),
       confirmCount: _parseInt(
         json['confirmCount'] ?? json['confirm_count'],
         1,
@@ -419,6 +469,9 @@ class TrailReportModel {
     'lon': lon,
     'ele': ele,
     'alongTrackM': alongTrackM,
+    if (photoUrl != null) 'photoUrl': photoUrl,
+    if (photoThumbUrl != null) 'photoThumbUrl': photoThumbUrl,
+    'photoVerified': photoVerified,
     'confirmCount': confirmCount,
     'dismissCount': dismissCount,
     'createdAt': createdAt?.toUtc().toIso8601String(),
@@ -1062,6 +1115,23 @@ class TrailLiveSseEvent {
   final String? leftMemberId;
   final String? groupCode;
   final Map<String, dynamic> raw;
+
+  TrailLiveSseEvent withResolvedPhotoUrls(String? serverBaseUrl) {
+    final cur = report;
+    if (cur == null) return this;
+    final resolved = cur.withResolvedPhotoUrls(serverBaseUrl);
+    if (identical(resolved, cur)) return this;
+    return TrailLiveSseEvent(
+      type: type,
+      eventId: eventId,
+      report: resolved,
+      sos: sos,
+      groupMember: groupMember,
+      leftMemberId: leftMemberId,
+      groupCode: groupCode,
+      raw: raw,
+    );
+  }
 
   static TrailLiveSseEvent? tryParse({
     String? eventName,

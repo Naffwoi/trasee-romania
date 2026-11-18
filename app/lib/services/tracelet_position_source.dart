@@ -1,11 +1,15 @@
 import 'dart:async';
 import 'dart:io' show Platform;
 
+import 'package:flutter/foundation.dart'
+    show TargetPlatform, defaultTargetPlatform, visibleForTesting;
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'package:geolocator/geolocator.dart' as geo;
 import 'package:tracelet/tracelet.dart' as tl;
 import 'package:wanderer/provider/foreground_position_stream_provider.dart'
     show LocationMarkerPosition;
+import 'package:wanderer/services/power/mountain_power_engine.dart'
+    show MountainGpsTier;
 
 /// Seed [geo.Position] for [TraceletPositionSource.start] from an
 /// already-resolved marker position. Altitude/speed aren't tracked by
@@ -53,10 +57,9 @@ class TraceletPositionSource {
   String? _notificationTitle;
   String? _notificationText;
 
-  /// Profile last applied via [setForeground], so [setNotificationText] can
-  /// re-apply the *current* one instead of demoting a backgrounded session
-  /// back to continuous tracking.
+  /// Active GPS tier applied via [setForeground] or [applyGpsTier].
   bool _foreground = true;
+  MountainGpsTier _currentTier = MountainGpsTier.foreground3m;
 
   Stream<geo.Position> get stream => _controller.stream;
 
@@ -96,82 +99,78 @@ class TraceletPositionSource {
     useKalmanFilter: true,
   );
 
-  /// The foreground profile, with this instance's notification wording.
-  tl.Config _foregroundConfig() =>
-      _foregroundConfigFor(_notificationTitle!, _notificationText!);
+  /// Unified pedestrian motion block shared across ALL tiers so screen-lock
+  /// (`setForeground(false)`) never swaps `motion:` keys or drops
+  /// `disableMotionActivityUpdates: true` on Android (where
+  /// `ACTIVITY_RECOGNITION` is stripped from `AndroidManifest.xml`).
+  static const _pedestrianMotionConfig = tl.MotionConfig(
+    disableMotionActivityUpdates: true,
+    motionDetectionMode: tl.MotionDetectionMode.speed,
+    speedMovingThreshold: 0.4,
+    speedStationaryDelay: 90,
+    stationaryTrackingMode: tl.StationaryTrackingMode.periodic,
+    stationaryPeriodicInterval: 300,
+    stationaryPeriodicAccuracy: tl.DesiredAccuracy.low,
+  );
 
-  /// Continuous tracking with a 3 m distance filter while moving.
-  ///
-  /// Nested configs are chained via their own `copyWith` — replacing
-  /// `geo`/`android` wholesale drops the preset's other tuned values.
-  ///
-  /// `distanceFilter` was 0.0 (deleting the preset's own 5 m gate), which let
-  /// every multipath-perturbed fix be recorded while the user stood still. 3 m
-  /// is deliberately below the preset's 5 m: the larger gate risks
-  /// chord-shortcutting tight switchbacks, the same failure that got the
-  /// CONV-05 distance gate removed. Note this filters at *acquisition*
-  /// against the last recorded fix — it is not the measurement-time
-  /// `thresholdXY_m` gate, which is load-bearing for elevation and untouched.
-  ///
-  /// Dead reckoning is switched off: the `highAccuracy` preset turns it on,
-  /// and with a 0 s activation delay it engages the moment GPS degrades —
-  /// precisely the street-canyon case — where handheld pedestrian IMU
-  /// estimation drifts and adds to the jitter it is meant to bridge.
-  ///
-  /// Static, taking the notification wording, so [ensureReady] can build the
-  /// identical config before any instance exists.
+  @visibleForTesting
+  static tl.Config buildConfigForTier({
+    required MountainGpsTier tier,
+    required String notificationTitle,
+    required String notificationText,
+    TargetPlatform? platform,
+  }) {
+    final effPlatform = platform ?? defaultTargetPlatform;
+    final base = tl.Config.highAccuracy();
+    final (tl.DesiredAccuracy accuracy, double distanceFilter) = switch (tier) {
+      MountainGpsTier.sosMax2m => (tl.DesiredAccuracy.high, 2.0),
+      MountainGpsTier.foreground3m => (tl.DesiredAccuracy.high, 3.0),
+      MountainGpsTier.background5m => (tl.DesiredAccuracy.high, 5.0),
+      MountainGpsTier.expedition12m => (tl.DesiredAccuracy.high, 12.0),
+      // CRITICAL OS SAFETY:
+      // - iOS: `DesiredAccuracy.veryLow` (~3km cell/Wi-Fi, 500m filter) consumes
+      //   0 mW GNSS satellite RF while keeping the `UIBackgroundModes: location`
+      //   runtime assertion alive so CoreMotion can wake GPS in <500ms!
+      // - Android: `DesiredAccuracy.low` (250m filter) parks high-power GNSS
+      //   while keeping warm ephemeris until `TYPE_SIGNIFICANT_MOTION` fires.
+      MountainGpsTier.stationarySleep =>
+        effPlatform == TargetPlatform.iOS
+            ? (tl.DesiredAccuracy.veryLow, 500.0)
+            : (tl.DesiredAccuracy.low, 250.0),
+    };
+
+    return base.copyWith(
+      geo: base.geo.copyWith(
+        desiredAccuracy: accuracy,
+        distanceFilter: distanceFilter,
+        enableDeadReckoning: false,
+        filter: _locationFilter,
+      ),
+      motion: _pedestrianMotionConfig,
+      app: const tl.AppConfig(stopOnTerminate: false),
+      android: base.android.copyWith(
+        foregroundService: _foregroundServiceConfigFor(
+          notificationTitle,
+          notificationText,
+        ),
+      ),
+    );
+  }
+
   static tl.Config _foregroundConfigFor(
     String notificationTitle,
     String notificationText,
-  ) => tl.Config.highAccuracy().copyWith(
-    geo: tl.Config.highAccuracy().geo.copyWith(
-      distanceFilter: 3.0,
-      enableDeadReckoning: false,
-      filter: _locationFilter,
-    ),
-    // No `MotionConfig.copyWith` exists, so this is fully specified. Tuned for
-    // walking pace rather than tracelet's vehicle-oriented defaults. On
-    // `stationary` the engine drops to low-power periodic fixes and resumes
-    // continuous tracking on its own, so no config swap covers that dimension.
-    motion: const tl.MotionConfig(
-      // The pedometer path needs ACTIVITY_RECOGNITION, stripped from the
-      // merged manifest, so ask for location-based detection outright.
-      disableMotionActivityUpdates: true,
-      motionDetectionMode: tl.MotionDetectionMode.speed,
-      speedMovingThreshold: 0.4, // m/s (~1.5 km/h) — slow walking still moves
-      speedStationaryDelay: 10, // seconds below threshold before stationary
-      stationaryTrackingMode: tl.StationaryTrackingMode.periodic,
-      stationaryPeriodicInterval: 20, // seconds between fixes while stopped
-      stationaryPeriodicAccuracy: tl.DesiredAccuracy.medium,
-    ),
-    app: const tl.AppConfig(stopOnTerminate: false),
-    android: tl.Config.highAccuracy().android.copyWith(
-      foregroundService: _foregroundServiceConfigFor(
-        notificationTitle,
-        notificationText,
-      ),
-    ),
+  ) => buildConfigForTier(
+    tier: MountainGpsTier.foreground3m,
+    notificationTitle: notificationTitle,
+    notificationText: notificationText,
   );
 
-  /// Battery-conscious profile for while the app is backgrounded.
-  ///
-  /// Keeps its own 5 m distance filter (battery), but takes the same
-  /// [_locationFilter] as the foreground so a screen-off recording is filtered
-  /// and Kalman-smoothed identically — the `balanced` preset disables Kalman.
-  tl.Config _backgroundConfig() => tl.Config.balanced().copyWith(
-    geo: tl.Config.balanced().geo.copyWith(
-      desiredAccuracy: tl.DesiredAccuracy.high,
-      distanceFilter: 5.0,
-      filter: _locationFilter,
-    ),
-    app: const tl.AppConfig(stopOnTerminate: false),
-    android: tl.Config.balanced().android.copyWith(
-      foregroundService: _foregroundServiceConfig(),
-    ),
+  tl.Config _activeConfig() => buildConfigForTier(
+    tier: _currentTier,
+    notificationTitle: _notificationTitle!,
+    notificationText: _notificationText!,
   );
-
-  tl.ForegroundServiceConfig _foregroundServiceConfig() =>
-      _foregroundServiceConfigFor(_notificationTitle!, _notificationText!);
 
   static tl.ForegroundServiceConfig _foregroundServiceConfigFor(
     String notificationTitle,
@@ -258,9 +257,27 @@ class TraceletPositionSource {
   /// `motionDetectionMode` and `stationaryTrackingMode` too).
   Future<void> setForeground(bool foreground) async {
     _foreground = foreground;
-    await tl.Tracelet.setConfig(
-      foreground ? _foregroundConfig() : _backgroundConfig(),
-    );
+    if (_currentTier == MountainGpsTier.foreground3m ||
+        _currentTier == MountainGpsTier.background5m) {
+      await applyGpsTier(
+        _foreground
+            ? MountainGpsTier.foreground3m
+            : MountainGpsTier.background5m,
+      );
+    }
+  }
+
+  /// Applies [tier] idempotently — skips native `setConfig` when unchanged so
+  /// brief screen peeks never restart the native location pipeline needlessly.
+  Future<void> applyGpsTier(MountainGpsTier tier) async {
+    if (_currentTier == tier) return;
+    _currentTier = tier;
+    if (_locationSub == null ||
+        _notificationTitle == null ||
+        _notificationText == null) {
+      return;
+    }
+    await tl.Tracelet.setConfig(_activeConfig());
   }
 
   /// Rewrites the running session's notification body, leaving the tracking
@@ -269,9 +286,7 @@ class TraceletPositionSource {
   Future<void> setNotificationText(String text) async {
     if (_locationSub == null || _notificationText == text) return;
     _notificationText = text;
-    await tl.Tracelet.setConfig(
-      _foreground ? _foregroundConfig() : _backgroundConfig(),
-    );
+    await tl.Tracelet.setConfig(_activeConfig());
   }
 
   void _onLocation(tl.Location location) {

@@ -7,6 +7,7 @@ import 'package:wanderer/models/trail_like.dart';
 import 'package:wanderer/objectbox.g.dart';
 import 'package:wanderer/provider/api_provider.dart';
 import 'package:wanderer/provider/objectbox_store_provider.dart';
+import 'package:wanderer/provider/online_status_provider.dart';
 import 'package:wanderer/store/current_account.dart';
 import 'package:wanderer/store/local_trail_store.dart';
 import 'package:wanderer/util/gpx/conversion.dart';
@@ -81,6 +82,10 @@ class TrailNotifier extends _$TrailNotifier {
   @override
   FutureOr<Trail> build(String id) async {
     final api = ref.watch(apiProvider);
+    if (!ref.read(onlineStatusProvider)) {
+      final offlineCached = await _readCached(id);
+      if (offlineCached != null) return offlineCached;
+    }
 
     try {
       final trail = await fetchServerTrail(api, id);
@@ -93,7 +98,7 @@ class TrailNotifier extends _$TrailNotifier {
 
       return trail;
     } catch (_) {
-      final cached = _readCached(id);
+      final cached = await _readCached(id);
       if (cached != null) return cached;
       rethrow;
     }
@@ -126,7 +131,7 @@ class TrailNotifier extends _$TrailNotifier {
   /// logout (see `TrailEntity.savedByUserIds`), so an unfiltered read here
   /// would serve one account the cached copy of a private trail only another
   /// account had downloaded.
-  Trail? _readCached(String id) {
+  Future<Trail?> _readCached(String id) async {
     final store = ref.read(objectBoxProvider);
     final userId = currentAccountId(store);
     if (userId == null) return null;
@@ -142,14 +147,21 @@ class TrailNotifier extends _$TrailNotifier {
     query.close();
     if (entity == null) return null;
 
-    // Guarded for the same reason as TrailLibraryNotifier.build(): toModel()
-    // parses the cached GPX and can throw. Letting it escape when this is
-    // called from the fetch failure's catch block would replace the ORIGINAL
-    // failure (why we fell back to the cache at all) with an unrelated parse
-    // error. A corrupt cache entry means "no usable cache", so report none and
-    // let the caller surface the real cause.
     try {
-      return entity.toModel();
+      final scalarModel = entity.toModel(includeGpx: false);
+      final rawXml = entity.gpxData;
+      final origXml = entity.originalGpxData;
+      if (rawXml == null || rawXml.isEmpty) {
+        return scalarModel.copyWith(originalGpxData: origXml);
+      }
+      final parsedGpx = await compute(parseGpxSafely, rawXml);
+      return scalarModel.copyWith(
+        originalGpxData: origXml,
+        expand: (scalarModel.expand ?? const TrailExpand()).copyWith(
+          gpxData: rawXml,
+          gpx: parsedGpx,
+        ),
+      );
     } catch (e, st) {
       debugPrint('TrailNotifier: cached trail "$id" failed to parse: $e\n$st');
       return null;

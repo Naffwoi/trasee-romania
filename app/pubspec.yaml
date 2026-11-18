@@ -7,11 +7,13 @@ environment:
   sdk: ^3.13.0
 
 dependencies:
+  archive: ^4.0.9
   collection: ^1.19.1
   cookie_jar: ^4.0.9
   crypto: ^3.0.7
   dio: ^5.9.2
   dio_cookie_manager: ^3.4.0
+  native_dio_adapter: ^1.5.0
   disk_space_2: ^1.0.12
   duration: ^4.0.3
   exif: ^3.3.0
@@ -37,6 +39,7 @@ dependencies:
   go_router: ^17.2.1
   gpx: ^2.3.0
   html: ^0.15.6
+  image: ^4.8.0
   image_picker: ^1.2.2
   intl: any
   json_annotation: ^4.11.0

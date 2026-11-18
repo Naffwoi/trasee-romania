@@ -15,5 +15,8 @@ import UIKit
     if let registrar = engineBridge.pluginRegistry.registrar(forPlugin: "BleProximityPlugin") {
       BleProximityPlugin.register(with: registrar)
     }
+    if let motionRegistrar = engineBridge.pluginRegistry.registrar(forPlugin: "MountainMotionPlugin") {
+      MountainMotionPlugin.register(with: motionRegistrar)
+    }
   }
 }

@@ -643,7 +643,7 @@
     },
     {
       "id": "8:5734302023385580278",
-      "lastPropertyId": "9:682150364037804139",
+      "lastPropertyId": "10:6452254148793560149",
       "name": "LocalSettingsEntity",
       "properties": [
         {
@@ -686,6 +686,11 @@
           "id": "9:682150364037804139",
           "name": "recentServersJson",
           "type": 9
+        },
+        {
+          "id": "10:6452254148793560149",
+          "name": "expeditionBatteryMode",
+          "type": 1
         }
       ],
       "relations": []

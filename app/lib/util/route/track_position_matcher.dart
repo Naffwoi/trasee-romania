@@ -1,4 +1,5 @@
 import 'dart:math' as math;
+import 'dart:typed_data';
 
 import 'package:maplibre/maplibre.dart';
 import 'package:wanderer/util/route/map_matcher.dart';
@@ -50,11 +51,78 @@ class TrackPositionMatcher {
        _matcher = RouteMapMatcher(
          shape: shape,
          shapeCumulativeMeters: cumulativeMeters,
-       );
+       ) {
+    _buildSpatialIndex();
+  }
 
   final List<Geographic> _shape;
   final List<double> _cumulative;
   final RouteMapMatcher _matcher;
+
+  static const double _kMetersPerDegree = 111320.0;
+  static const double _kGridCellMeters = 200.0;
+
+  double _originLat = 0.0;
+  double _originLon = 0.0;
+  double _originCosLat = 1.0;
+  late Float64List _segCosMidLat;
+  late Float64List _segAbX;
+  late Float64List _segAbY;
+  late Float64List _segLenSq;
+  final Map<int, Int32List> _spatialBuckets = <int, Int32List>{};
+
+  static int _packCell(int cx, int cy) =>
+      ((cx & 0xFFFFF) << 20) | (cy & 0xFFFFF);
+
+  int _lonToCellX(double lon) =>
+      (((lon - _originLon) * _kMetersPerDegree * _originCosLat) /
+              _kGridCellMeters)
+          .floor();
+
+  int _latToCellY(double lat) =>
+      (((lat - _originLat) * _kMetersPerDegree) / _kGridCellMeters).floor();
+
+  void _buildSpatialIndex() {
+    final segCount = math.max(0, _shape.length - 1);
+    _segCosMidLat = Float64List(segCount);
+    _segAbX = Float64List(segCount);
+    _segAbY = Float64List(segCount);
+    _segLenSq = Float64List(segCount);
+    if (segCount == 0) return;
+
+    _originLat = _shape.first.lat;
+    _originLon = _shape.first.lon;
+    _originCosLat = math.max(
+      0.1,
+      math.cos(_originLat * math.pi / 180.0),
+    );
+
+    final tempBuckets = <int, List<int>>{};
+    for (var i = 0; i < segCount; i++) {
+      final a = _shape[i];
+      final b = _shape[i + 1];
+      final cosMid = math.cos(((a.lat + b.lat) * 0.5) * math.pi / 180.0);
+      final abX = (b.lon - a.lon) * _kMetersPerDegree * cosMid;
+      final abY = (b.lat - a.lat) * _kMetersPerDegree;
+      _segCosMidLat[i] = cosMid;
+      _segAbX[i] = abX;
+      _segAbY[i] = abY;
+      _segLenSq[i] = abX * abX + abY * abY;
+
+      final cx0 = _lonToCellX(math.min(a.lon, b.lon));
+      final cx1 = _lonToCellX(math.max(a.lon, b.lon));
+      final cy0 = _latToCellY(math.min(a.lat, b.lat));
+      final cy1 = _latToCellY(math.max(a.lat, b.lat));
+      for (var cy = cy0; cy <= cy1; cy++) {
+        for (var cx = cx0; cx <= cx1; cx++) {
+          (tempBuckets[_packCell(cx, cy)] ??= <int>[]).add(i);
+        }
+      }
+    }
+    tempBuckets.forEach((key, list) {
+      _spatialBuckets[key] = Int32List.fromList(list);
+    });
+  }
 
   /// Distance (metres) from a fix to the point the matcher committed to,
   /// beyond which [update] returns null (hides the marker) rather than a
@@ -269,7 +337,6 @@ class TrackPositionMatcher {
   ({double alongTrackMeters, int segmentIndex, Geographic point})?
   _nearestInWindow(Geographic pos, double minAlong, double maxAlong) {
     if (maxAlong < minAlong || _shape.length < 2) return null;
-    const metersPerDegree = 111320.0;
     var bestApproxSq = double.infinity;
     var bestSeg = -1;
     var bestT = 0.0;
@@ -281,16 +348,12 @@ class TrackPositionMatcher {
 
       final segLen = segEnd - segStart;
       final a = _shape[i];
-      final b = _shape[i + 1];
-      final midLatRad = ((a.lat + b.lat) / 2.0) * math.pi / 180.0;
-      final cosMidLat = math.cos(midLatRad);
-
-      final abX = (b.lon - a.lon) * metersPerDegree * cosMidLat;
-      final abY = (b.lat - a.lat) * metersPerDegree;
-      final apX = (pos.lon - a.lon) * metersPerDegree * cosMidLat;
-      final apY = (pos.lat - a.lat) * metersPerDegree;
-
-      final segLenSq = abX * abX + abY * abY;
+      final cosMidLat = _segCosMidLat[i];
+      final abX = _segAbX[i];
+      final abY = _segAbY[i];
+      final segLenSq = _segLenSq[i];
+      final apX = (pos.lon - a.lon) * _kMetersPerDegree * cosMidLat;
+      final apY = (pos.lat - a.lat) * _kMetersPerDegree;
       final tMin = segLen <= 0.0
           ? 0.0
           : ((minAlong - segStart) / segLen).clamp(0.0, 1.0);
@@ -324,23 +387,19 @@ class TrackPositionMatcher {
     Geographic point,
   })
   _globalNearest(Geographic pos) {
-    const metersPerDegree = 111320.0;
     var bestApproxSq = double.infinity;
     var bestSeg = 0;
     var bestT = 0.0;
+    var inspectedAny = false;
 
-    for (var i = 0; i < _shape.length - 1; i++) {
+    void evaluateSegment(int i) {
       final a = _shape[i];
-      final b = _shape[i + 1];
-      final midLatRad = ((a.lat + b.lat) / 2.0) * math.pi / 180.0;
-      final cosMidLat = math.cos(midLatRad);
-
-      final abX = (b.lon - a.lon) * metersPerDegree * cosMidLat;
-      final abY = (b.lat - a.lat) * metersPerDegree;
-      final apX = (pos.lon - a.lon) * metersPerDegree * cosMidLat;
-      final apY = (pos.lat - a.lat) * metersPerDegree;
-
-      final segLenSq = abX * abX + abY * abY;
+      final cosMidLat = _segCosMidLat[i];
+      final abX = _segAbX[i];
+      final abY = _segAbY[i];
+      final segLenSq = _segLenSq[i];
+      final apX = (pos.lon - a.lon) * _kMetersPerDegree * cosMidLat;
+      final apY = (pos.lat - a.lat) * _kMetersPerDegree;
       final t = segLenSq <= 0.0
           ? 0.0
           : ((apX * abX + apY * abY) / segLenSq).clamp(0.0, 1.0);
@@ -352,6 +411,44 @@ class TrackPositionMatcher {
         bestApproxSq = dSq;
         bestSeg = i;
         bestT = t;
+      }
+    }
+
+    final qx = _lonToCellX(pos.lon);
+    final qy = _latToCellY(pos.lat);
+
+    // Fast path 1: 3x3 cells (600m x 600m) covers all on-trail & near-off-trail fixes.
+    for (var dy = -1; dy <= 1; dy++) {
+      for (var dx = -1; dx <= 1; dx++) {
+        final bucket = _spatialBuckets[_packCell(qx + dx, qy + dy)];
+        if (bucket == null) continue;
+        inspectedAny = true;
+        for (var k = 0; k < bucket.length; k++) {
+          evaluateSegment(bucket[k]);
+        }
+      }
+    }
+
+    // If a closer segment could theoretically sit just outside the 1-cell margin,
+    // or if 3x3 had no segments, expand once to 16-cell radius (3.2 km) before
+    // falling back to the precomputed linear scan (> 3 km Calm Preview Mode).
+    if (!inspectedAny || bestApproxSq > (_kGridCellMeters * _kGridCellMeters)) {
+      for (var dy = -16; dy <= 16; dy++) {
+        for (var dx = -16; dx <= 16; dx++) {
+          if (dx >= -1 && dx <= 1 && dy >= -1 && dy <= 1) continue;
+          final bucket = _spatialBuckets[_packCell(qx + dx, qy + dy)];
+          if (bucket == null) continue;
+          inspectedAny = true;
+          for (var k = 0; k < bucket.length; k++) {
+            evaluateSegment(bucket[k]);
+          }
+        }
+      }
+    }
+
+    if (!inspectedAny) {
+      for (var i = 0; i < _shape.length - 1; i++) {
+        evaluateSegment(i);
       }
     }
 

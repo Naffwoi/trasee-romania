@@ -186,6 +186,21 @@ class TrailLiveService {
   onSosNotificationCallback;
 
   final Set<String> _notifiedSosIds = <String>{};
+  TrailLiveSummary? _lastHeartbeatSummary;
+  double? _lastHeartbeatLat;
+  double? _lastHeartbeatLon;
+  final Map<String, GroupSessionModel> _cachedGroupSessions =
+      <String, GroupSessionModel>{};
+
+  static double _quantize6(double v) =>
+      (v * 1000000.0).roundToDouble() / 1000000.0;
+  static double _quantize1(double v) => (v * 10.0).roundToDouble() / 10.0;
+
+  /// Applies +-30% jitter (`[0.7 * baseMs, 1.3 * baseMs]`) to avoid reconnect storms.
+  static int computeJitteredBackoffMs(int baseMs, {double? randomUnit}) {
+    final u = (randomUnit ?? math.Random().nextDouble()).clamp(0.0, 1.0);
+    return math.max(500, (baseMs * (0.7 + 0.6 * u)).round());
+  }
 
   bool get isConfigured {
     final host = Uri.tryParse(_dio.options.baseUrl)?.host ?? '';
@@ -278,22 +293,78 @@ class TrailLiveService {
     required double lon,
     double? ele,
     bool inNavigation = false,
+    bool stationary = false,
+    String? stateHash,
     bool isRo = true,
   }) async {
     if (!isConfigured) return null;
     final options = await _liveOptions();
+    final qLat = _quantize6(lat);
+    final qLon = _quantize6(lon);
+    final cleanTrailId = trailId?.trim() ?? '';
+
+    String? effectiveStateHash = stateHash?.trim();
+    if ((effectiveStateHash == null || effectiveStateHash.isEmpty) &&
+        _lastHeartbeatSummary != null &&
+        (_lastHeartbeatSummary!.trailId ?? '') == cleanTrailId &&
+        _lastHeartbeatSummary!.stateHash != null &&
+        _lastHeartbeatLat != null &&
+        _lastHeartbeatLon != null) {
+      final distM = ml.SphericalGreatCircle(
+        ml.Geographic(lat: qLat, lon: qLon),
+      ).distanceTo(
+        ml.Geographic(lat: _lastHeartbeatLat!, lon: _lastHeartbeatLon!),
+      );
+      if (distM <= 250.0) {
+        effectiveStateHash = _lastHeartbeatSummary!.stateHash;
+      }
+    }
+
     final response = await _dio.post<Object?>(
       '/live/heartbeat',
       data: <String, Object?>{
-        if (trailId != null && trailId.isNotEmpty) 'trailId': trailId,
-        'lat': lat,
-        'lon': lon,
-        if (ele != null && ele.isFinite) 'ele': ele,
+        if (cleanTrailId.isNotEmpty) 'trailId': cleanTrailId,
+        'lat': qLat,
+        'lon': qLon,
+        if (ele != null && ele.isFinite) 'ele': _quantize1(ele),
         'inNavigation': inNavigation,
+        if (stationary) 'stationary': true,
+        if (effectiveStateHash != null && effectiveStateHash.isNotEmpty)
+          'stateHash': effectiveStateHash,
       },
       options: options,
     );
-    final summary = TrailLiveSummary.fromJson(_asMap(response.data));
+    final bodyMap = _asMap(response.data);
+    final TrailLiveSummary summary;
+    if (bodyMap['unchanged'] == true) {
+      if (_lastHeartbeatSummary != null) {
+        final nextHikers = (bodyMap['activeHikers30m'] is num)
+            ? math.max(0, (bodyMap['activeHikers30m'] as num).round())
+            : _lastHeartbeatSummary!.activeHikers30m;
+        final nextHash = (bodyMap['stateHash'] as Object?)?.toString().trim();
+        summary = _lastHeartbeatSummary!.copyWith(
+          activeHikers30m: nextHikers,
+          stateHash: (nextHash != null && nextHash.isNotEmpty)
+              ? nextHash
+              : _lastHeartbeatSummary!.stateHash,
+          unchanged: true,
+        );
+      } else {
+        summary = TrailLiveSummary.fromJson(bodyMap).copyWith(
+          trailId: cleanTrailId.isNotEmpty ? cleanTrailId : null,
+          unchanged: true,
+        );
+      }
+    } else {
+      summary = TrailLiveSummary.fromJson(bodyMap).copyWith(
+        trailId: cleanTrailId.isNotEmpty ? cleanTrailId : null,
+        unchanged: false,
+      );
+    }
+    _lastHeartbeatSummary = summary;
+    _lastHeartbeatLat = qLat;
+    _lastHeartbeatLon = qLon;
+
     for (final sos in summary.nearbyActiveSos()) {
       await _maybeNotifyNearbySos(
         sos,
@@ -563,7 +634,11 @@ class TrailLiveService {
       },
       options: options,
     );
-    return GroupSessionModel.fromJson(_asMap(response.data));
+    final parsed = GroupSessionModel.fromJson(_asMap(response.data));
+    if (parsed.code.isNotEmpty) {
+      _cachedGroupSessions[parsed.code] = parsed;
+    }
+    return parsed;
   }
 
   Future<GroupSessionModel> getGroup(String code) async {
@@ -573,7 +648,9 @@ class TrailLiveService {
       '/live/groups/${Uri.encodeComponent(normalized)}',
       options: options,
     );
-    return GroupSessionModel.fromJson(_asMap(response.data));
+    final parsed = GroupSessionModel.fromJson(_asMap(response.data));
+    _cachedGroupSessions[normalized] = parsed;
+    return parsed;
   }
 
   Future<GroupSessionModel> joinGroup({
@@ -589,7 +666,9 @@ class TrailLiveService {
       },
       options: options,
     );
-    return GroupSessionModel.fromJson(_asMap(response.data));
+    final parsed = GroupSessionModel.fromJson(_asMap(response.data));
+    _cachedGroupSessions[normalized] = parsed;
+    return parsed;
   }
 
   Future<GroupSessionModel> pingGroup({
@@ -602,26 +681,63 @@ class TrailLiveService {
     double? speed,
     double? alongTrackM,
     bool inNavigation = true,
+    bool stationary = false,
+    bool ackOnly = false,
   }) async {
     final normalized = _normalizeGroupCode(code);
     final options = await _liveOptions();
     final response = await _dio.post<Object?>(
       '/live/groups/${Uri.encodeComponent(normalized)}/ping',
+      queryParameters: ackOnly ? const <String, Object?>{'ack': '1'} : null,
       data: <String, Object?>{
-        'lat': lat,
-        'lon': lon,
-        'ele': (ele != null && ele.isFinite) ? ele : 0.0,
-        'accuracy': (accuracy.isFinite && accuracy > 0.0) ? accuracy : 15.0,
+        'lat': _quantize6(lat),
+        'lon': _quantize6(lon),
+        'ele': (ele != null && ele.isFinite) ? _quantize1(ele) : 0.0,
+        'accuracy': (accuracy.isFinite && accuracy > 0.0)
+            ? _quantize1(accuracy)
+            : 15.0,
         if (heading != null && heading.isFinite && heading >= 0.0)
-          'heading': heading,
-        if (speed != null && speed.isFinite && speed >= 0.0) 'speed': speed,
+          'heading': _quantize1(heading),
+        if (speed != null && speed.isFinite && speed >= 0.0)
+          'speed': _quantize1(speed),
         if (alongTrackM != null && alongTrackM.isFinite)
-          'alongTrackM': alongTrackM,
+          'alongTrackM': _quantize1(alongTrackM),
         'inNavigation': inNavigation,
+        if (stationary) 'stationary': true,
       },
       options: options,
     );
-    return GroupSessionModel.fromJson(_asMap(response.data));
+    final bodyMap = _asMap(response.data);
+    if (bodyMap['ok'] == true && bodyMap['members'] is! List) {
+      final existing = _cachedGroupSessions[normalized];
+      final respSelfId = (bodyMap['selfMemberId'] ?? bodyMap['self_member_id'])
+          ?.toString()
+          .trim();
+      final rawExpires = (bodyMap['expiresAt'] ?? bodyMap['expires_at'])
+          ?.toString()
+          .trim();
+      final respExpires = (rawExpires != null && rawExpires.isNotEmpty)
+          ? DateTime.tryParse(rawExpires)?.toUtc()
+          : null;
+      if (existing != null) {
+        return existing.copyWith(
+          selfMemberId: (respSelfId != null && respSelfId.isNotEmpty)
+              ? respSelfId
+              : existing.selfMemberId,
+          expiresAt: respExpires ?? existing.expiresAt,
+          hasMembersSnapshot: false,
+        );
+      }
+      return GroupSessionModel(
+        code: normalized,
+        selfMemberId: respSelfId ?? '',
+        expiresAt: respExpires,
+        hasMembersSnapshot: false,
+      );
+    }
+    final parsed = GroupSessionModel.fromJson(bodyMap);
+    _cachedGroupSessions[normalized] = parsed;
+    return parsed;
   }
 
   Future<void> leaveGroup(String code) async {
@@ -642,6 +758,7 @@ class TrailLiveService {
     required double lon,
     String? trailId,
     String? groupCode,
+    String? lastEventId,
     CancelToken? cancelToken,
     bool isRo = true,
   }) async* {
@@ -649,14 +766,17 @@ class TrailLiveService {
     final token = await _tokenLoader();
     final effectiveCancel = cancelToken ?? CancelToken();
     final cleanGroupCode = groupCode?.trim();
+    final cleanLastEventId = lastEventId?.trim();
     final response = await _dio.get<ResponseBody>(
       '/live/stream',
       queryParameters: <String, Object?>{
-        'lat': lat,
-        'lon': lon,
+        'lat': _quantize6(lat),
+        'lon': _quantize6(lon),
         if (trailId != null && trailId.isNotEmpty) 'trailId': trailId,
         if (cleanGroupCode != null && cleanGroupCode.isNotEmpty)
           'groupCode': _normalizeGroupCode(cleanGroupCode),
+        if (cleanLastEventId != null && cleanLastEventId.isNotEmpty)
+          'lastEventId': cleanLastEventId,
         'deviceToken': token,
       },
       cancelToken: effectiveCancel,
@@ -665,6 +785,8 @@ class TrailLiveService {
           'X-Device-Token': token,
           'Accept': 'text/event-stream',
           'Cache-Control': 'no-cache',
+          if (cleanLastEventId != null && cleanLastEventId.isNotEmpty)
+            'Last-Event-ID': cleanLastEventId,
         },
         responseType: ResponseType.stream,
         receiveTimeout: const Duration(hours: 2),
@@ -675,6 +797,7 @@ class TrailLiveService {
     if (body == null) return;
 
     String? currentEvent;
+    String? currentEventId;
     final dataLines = <String>[];
 
     await for (final line
@@ -688,11 +811,16 @@ class TrailLiveService {
         if (dataLines.isNotEmpty) {
           final parsed = TrailLiveSseEvent.tryParse(
             eventName: currentEvent,
+            eventId: currentEventId,
             data: dataLines.join('\n'),
           );
           currentEvent = null;
+          currentEventId = null;
           dataLines.clear();
           if (parsed != null) {
+            if (parsed.type == TrailLiveSseEvent.resyncRequired) {
+              _lastHeartbeatSummary = null;
+            }
             if (parsed.sos != null) {
               await _maybeNotifyNearbySos(
                 parsed.sos,
@@ -705,6 +833,7 @@ class TrailLiveService {
           }
         } else {
           currentEvent = null;
+          currentEventId = null;
         }
         continue;
       }
@@ -713,7 +842,9 @@ class TrailLiveService {
         // SSE keepalive comment.
         continue;
       }
-      if (line.startsWith('event:')) {
+      if (line.startsWith('id:')) {
+        currentEventId = line.substring(3).trim();
+      } else if (line.startsWith('event:')) {
         currentEvent = line.substring(6).trim();
       } else if (line.startsWith('data:')) {
         dataLines.add(line.substring(5).trimLeft());
@@ -723,9 +854,13 @@ class TrailLiveService {
     if (dataLines.isNotEmpty) {
       final parsed = TrailLiveSseEvent.tryParse(
         eventName: currentEvent,
+        eventId: currentEventId,
         data: dataLines.join('\n'),
       );
       if (parsed != null) {
+        if (parsed.type == TrailLiveSseEvent.resyncRequired) {
+          _lastHeartbeatSummary = null;
+        }
         if (parsed.sos != null) {
           await _maybeNotifyNearbySos(
             parsed.sos,

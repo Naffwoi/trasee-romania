@@ -5,6 +5,7 @@ import 'package:dio_cookie_manager/dio_cookie_manager.dart';
 import 'package:riverpod_annotation/riverpod_annotation.dart';
 import 'package:wanderer/provider/cookie_jar_provider.dart';
 import 'package:wanderer/provider/online_status_provider.dart';
+import 'package:wanderer/services/platform_http_adapter.dart';
 import 'package:wanderer/util/server_url.dart';
 
 part 'api_provider.g.dart';
@@ -74,6 +75,7 @@ class Api extends _$Api {
         connectTimeout: const Duration(seconds: 8),
       ),
     );
+    dio.httpClientAdapter = createPlatformHttpClientAdapter();
 
     // Must run before CookieManager below: a request still awaiting its
     // response when `Auth.logout()` calls `cancelPendingRequests()` must be

@@ -1,5 +1,6 @@
 import 'package:flutter/foundation.dart' show visibleForTesting;
 import 'package:geolocator/geolocator.dart' as geo;
+import 'package:gpx/gpx.dart' show Wpt;
 import 'package:maplibre/maplibre.dart' as ml;
 import 'package:tracelet/tracelet.dart' as tl;
 import 'package:wanderer/entities/active_navigation_entity.dart';
@@ -7,6 +8,7 @@ import 'package:wanderer/provider/navigation_stats_provider.dart'
     show NavigationStatsNotifier;
 import 'package:wanderer/services/tracelet_position_source.dart'
     show hasUsableAltitude;
+import 'package:wanderer/store/breadcrumb_slab_store.dart';
 import 'package:wanderer/util/geo/polyline.dart';
 
 /// Upper bound on the moving time credited between two consecutive fixes.
@@ -48,19 +50,24 @@ const Duration _kMaxStepElapsed = Duration(seconds: 60);
 Future<int> backfillSessionGap(
   ActiveNavigationEntity row, {
   required Future<void> Function() ensureTraceletReady,
+  BreadcrumbSlabStore? slabStore,
   @visibleForTesting Future<List<tl.Location>> Function()? readStoredLocations,
 }) async {
   // Paused sessions accumulate nothing live, so they must not backfill either.
   if (row.isPaused) return 0;
 
+  final slabWaypoints = slabStore?.readAllWaypoints() ?? const <Wpt>[];
   final timestamps = row.timestampsUtc;
   final polyline = row.breadcrumbPolyline;
-  // Without a last timestamp there is no gap boundary to splice from, and
-  // without a breadcrumb there is nothing to splice onto.
-  if (timestamps == null || timestamps.isEmpty) return 0;
-  if (polyline == null || polyline.isEmpty) return 0;
+  final bool usingSlab = slabWaypoints.isNotEmpty;
+  if (!usingSlab) {
+    if (timestamps == null || timestamps.isEmpty) return 0;
+    if (polyline == null || polyline.isEmpty) return 0;
+  }
 
-  final lastMs = timestamps.last;
+  final lastMs = usingSlab
+      ? (slabWaypoints.last.time?.toUtc().millisecondsSinceEpoch ?? 0)
+      : timestamps!.last;
   if (lastMs <= 0) return 0;
 
   final List<tl.Location> stored;
@@ -77,12 +84,23 @@ Future<int> backfillSessionGap(
     return 0;
   }
 
-  final existing = PolylineUtil.decode(polyline);
+  final existing = usingSlab
+      ? slabWaypoints
+            .map((w) => ml.Geographic(lat: w.lat!, lon: w.lon!))
+            .toList()
+      : PolylineUtil.decode(polyline!);
   if (existing.isEmpty) return 0;
 
-  final elevations = List<double>.from(row.elevations ?? const <double>[]);
+  final elevations = usingSlab
+      ? slabWaypoints.map((w) => w.ele ?? 0.0).toList()
+      : List<double>.from(row.elevations ?? const <double>[]);
   final points = List<ml.Geographic>.from(existing);
-  final times = List<int>.from(timestamps);
+  final times = usingSlab
+      ? slabWaypoints
+            .map((w) => w.time?.toUtc().millisecondsSinceEpoch ?? lastMs)
+            .toList()
+      : List<int>.from(timestamps!);
+  final appendedSlabWpts = <Wpt>[...slabWaypoints];
 
   var lastPoint = existing.last;
   // Anchor elevation on the last point that carried a usable reading, not
@@ -166,14 +184,28 @@ Future<int> backfillSessionGap(
     // breadcrumb point whose Wpt carries no `ele`.
     elevations.add(usable ? c.altitude : 0.0);
     times.add(ms);
+    if (slabStore != null) {
+      appendedSlabWpts.add(
+        Wpt(
+          lat: here.lat,
+          lon: here.lon,
+          ele: usable ? c.altitude : null,
+          time: time.toUtc(),
+        ),
+      );
+    }
     added++;
   }
 
   if (added == 0) return 0;
 
-  row.breadcrumbPolyline = PolylineUtil.encode(points);
-  row.elevations = elevations;
-  row.timestampsUtc = times;
+  if (slabStore != null && usingSlab) {
+    slabStore.appendFromBreadcrumb(appendedSlabWpts);
+  } else {
+    row.breadcrumbPolyline = PolylineUtil.encode(points);
+    row.elevations = elevations;
+    row.timestampsUtc = times;
+  }
   row.distanceMeters += distance;
   row.elevationGainMeters += gain;
   row.elevationLossMeters += loss;

@@ -14,12 +14,14 @@ import 'package:flutter_rotation_sensor/flutter_rotation_sensor.dart';
 import 'package:font_awesome_flutter/font_awesome_flutter.dart';
 import 'package:geolocator/geolocator.dart' as geo;
 import 'package:go_router/go_router.dart';
-import 'package:flutter/foundation.dart' show compute;
+import 'package:flutter/foundation.dart' show ValueListenable;
 import 'package:gpx/gpx.dart';
 import 'package:maplibre/maplibre.dart' as ml;
 import 'package:objectbox/objectbox.dart';
+import 'package:path_provider/path_provider.dart';
 import 'package:wanderer/components/base/wanderer_attribution.dart';
 import 'package:wanderer/components/map/location_marker_layer.dart';
+import 'package:wanderer/components/map/screen_marker_layer.dart';
 import 'package:wanderer/components/map/trail_layer.dart';
 import 'package:wanderer/components/navigation/group_sheet.dart';
 import 'package:wanderer/components/navigation/sos_banner_and_dialog.dart';
@@ -29,6 +31,7 @@ import 'package:wanderer/components/trail/active_hikers_badge.dart';
 import 'package:wanderer/components/trail/elevation_profile.dart';
 import 'package:wanderer/components/trail/waypoint_sheet.dart';
 import 'package:wanderer/entities/active_navigation_entity.dart';
+import 'package:wanderer/entities/region_entity.dart';
 import 'package:wanderer/i18n/app_localizations.dart';
 import 'package:wanderer/models/live/trail_live_models.dart';
 import 'package:wanderer/models/navigate_response.dart';
@@ -40,6 +43,7 @@ import 'package:wanderer/provider/auth_provider.dart';
 import 'package:wanderer/provider/foreground_position_stream_provider.dart';
 import 'package:wanderer/provider/local_settings_provider.dart';
 import 'package:wanderer/provider/map_style_json_provider.dart';
+import 'package:wanderer/provider/nav_session_hibernation_provider.dart';
 import 'package:wanderer/provider/navigation_provider.dart';
 import 'package:wanderer/provider/navigation_stats_provider.dart';
 import 'package:wanderer/provider/objectbox_store_provider.dart';
@@ -52,15 +56,20 @@ import 'package:wanderer/provider/trail/category_provider.dart';
 import 'package:wanderer/provider/trail/subcategory_provider.dart';
 import 'package:wanderer/provider/trail/trail_library_provider.dart';
 import 'package:wanderer/provider/trail/trail_provider.dart';
+import 'package:wanderer/services/navigation/nav_terrain_worker_isolate.dart';
+import 'package:wanderer/services/power/mountain_motion_channel.dart';
+import 'package:wanderer/services/power/mountain_power_engine.dart';
+import 'package:wanderer/services/power/radio_sync_scheduler.dart';
 import 'package:wanderer/store/active_navigation_store.dart' as active_nav;
+import 'package:wanderer/store/breadcrumb_slab_store.dart';
 import 'package:wanderer/store/current_account.dart';
 import 'package:wanderer/store/local_trail_store.dart';
 import 'package:wanderer/util/local/id.dart';
 import 'package:wanderer/util/format.dart';
-import 'package:wanderer/util/gpx/conversion.dart' show serializeGpxToXml;
 import 'package:wanderer/util/gpx/gpx.dart';
 import 'package:wanderer/util/region/proxy_style_rewriter.dart';
 import 'package:wanderer/util/geo/polyline.dart';
+import 'package:wanderer/util/map/compass_rate_policy.dart';
 import 'package:wanderer/util/map/heading_math.dart'
     show normalizeHeading, shortestAngleDelta;
 import 'package:wanderer/theme/colors.dart';
@@ -168,12 +177,6 @@ class _NavigationScreenState extends ConsumerState<NavigationScreen>
   late final TraceletPositionSource _positionSource;
   late final Stream<geo.Position> _positionStream;
   StreamSubscription<geo.Position>? _sub;
-
-  /// Drives `NavigationStatsNotifier.setStationary` from tracelet's native
-  /// speed-motion engine (via [TraceletPositionSource.isMovingStream]), so
-  /// the timer/GPS/stats auto-freeze while stationary and auto-resume on
-  /// motion.
-  StreamSubscription<bool>? _movingSub;
 
   /// ObjectBox store, read once in [initState] — used to persist/clear the
   /// single active-session row via `active_navigation_store`.
@@ -325,7 +328,6 @@ class _NavigationScreenState extends ConsumerState<NavigationScreen>
       ValueNotifier<GroupSessionModel?>(null);
   final ValueNotifier<GroupMemberModel?> _selectedGroupMember =
       ValueNotifier<GroupMemberModel?>(null);
-  Timer? _groupPingTimer;
   final ValueNotifier<int?> _activeHikers30m = ValueNotifier<int?>(null);
   final ValueNotifier<List<TrailReportModel>> _liveReports =
       ValueNotifier<List<TrailReportModel>>(const []);
@@ -339,7 +341,6 @@ class _NavigationScreenState extends ConsumerState<NavigationScreen>
   final ValueNotifier<bool> _liveActionBusy = ValueNotifier<bool>(false);
   final Set<String> _snoozedOrVotedReportIds = <String>{};
   String? _pinnedPromptReportId;
-  Timer? _liveHeartbeatTimer;
   StreamSubscription<TrailLiveSseEvent>? _liveSseSub;
   CancelToken? _liveSseCancelToken;
   Timer? _liveSseReconnectTimer;
@@ -362,13 +363,40 @@ class _NavigationScreenState extends ConsumerState<NavigationScreen>
   final SosLocalNotificationHelper _fallbackSosNotifier =
       SosLocalNotificationHelper();
   final Set<String> _fallbackNotifiedSosKeys = <String>{};
-  Timer? _sosOutboxFlushTimer;
   bool _sosOutboxFlushInFlight = false;
   bool _blePermissionsRequestedOnce = false;
   ml.Geographic? _lastBleGroupBroadcastPos;
   DateTime? _lastBleGroupBroadcastAt;
   DateTime? _lastBleResponderAckAt;
   String _selfGroupDisplayName = 'Drumeț';
+
+  // Battery & 60/120 FPS isolate/power/radio/slab state.
+  final ValueNotifier<double?> _headingNotifier = ValueNotifier<double?>(null);
+  final ValueNotifier<MountainPowerState> _powerStateNotifier =
+      ValueNotifier<MountainPowerState>(MountainPowerState.movingActive);
+  final CameraPushThrottle _cameraPushThrottle = CameraPushThrottle();
+  CompassRateConfig _compassRateCfg = CompassRateConfig.disabled;
+
+  late final MountainMotionChannel _motionChannel;
+  late final MountainPowerEngine _powerEngine;
+  StreamSubscription<MountainMotionEvent>? _motionSub;
+  Timer? _powerWatchdogTimer;
+
+  late final RadioSyncScheduler _radioScheduler;
+  String? _lastHeartbeatStateHash;
+  String? _lastLiveSseEventId;
+  int _sseFailureCount = 0;
+
+  BreadcrumbSlabStore? _breadcrumbSlab;
+  int _lastPersistedPointCount = -1;
+  int _lastPersistedElapsedSec = -1;
+  bool _lastPersistedPaused = false;
+
+  NavTerrainWorkerIsolate? _terrainWorker;
+  int _matchFixSeq = 0;
+  int _latestAppliedMatchSeq = 0;
+  ProviderContainer? _hibernationContainer;
+  Duration? _appliedCompassPeriod;
 
   bool get _isRo => _localeCode.toLowerCase().startsWith('ro');
 
@@ -529,6 +557,15 @@ class _NavigationScreenState extends ConsumerState<NavigationScreen>
     _sheetAtElevationSize = !widget.isRecording;
     WidgetsBinding.instance.addObserver(this);
 
+    _hibernationContainer = ProviderScope.containerOf(context, listen: false);
+    Future.microtask(() {
+      if (mounted) {
+        ref
+            .read(navSessionHibernationProvider.notifier)
+            .enterNavigationSession();
+      }
+    });
+
     _store = ref.read(objectBoxProvider);
     final resumeSession = widget.resumeSession;
     _sessionNavJson = widget.isRecording
@@ -539,28 +576,42 @@ class _NavigationScreenState extends ConsumerState<NavigationScreen>
     _activeRowObxId = resumeSession?.obxId ?? 0;
     _recordingCosting =
         resumeSession?.recordingCosting ?? widget.recordingCosting;
-    final resumePos = resumeSession?.breadcrumbPolyline != null
-        ? PolylineUtil.decode(resumeSession!.breadcrumbPolyline!)
-        : null;
-    // elevations/timestampsUtc may be null or shorter than the decoded
-    // polyline (e.g. a row persisted before these fields existed) — index
-    // defensively rather than assuming they're always the same length.
-    final resumeElevations = resumeSession?.elevations;
-    final resumeTimestamps = resumeSession?.timestampsUtc;
-    _resumeBreadcrumb = resumePos
-        ?.mapIndexed(
-          (i, pos) => Wpt(
-            lat: pos.lat,
-            lon: pos.lon,
-            ele: (resumeElevations != null && i < resumeElevations.length)
-                ? resumeElevations[i]
-                : null,
-            time: (resumeTimestamps != null && i < resumeTimestamps.length)
-                ? DateTime.fromMillisecondsSinceEpoch(resumeTimestamps[i])
-                : null,
-          ),
-        )
-        .toList();
+
+    _breadcrumbSlab = ref.read(breadcrumbSlabStoreProvider);
+    final slabPts = resumeSession != null
+        ? (_breadcrumbSlab?.readAllWaypoints() ?? const <Wpt>[])
+        : const <Wpt>[];
+    if (resumeSession == null) {
+      _breadcrumbSlab?.clear();
+    }
+
+    if (slabPts.isNotEmpty) {
+      _resumeBreadcrumb = slabPts;
+    } else {
+      final resumePos = (resumeSession?.breadcrumbPolyline != null &&
+              resumeSession!.breadcrumbPolyline!.isNotEmpty)
+          ? PolylineUtil.decode(resumeSession.breadcrumbPolyline!)
+          : null;
+      // elevations/timestampsUtc may be null or shorter than the decoded
+      // polyline (e.g. a row persisted before these fields existed) — index
+      // defensively rather than assuming they're always the same length.
+      final resumeElevations = resumeSession?.elevations;
+      final resumeTimestamps = resumeSession?.timestampsUtc;
+      _resumeBreadcrumb = resumePos
+          ?.mapIndexed(
+            (i, pos) => Wpt(
+              lat: pos.lat,
+              lon: pos.lon,
+              ele: (resumeElevations != null && i < resumeElevations.length)
+                  ? resumeElevations[i]
+                  : null,
+              time: (resumeTimestamps != null && i < resumeTimestamps.length)
+                  ? DateTime.fromMillisecondsSinceEpoch(resumeTimestamps[i])
+                  : null,
+            ),
+          )
+          .toList();
+    }
     _resumeStats = resumeSession != null
         ? NavigationStatsSeed(
             distanceMeters: resumeSession.distanceMeters,
@@ -586,10 +637,39 @@ class _NavigationScreenState extends ConsumerState<NavigationScreen>
     );
     _navNotifier = ref.read(_navProviderInstance.notifier);
     _statsNotifier = ref.read(_statsProviderInstance.notifier);
+
+    _positionSource = TraceletPositionSource();
+    _positionStream = _positionSource.stream;
+
+    _motionChannel = MountainMotionChannel();
+    _powerEngine = MountainPowerEngine(
+      onStateChanged: (nextState) {
+        _powerStateNotifier.value = nextState;
+        _statsNotifier.setStationary(_powerEngine.isStatsFrozen);
+        _syncCompassSamplingRate();
+        _syncCoasterTimer();
+        _radioScheduler.updateState(
+          isStationary: _powerEngine.isStationarySleep,
+          expeditionMode: _powerEngine.effectiveExpeditionMode,
+          sosActive: nextState == MountainPowerState.sosEmergencyMax,
+        );
+        if (nextState == MountainPowerState.stationaryCabanaSleep) {
+          unawaited(_motionChannel.armStationaryWakeTrigger());
+        } else {
+          unawaited(_motionChannel.startStepMonitoring());
+        }
+      },
+      onGpsTierChanged: (tier) {
+        unawaited(_positionSource.applyGpsTier(tier));
+      },
+    );
+    _powerEngine.setExpeditionMode(ref.read(expeditionBatteryModeProvider));
+
     // Keeps the per-fix handler free of provider reads: mirror the frozen
     // flag on every stats emission instead of re-deriving it per fix.
     ref.listenManual(_statsProviderInstance, fireImmediately: true, (_, next) {
       _frozen = next.isPaused || next.isStationary;
+      _syncCoasterTimer();
     });
     ref.listenManual(trailLiveServiceProvider, fireImmediately: true, (_, next) {
       _liveService = next;
@@ -605,45 +685,66 @@ class _NavigationScreenState extends ConsumerState<NavigationScreen>
       _bleMeshEngine.onSosAckReceived.listen(_onBleSosAckReceived),
       _bleMeshEngine.onSosResolvedReceived.listen(_onBleSosResolvedReceived),
     ]);
+
+    _radioScheduler = RadioSyncScheduler(
+      onCoalescedBurst: _executeCoalescedRadioBurst,
+    );
+    _radioScheduler.updateState(
+      isOnline: ref.read(onlineStatusProvider),
+      uiForeground: _uiVisible,
+      hasActiveGroup: _groupSession.value != null,
+      isStationary: false,
+      expeditionMode: _powerEngine.effectiveExpeditionMode,
+      sosActive: false,
+    );
+    _radioScheduler.start();
+
+    ref.listenManual(expeditionBatteryModeProvider, (_, enabled) {
+      _powerEngine.setExpeditionMode(enabled);
+      _syncCompassSamplingRate();
+      _radioScheduler.updateState(
+        expeditionMode: _powerEngine.effectiveExpeditionMode,
+      );
+    });
+    _myActiveSos.addListener(_syncSosPowerOverride);
+    _nearbySosAlerts.addListener(_syncSosPowerOverride);
+
+    _motionSub = _motionChannel.events.listen(_powerEngine.ingestMotionEvent);
+    unawaited(_motionChannel.startStepMonitoring());
+    _powerWatchdogTimer = Timer.periodic(const Duration(seconds: 15), (_) {
+      _powerEngine.evaluateTick();
+      unawaited(
+        _motionChannel.getBatterySnapshot().then(
+          _powerEngine.ingestBatterySnapshot,
+        ),
+      );
+    });
+
     ref.listenManual(onlineStatusProvider, (prev, next) {
+      _radioScheduler.updateState(isOnline: next);
       if (next && prev == false) {
         unawaited(_flushSosOutboxAndRelayQueue());
+        if (_uiVisible) {
+          final curFix = _currentGeoFix();
+          if (curFix != null && _firstHeartbeatSent) {
+            _connectLiveSse(curFix);
+          }
+        }
       }
     });
-    _sosOutboxFlushTimer = Timer.periodic(
-      const Duration(seconds: 20),
-      (_) => unawaited(_flushSosOutboxAndRelayQueue()),
-    );
 
     if (resumeSession == null) {
       // Fresh session: clear any stale prior-trail row, then write an
       // initial zeroed row for this trail.
       active_nav.clear(_store);
-      _persistNow();
+      _breadcrumbSlab?.clear();
+      _persistNow(force: true);
     }
     _persistTimer = Timer.periodic(
       const Duration(seconds: 10),
       (_) => _persistNow(),
     );
-    _liveHeartbeatTimer = Timer.periodic(
-      const Duration(seconds: 30),
-      (_) => _sendLiveHeartbeatTick(),
-    );
-    if (!widget.isRecording) {
-      _coasterTimer = Timer.periodic(
-        const Duration(seconds: 1),
-        (_) => _onCoasterTick(),
-      );
-    }
-
-    _positionSource = TraceletPositionSource();
-    _positionStream = _positionSource.stream;
-    // Couples tracelet's native speed-motion engine to the stats notifier:
-    // stationary → freeze timer/GPS-power/stats; moving → auto-resume. The
-    // notifier never computes motion itself, it only reacts to this stream.
-    _movingSub = _positionSource.isMovingStream.listen((moving) {
-      _statsNotifier.setStationary(!moving);
-    });
+    _syncCoasterTimer();
     // AppLocalizations.of(context) isn't safe to call synchronously here —
     // inherited-widget dependencies aren't established until after the first
     // frame — so the notification-text lookup (and thus `start()`) is
@@ -713,6 +814,12 @@ class _NavigationScreenState extends ConsumerState<NavigationScreen>
         // is unrelated bookkeeping and must keep running even while frozen,
         // so it's not gated here — only the breadcrumb append is.
         final nowMs = DateTime.now().millisecondsSinceEpoch;
+        _powerEngine.ingestGpsFix(
+          lat: pos.latitude,
+          lon: pos.longitude,
+          speedMps: pos.speed,
+          accuracyM: pos.accuracy,
+        );
         final rawFix = ml.Geographic(lat: pos.latitude, lon: pos.longitude);
         final usableAlt = hasUsableAltitude(pos) ? pos.altitude : null;
         if (usableAlt != null) _lastKnownAltitudeM = usableAlt;
@@ -794,7 +901,7 @@ class _NavigationScreenState extends ConsumerState<NavigationScreen>
       },
     );
 
-    _startHeadingSub();
+    _syncCompassSamplingRate();
   }
 
   /// Builds [_trackMatcher] from the navigated trail's [gpx], once, from the
@@ -838,11 +945,47 @@ class _NavigationScreenState extends ConsumerState<NavigationScreen>
     _paceCoaster = GpsPaceCoaster(navPoints, isCycling: isCycling);
     _etaNotifier.value = calc.compute(0.0);
 
-    unawaited(
-      _demGrid.prefetchCorridor(
-        navPoints.map((p) => p.geographic).toList(growable: false),
-      ),
-    );
+    final localDemArchives = <String>[
+      for (final r in _store.box<RegionEntity>().getAll())
+        if (r.demPackage.target?.localFilePath != null)
+          r.demPackage.target!.localFilePath!,
+    ];
+    _demGrid.setDemArchivePaths(localDemArchives);
+
+    final corridorGeos = navPoints
+        .map((p) => p.geographic)
+        .toList(growable: false);
+
+    unawaited(() async {
+      final supportDir = await getApplicationSupportDirectory();
+      final token = await _resolveDeviceToken();
+      if (!mounted) return;
+      final apiUrl = ref.read(apiProvider).options.baseUrl;
+      final worker = await NavTerrainWorkerIsolate.spawn(
+        trailPoints: navPoints,
+        isCycling: isCycling,
+        localeCode: _localeCode,
+        demTileUrlTemplate: _demGrid.tileUrlTemplate,
+        cacheRootPath: supportDir.path,
+        demArchivePaths: localDemArchives,
+        apiBaseUrl: apiUrl.contains('unconfigured') ? null : apiUrl,
+        deviceToken: token,
+        onHybridRerouteReady: (hybrid) {
+          if (!mounted ||
+              hybrid.generation != _rerouteGeneration ||
+              _farPreviewDistanceM.value != null) {
+            return;
+          }
+          _applyWorkerRerouteResponse(hybrid);
+        },
+      );
+      if (!mounted) {
+        await worker.dispose();
+        return;
+      }
+      _terrainWorker = worker;
+      await worker.prefetchCorridor(corridorGeos);
+    }());
   }
 
   List<PeerGpsObservation> _peerObservations(int nowMs) {
@@ -925,6 +1068,40 @@ class _NavigationScreenState extends ConsumerState<NavigationScreen>
     required FusedGpsSource fusedSource,
     required int nowMs,
   }) {
+    final seq = ++_matchFixSeq;
+    final worker = _terrainWorker;
+    if (worker != null && !worker.isDisposed) {
+      unawaited(
+        worker
+            .matchFix(
+              lat: fix.lat,
+              lon: fix.lon,
+              heading: pos.heading,
+              headingAccuracy: pos.headingAccuracy,
+              speed: pos.speed,
+              accuracy: effectiveAccuracy,
+              recordProgress: !_frozen,
+              nowMs: nowMs,
+              activeOffTrail: _offTrailNotifier.value,
+            )
+            .then((resp) {
+              if (!mounted || resp == null || seq < _latestAppliedMatchSeq) {
+                return;
+              }
+              _latestAppliedMatchSeq = seq;
+              _applyNavMatchDetail(
+                resp.detail,
+                fix: fix,
+                effectiveAccuracy: effectiveAccuracy,
+                fusedSource: fusedSource,
+                nowMs: nowMs,
+                workerEta: resp.eta,
+              );
+            }),
+      );
+      return;
+    }
+
     final detail = matcher.matchDetailed(
       fix,
       heading: pos.heading,
@@ -933,7 +1110,24 @@ class _NavigationScreenState extends ConsumerState<NavigationScreen>
       accuracy: effectiveAccuracy,
     );
     if (detail == null) return;
+    _latestAppliedMatchSeq = seq;
+    _applyNavMatchDetail(
+      detail,
+      fix: fix,
+      effectiveAccuracy: effectiveAccuracy,
+      fusedSource: fusedSource,
+      nowMs: nowMs,
+    );
+  }
 
+  void _applyNavMatchDetail(
+    TrackMatchDetail detail, {
+    required ml.Geographic fix,
+    required double effectiveAccuracy,
+    required FusedGpsSource fusedSource,
+    required int nowMs,
+    EtaSnapshot? workerEta,
+  }) {
     final coastSnap = _paceCoaster?.ingestFix(
       lat: fix.lat,
       lon: fix.lon,
@@ -941,7 +1135,7 @@ class _NavigationScreenState extends ConsumerState<NavigationScreen>
       matchedAlongM: detail.alongTrackMeters,
       crossTrackM: detail.crossTrackMeters,
       isPaused: _frozen,
-      paceFactor: _etaCalculator?.paceFactor ?? 1.0,
+      paceFactor: workerEta?.paceFactor ?? _etaCalculator?.paceFactor ?? 1.0,
       nowMs: nowMs,
       fusedSource: fusedSource,
     );
@@ -964,7 +1158,8 @@ class _NavigationScreenState extends ConsumerState<NavigationScreen>
       if (!_showingAccessRoute && _offTrailNotifier.value != null) {
         _clearOffTrailState();
       }
-      _etaNotifier.value = _etaCalculator?.compute(effectiveAlongM);
+      _etaNotifier.value =
+          workerEta ?? _etaCalculator?.compute(effectiveAlongM);
       return;
     }
 
@@ -980,12 +1175,16 @@ class _NavigationScreenState extends ConsumerState<NavigationScreen>
       if (_offTrailNotifier.value != null) {
         _clearOffTrailState();
       }
-      _etaCalculator?.recordProgress(effectiveAlongM, DateTime.now());
-      _etaNotifier.value = _etaCalculator?.compute(effectiveAlongM);
+      if (workerEta == null) {
+        _etaCalculator?.recordProgress(effectiveAlongM, DateTime.now());
+      }
+      _etaNotifier.value =
+          workerEta ?? _etaCalculator?.compute(effectiveAlongM);
       return;
     }
 
-    if (!_demFallbackPrefetchStarted &&
+    if (_terrainWorker == null &&
+        !_demFallbackPrefetchStarted &&
         ref.read(onlineStatusProvider) &&
         _demGrid.sampleElevation(fix.lat, fix.lon) == null) {
       _demFallbackPrefetchStarted = true;
@@ -1018,21 +1217,24 @@ class _NavigationScreenState extends ConsumerState<NavigationScreen>
       _recomputeOffTrailReroute(fix, effectiveAlongM);
     } else {
       final active = _offTrailNotifier.value;
-      _etaNotifier.value = _etaCalculator?.compute(
-        effectiveAlongM,
-        now: now,
-        offTrailDistanceM: active?.distanceM,
-        offTrailDurationSec: active?.estimatedSeconds,
-        offTrailAscentM: active?.ascentM,
-        rejoinAlongTrackM: active?.rejoinAlongTrackM,
-      );
+      _etaNotifier.value =
+          workerEta ??
+          _etaCalculator?.compute(
+            effectiveAlongM,
+            now: now,
+            offTrailDistanceM: active?.distanceM,
+            offTrailDurationSec: active?.estimatedSeconds,
+            offTrailAscentM: active?.ascentM,
+            rejoinAlongTrackM: active?.rejoinAlongTrackM,
+          );
     }
   }
 
   void _clearOffTrailState() {
     _valhallaRerouteCancelToken?.cancel('cleared');
     _valhallaRerouteCancelToken = null;
-    _rerouteGeneration++;
+    final nextGen = ++_rerouteGeneration;
+    _terrainWorker?.cancelActiveReroutes(nextGen);
     _offTrailNotifier.value = null;
     _offTrailChartSpots.value = null;
     _lastRerouteCalcPos = null;
@@ -1040,6 +1242,26 @@ class _NavigationScreenState extends ConsumerState<NavigationScreen>
     _lastRerouteCalcAt = null;
     _demFallbackPrefetchStarted = false;
     _pushOffTrailSource(null);
+  }
+
+  void _applyWorkerRerouteResponse(WorkerRerouteResponse resp) {
+    final alongM = _lastMatchedAlongTrackM ?? 0.0;
+    _lastRerouteCalcMode = resp.result.mode;
+    _lastRerouteCalcAt = DateTime.now();
+    _offTrailNotifier.value = resp.result;
+    _offTrailChartSpots.value = _buildOffTrailChartSpots(alongM, resp.result);
+    if (resp.eta != null) {
+      _etaNotifier.value = resp.eta;
+    }
+    if (_uiVisible) {
+      final style = _controller?.style ?? _loadedStyle;
+      style
+          ?.updateGeoJsonSource(
+            id: 'off-trail-reroute',
+            data: resp.geoJsonString,
+          )
+          .catchError((Object _) {});
+    }
   }
 
   void _applyRerouteResult(
@@ -1071,7 +1293,39 @@ class _NavigationScreenState extends ConsumerState<NavigationScreen>
     _valhallaRerouteCancelToken?.cancel('superseded');
     _valhallaRerouteCancelToken = null;
     final myGen = ++_rerouteGeneration;
+    _lastRerouteCalcPos = userPos;
+    _lastRerouteCalcMode = _offTrailMode;
+    _lastRerouteCalcAt = DateTime.now();
 
+    final worker = _terrainWorker;
+    final tryValhalla =
+        ref.read(onlineStatusProvider) && (_liveService?.isConfigured ?? false);
+    if (worker != null && !worker.isDisposed) {
+      unawaited(
+        worker
+            .computeReroute(
+              generation: myGen,
+              userPos: userPos,
+              userEleM: _lastKnownAltitudeM,
+              alongTrackM: alongTrackM,
+              mode: _offTrailMode,
+              localeCode: _localeCode,
+              tryValhalla: tryValhalla,
+            )
+            .then((resp) {
+              if (!mounted ||
+                  resp == null ||
+                  myGen != _rerouteGeneration ||
+                  _farPreviewDistanceM.value != null) {
+                return;
+              }
+              _applyWorkerRerouteResponse(resp);
+            }),
+      );
+      return;
+    }
+
+    // Synchronous fallback only during the first ~40ms before worker spawn resolves.
     final localReroute = OffTrailRouter.compute(
       userPos: userPos,
       userEleM: _lastKnownAltitudeM,
@@ -1081,43 +1335,9 @@ class _NavigationScreenState extends ConsumerState<NavigationScreen>
       mode: _offTrailMode,
       localeCode: _localeCode,
       isCycling: _etaCalculator?.isCycling ?? false,
+      precomputedEta: _etaCalculator,
     );
     _applyRerouteResult(localReroute, userPos, alongTrackM);
-
-    if (localReroute == null ||
-        !ref.read(onlineStatusProvider) ||
-        !(_liveService?.isConfigured ?? false)) {
-      return;
-    }
-
-    final token = CancelToken();
-    _valhallaRerouteCancelToken = token;
-    unawaited(
-      OffTrailRouter.computeHybridWithValhalla(
-        dio: ref.read(apiProvider),
-        userPos: userPos,
-        userEleM: _lastKnownAltitudeM,
-        trailPoints: _navTrackPoints,
-        lastAlongTrackM: alongTrackM,
-        sampler: _demGrid.sampleElevation,
-        mode: _offTrailMode,
-        localeCode: _localeCode,
-        isCycling: _etaCalculator?.isCycling ?? false,
-        cancelToken: token,
-      ).then((hybrid) {
-        if (!mounted ||
-            myGen != _rerouteGeneration ||
-            _farPreviewDistanceM.value != null ||
-            hybrid == null) {
-          return;
-        }
-        _applyRerouteResult(
-          hybrid,
-          userPos,
-          _lastMatchedAlongTrackM ?? alongTrackM,
-        );
-      }).catchError((Object _) {}),
-    );
   }
 
   Future<void> _toggleFarPreviewAccessRoute() async {
@@ -1332,7 +1552,12 @@ class _NavigationScreenState extends ConsumerState<NavigationScreen>
   void _onLiveCommunityFix(ml.Geographic fix, double? usableAlt) {
     if (!_firstHeartbeatSent) {
       _firstHeartbeatSent = true;
-      _sendLiveHeartbeatTick(explicitPos: fix, explicitAlt: usableAlt);
+      unawaited(
+        _radioScheduler.triggerImmediateBurst(
+          reason: 'first_fix',
+          forceHeartbeat: true,
+        ),
+      );
       if (_uiVisible) {
         _connectLiveSse(fix);
       }
@@ -1351,8 +1576,9 @@ class _NavigationScreenState extends ConsumerState<NavigationScreen>
       final elapsedBleMs = lastBleAt == null
           ? 999999
           : now.difference(lastBleAt).inMilliseconds;
+      final stationaryBleMs = _powerEngine.isStationarySleep ? 120000 : 15000;
       if ((movedBleM >= 5.0 && elapsedBleMs >= 3000) ||
-          elapsedBleMs >= 15000) {
+          elapsedBleMs >= stationaryBleMs) {
         _lastBleGroupBroadcastPos = fix;
         _lastBleGroupBroadcastAt = now;
         final rawSelf = _lastRawSelfFix;
@@ -1502,36 +1728,109 @@ class _NavigationScreenState extends ConsumerState<NavigationScreen>
     return null;
   }
 
-  void _sendLiveHeartbeatTick({
-    ml.Geographic? explicitPos,
-    double? explicitAlt,
-  }) {
+  void _syncSosPowerOverride() {
+    final sosEmergency =
+        _myActiveSos.value != null || _activeRespondingSos() != null;
+    _powerEngine.setSosActive(sosEmergency);
+  }
+
+  Future<bool> _executeCoalescedRadioBurst(RadioBurstContext ctx) async {
     final service = _liveService;
-    if (service == null || !service.isConfigured) return;
-    final pos = explicitPos ?? _currentGeoFix();
-    if (pos == null) return;
-    unawaited(
-      service
-          .sendHeartbeat(
-            trailId: widget.isRecording || widget.id.isEmpty ? null : widget.id,
-            lat: pos.lat,
-            lon: pos.lon,
-            ele: explicitAlt ?? _lastKnownAltitudeM,
-            inNavigation: true,
-            isRo: _isRo,
-          )
-          .then((summary) {
-            if (!mounted || summary == null) return;
-            _applyLiveSummary(summary);
-            unawaited(_flushSosOutboxAndRelayQueue());
-          })
-          .catchError((Object _) {}),
+    if (service == null || !service.isConfigured) return false;
+    if (!ref.read(onlineStatusProvider) && !ctx.sosActive) return false;
+
+    var anySucceeded = false;
+    final tasks = <Future<void>>[];
+
+    tasks.add(
+      _flushSosOutboxAndRelayQueue().then((_) {
+        anySucceeded = true;
+      }).catchError((Object _) {}),
     );
+
+    final session = _groupSession.value;
+    final pos = _currentGeoFix();
+    if (session != null && !session.isOfflineBleGroup && pos != null) {
+      final rawSelf = _lastRawSelfFix;
+      final acc =
+          rawSelf?.accuracy ?? (_animAccuracy > 0 ? _animAccuracy : 15.0);
+      final sseLive = _liveSseSub != null && _uiVisible;
+      tasks.add(
+        service
+            .pingGroup(
+              code: session.code,
+              lat: rawSelf?.lat ?? pos.lat,
+              lon: rawSelf?.lon ?? pos.lon,
+              ele: _lastKnownAltitudeM,
+              accuracy: acc,
+              heading: _lastRawHeading ?? _smoothedHeading,
+              speed: _lastRawSpeed,
+              alongTrackM: _lastMatchedAlongTrackM,
+              inNavigation: true,
+              stationary: ctx.isStationary,
+              ackOnly: sseLive,
+            )
+            .then((updated) {
+              anySucceeded = true;
+              if (!mounted) return;
+              final cur = _groupSession.value;
+              if (cur == null || cur.code != updated.code) return;
+              if (!updated.hasMembersSnapshot) return; // ?ack=1 fast 200 OK
+              final nextSelfId = updated.selfMemberId.isNotEmpty
+                  ? updated.selfMemberId
+                  : cur.selfMemberId;
+              _groupSession.value = cur.copyWith(
+                selfMemberId: nextSelfId,
+                expiresAt: updated.expiresAt ?? cur.expiresAt,
+                members: _mergeGroupMembersWithBle(
+                  serverMembers: updated.members,
+                  selfMemberId: nextSelfId,
+                ),
+              );
+            })
+            .catchError((Object _) {}),
+      );
+    }
+
+    if (ctx.includeHeartbeat && pos != null) {
+      tasks.add(
+        service
+            .sendHeartbeat(
+              trailId: widget.isRecording || widget.id.isEmpty
+                  ? null
+                  : widget.id,
+              lat: pos.lat,
+              lon: pos.lon,
+              ele: _lastKnownAltitudeM,
+              inNavigation: true,
+              stationary: ctx.isStationary,
+              stateHash: _lastHeartbeatStateHash,
+              isRo: _isRo,
+            )
+            .then((summary) {
+              anySucceeded = true;
+              if (!mounted || summary == null) return;
+              if (summary.stateHash != null && summary.stateHash!.isNotEmpty) {
+                _lastHeartbeatStateHash = summary.stateHash;
+              }
+              if (summary.unchanged) {
+                _activeHikers30m.value = summary.activeHikers30m;
+              } else {
+                _applyLiveSummary(summary);
+              }
+            })
+            .catchError((Object _) {}),
+      );
+    }
+
+    await Future.wait(tasks);
+    return anySucceeded;
   }
 
   void _connectLiveSse(ml.Geographic pos) {
     final service = _liveService;
     if (service == null || !service.isConfigured || !_uiVisible) return;
+    if (!ref.read(onlineStatusProvider)) return;
     _disconnectLiveSse();
     unawaited(_flushSosOutboxAndRelayQueue());
     final cancelToken = CancelToken();
@@ -1542,6 +1841,7 @@ class _NavigationScreenState extends ConsumerState<NavigationScreen>
           lon: pos.lon,
           trailId: widget.isRecording || widget.id.isEmpty ? null : widget.id,
           groupCode: _groupSession.value?.code,
+          lastEventId: _lastLiveSseEventId,
           cancelToken: cancelToken,
           isRo: _isRo,
         )
@@ -1566,8 +1866,10 @@ class _NavigationScreenState extends ConsumerState<NavigationScreen>
 
   void _scheduleLiveSseReconnect() {
     if (!mounted || !_uiVisible) return;
+    if (!ref.read(onlineStatusProvider)) return;
     if (_liveSseReconnectTimer?.isActive ?? false) return;
-    _liveSseReconnectTimer = Timer(const Duration(seconds: 10), () {
+    final delay = _radioScheduler.nextSseReconnectDelay(++_sseFailureCount);
+    _liveSseReconnectTimer = Timer(delay, () {
       if (!mounted || !_uiVisible) return;
       final pos = _currentGeoFix();
       if (pos != null) {
@@ -1652,6 +1954,40 @@ class _NavigationScreenState extends ConsumerState<NavigationScreen>
 
   void _handleLiveSseEvent(TrailLiveSseEvent event) {
     if (!mounted) return;
+    if (event.eventId != null && event.eventId!.isNotEmpty) {
+      _lastLiveSseEventId = event.eventId;
+      _sseFailureCount = 0;
+    }
+    if (event.type == TrailLiveSseEvent.resyncRequired) {
+      _lastHeartbeatStateHash = null;
+      unawaited(
+        _radioScheduler.triggerImmediateBurst(
+          reason: 'sse_resync',
+          forceHeartbeat: true,
+        ),
+      );
+      final session = _groupSession.value;
+      final service = _liveService;
+      if (session != null &&
+          !session.isOfflineBleGroup &&
+          service != null &&
+          service.isConfigured) {
+        unawaited(
+          service.getGroup(session.code).then((fresh) {
+            if (!mounted) return;
+            final cur = _groupSession.value;
+            if (cur == null || cur.code != fresh.code) return;
+            _groupSession.value = cur.copyWith(
+              members: _mergeGroupMembersWithBle(
+                serverMembers: fresh.members,
+                selfMemberId: cur.selfMemberId,
+              ),
+            );
+          }).catchError((Object _) {}),
+        );
+      }
+      return;
+    }
     final now = DateTime.now();
     final incomingReport = event.report;
     if (incomingReport != null) {
@@ -1840,74 +2176,22 @@ class _NavigationScreenState extends ConsumerState<NavigationScreen>
   }
 
   void _syncGroupPingTimer() {
-    _groupPingTimer?.cancel();
-    _groupPingTimer = null;
     final session = _groupSession.value;
     _configureBleForActiveGroup(session);
-    if (session != null) {
-      _sendGroupPingTick();
-      _groupPingTimer = Timer.periodic(
-        const Duration(seconds: 6),
-        (_) => _sendGroupPingTick(),
-      );
-    } else {
+    if (session == null) {
       _selectedGroupMember.value = null;
       _lastCoLocatedPeerIds = <String>{};
+    }
+    _radioScheduler.updateState(hasActiveGroup: session != null);
+    if (session != null && !session.isOfflineBleGroup) {
+      unawaited(
+        _radioScheduler.triggerImmediateBurst(reason: 'group_session_changed'),
+      );
     }
     final pos = _currentGeoFix();
     if (pos != null && _uiVisible) {
       _connectLiveSse(pos);
     }
-  }
-
-  void _sendGroupPingTick() {
-    final session = _groupSession.value;
-    final service = _liveService;
-    if (session == null || service == null || !service.isConfigured) return;
-
-    if (session.isOfflineBleGroup) {
-      unawaited(_flushSosOutboxAndRelayQueue());
-      return;
-    }
-
-    final rawSelf = _lastRawSelfFix;
-    final fallbackPos = _currentGeoFix();
-    final lat = rawSelf?.lat ?? fallbackPos?.lat;
-    final lon = rawSelf?.lon ?? fallbackPos?.lon;
-    if (lat == null || lon == null) return;
-
-    final acc = rawSelf?.accuracy ?? (_animAccuracy > 0 ? _animAccuracy : 15.0);
-    unawaited(
-      service
-          .pingGroup(
-            code: session.code,
-            lat: lat,
-            lon: lon,
-            ele: _lastKnownAltitudeM,
-            accuracy: acc,
-            heading: _lastRawHeading ?? _smoothedHeading,
-            speed: _lastRawSpeed,
-            alongTrackM: _lastMatchedAlongTrackM,
-            inNavigation: true,
-          )
-          .then((updated) {
-            if (!mounted) return;
-            final cur = _groupSession.value;
-            if (cur == null || cur.code != updated.code) return;
-            final nextSelfId = updated.selfMemberId.isNotEmpty
-                ? updated.selfMemberId
-                : cur.selfMemberId;
-            _groupSession.value = cur.copyWith(
-              selfMemberId: nextSelfId,
-              expiresAt: updated.expiresAt ?? cur.expiresAt,
-              members: _mergeGroupMembersWithBle(
-                serverMembers: updated.members,
-                selfMemberId: nextSelfId,
-              ),
-            );
-          })
-          .catchError((Object _) {}),
-    );
   }
 
   Future<GroupSessionModel> _buildOfflineBleGroupSession({
@@ -3163,31 +3447,49 @@ class _NavigationScreenState extends ConsumerState<NavigationScreen>
         : localizations.location_tracking_notification_text_navigating(name);
   }
 
-  /// Subscribes to the device orientation sensor for heading — decoupled from
-  /// GPS so the marker/map keep rotating when the user turns in place (GPS
-  /// `heading` only updates while moving). Same source `flutter_map_location_
-  /// marker` uses. Foreground-only: paused/resumed alongside [_foregroundSub].
-  void _startHeadingSub() {
-    _headingSub?.cancel();
-    if (!RotationSensor.isPlatformSupported) return;
-    // ~15 Hz — always this file's documented intent, but `uiInterval` is
-    // 16.7ms (~60 Hz on most devices): 4× the sensor callbacks and marker
-    // publishes this screen was designed for, for the whole session. 66ms
-    // is plenty: the low-pass smoothing plus [_bearingFollowTicker]'s
-    // per-frame easing already decouple perceived rotation smoothness from
-    // the sensor cadence.
-    RotationSensor.samplingPeriod = const Duration(milliseconds: 66);
-    RotationSensor.coordinateSystem = CoordinateSystem.display();
-    _headingSub = RotationSensor.orientationStream.listen(
-      (event) {
-        // azimuth: radians, 0 = north, clockwise — same convention as the
-        // MapLibre camera bearing. Package already normalises it to 0–2π.
-        _onHeading(event.eulerAngles.azimuth * 180 / pi);
-      },
-      onError: (Object error) {
-        debugPrint('NavigationScreen: heading sensor error — $error');
-      },
+  void _syncCompassSamplingRate() {
+    final rateCfg = resolveCompassRatePolicy(
+      uiVisible: _uiVisible,
+      headingUp: _headingUp,
+      isStationary: _powerEngine.isStationarySleep,
+      expeditionMode: _powerEngine.effectiveExpeditionMode,
     );
+    _compassRateCfg = rateCfg;
+    final desired = rateCfg.sensorEnabled ? rateCfg.samplingPeriod : null;
+    if (desired == _appliedCompassPeriod &&
+        (desired == null) == (_headingSub == null)) {
+      return;
+    }
+    _appliedCompassPeriod = desired;
+    _headingSub?.cancel();
+    _headingSub = null;
+
+    if (desired != null && RotationSensor.isPlatformSupported) {
+      RotationSensor.samplingPeriod = desired;
+      RotationSensor.coordinateSystem = CoordinateSystem.display();
+      _headingSub = RotationSensor.orientationStream.listen(
+        (event) => _onHeading(event.eulerAngles.azimuth * 180 / pi),
+        onError: (Object error) {
+          debugPrint('NavigationScreen: heading sensor error — $error');
+        },
+      );
+    }
+    _syncBearingFollowTicker();
+  }
+
+  void _syncCoasterTimer() {
+    if (widget.isRecording) return;
+    final shouldTick =
+        _uiVisible && !_frozen && !_powerEngine.isStationarySleep;
+    if (shouldTick && _coasterTimer == null) {
+      _coasterTimer = Timer.periodic(
+        const Duration(seconds: 1),
+        (_) => _onCoasterTick(),
+      );
+    } else if (!shouldTick && _coasterTimer != null) {
+      _coasterTimer?.cancel();
+      _coasterTimer = null;
+    }
   }
 
   /// Records a new raw GPS fix as the position-tween target and (re)starts the
@@ -3233,15 +3535,13 @@ class _NavigationScreenState extends ConsumerState<NavigationScreen>
     _smoothedHeading = previous == null
         ? normalized
         : _lerpBearing(previous, normalized, _kHeadingSmoothingAlpha);
-    // A rotation under ~0.3° is invisible at marker size — skip the
-    // republish (and its marker rebuild) while the heading is effectively
-    // still. Position changes republish independently via the tween, so this
-    // can never starve position updates.
     if (previous != null &&
-        _bearingDelta(previous, _smoothedHeading!).abs() < 0.3) {
+        _bearingDelta(previous, _smoothedHeading!).abs() <
+            _compassRateCfg.deadbandDeg) {
       return;
     }
-    _publishMarker();
+    // Updates ONLY the isolated LocationPuck cone — zero ml.WidgetLayer rebuild!
+    _headingNotifier.value = _smoothedHeading;
   }
 
   /// Per-frame tick for [_bearingFollowTicker] — eases [_mapBearing] toward
@@ -3342,7 +3642,7 @@ class _NavigationScreenState extends ConsumerState<NavigationScreen>
     _lastLat = lerpDouble(_animStartLat, targetLat, _positionCurve.value)!;
     _lastLon = lerpDouble(_animStartLon, targetLon, _positionCurve.value)!;
     _publishMarker();
-    _pushCamera();
+    _pushCamera(force: _positionAnimController.value >= 1.0);
   }
 
   /// Advances the bearing-transition tween, driving the same explicit
@@ -3353,7 +3653,7 @@ class _NavigationScreenState extends ConsumerState<NavigationScreen>
       _bearingTransitionTarget,
       _bearingTransitionCurve.value,
     );
-    _pushCamera();
+    _pushCamera(force: _bearingTransitionController.value >= 1.0);
   }
 
   /// Smoothly animates [_mapBearing] to [target] — used for the two discrete
@@ -3367,11 +3667,17 @@ class _NavigationScreenState extends ConsumerState<NavigationScreen>
   /// Pushes an explicit center+bearing to the map when following — never a
   /// partial update, since this MapLibre version doesn't reliably treat an
   /// omitted field as "unchanged" (see [_mapBearing]'s doc comment).
-  void _pushCamera() {
+  void _pushCamera({bool force = false}) {
     if (!_followEnabled) return;
     final lat = _lastLat;
     final lon = _lastLon;
     if (lat == null || lon == null) return;
+    final nowElapsed = Duration(
+      microseconds: DateTime.now().microsecondsSinceEpoch,
+    );
+    if (!_cameraPushThrottle.shouldPush(nowElapsed, isFinalFrame: force)) {
+      return;
+    }
     _controller?.moveCamera(
       center: ml.Geographic(lat: lat, lon: lon),
       bearing: _mapBearing,
@@ -3383,9 +3689,11 @@ class _NavigationScreenState extends ConsumerState<NavigationScreen>
     switch (state) {
       case AppLifecycleState.resumed:
         _uiVisible = true;
+        _powerEngine.setUiForeground(true);
+        _radioScheduler.updateState(uiForeground: true);
         unawaited(_positionSource.setForeground(true));
-        _startHeadingSub();
-        _syncBearingFollowTicker();
+        _syncCompassSamplingRate();
+        _syncCoasterTimer();
         // Catch the paused native map up on everything recorded while
         // backgrounded — per-fix pushes are skipped while !_uiVisible.
         _pushBreadcrumbSources(ref.read(_navProviderInstance).breadcrumb);
@@ -3393,7 +3701,12 @@ class _NavigationScreenState extends ConsumerState<NavigationScreen>
           _pushOffTrailSource(_offTrailNotifier.value);
         }
         _pushRescueSource(_rescueRouteNotifier.value);
-        _sendLiveHeartbeatTick();
+        unawaited(
+          _radioScheduler.triggerImmediateBurst(
+            reason: 'app_resumed',
+            forceHeartbeat: true,
+          ),
+        );
         final curFix = _currentGeoFix();
         if (curFix != null && _firstHeartbeatSent) {
           _connectLiveSse(curFix);
@@ -3409,10 +3722,11 @@ class _NavigationScreenState extends ConsumerState<NavigationScreen>
       case AppLifecycleState.detached:
       case AppLifecycleState.hidden:
         _uiVisible = false;
+        _powerEngine.setUiForeground(false);
+        _radioScheduler.updateState(uiForeground: false);
         unawaited(_positionSource.setForeground(false));
-        _headingSub?.cancel();
-        _headingSub = null;
-        _syncBearingFollowTicker();
+        _syncCompassSamplingRate();
+        _syncCoasterTimer();
         _disconnectLiveSse();
     }
   }
@@ -3420,14 +3734,22 @@ class _NavigationScreenState extends ConsumerState<NavigationScreen>
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
+    _hibernationContainer
+        ?.read(navSessionHibernationProvider.notifier)
+        .exitNavigationSession();
+    _myActiveSos.removeListener(_syncSosPowerOverride);
+    _nearbySosAlerts.removeListener(_syncSosPowerOverride);
     _sub?.cancel();
-    _movingSub?.cancel();
     _headingSub?.cancel();
+    _motionSub?.cancel();
+    unawaited(_motionChannel.dispose());
+    _powerWatchdogTimer?.cancel();
+    _powerEngine.dispose();
+    _radioScheduler.dispose();
+    unawaited(_terrainWorker?.dispose());
+    unawaited(_demGrid.closeArchives());
     _persistTimer?.cancel();
-    _liveHeartbeatTimer?.cancel();
     _coasterTimer?.cancel();
-    _groupPingTimer?.cancel();
-    _sosOutboxFlushTimer?.cancel();
     for (final s in _bleSubscriptions) {
       s.cancel();
     }
@@ -3460,6 +3782,8 @@ class _NavigationScreenState extends ConsumerState<NavigationScreen>
           ? _positionSource.detach()
           : _positionSource.dispose(),
     );
+    _headingNotifier.dispose();
+    _powerStateNotifier.dispose();
     _currentPosition.dispose();
     _liveTrackMeters.dispose();
     _etaNotifier.dispose();
@@ -3487,9 +3811,28 @@ class _NavigationScreenState extends ConsumerState<NavigationScreen>
   /// breadcrumb to the single active-session row, updating (never
   /// duplicating) the row via [_activeRowObxId]. Best-effort — see
   /// `active_navigation_store`'s swallow-all semantics.
-  void _persistNow() {
+  void _persistNow({bool force = false}) {
     final navState = ref.read(_navProviderInstance);
     final stats = ref.read(_statsProviderInstance);
+    final count = navState.breadcrumb.length;
+    final elapsedSec = stats.elapsed.inSeconds;
+
+    if (!force &&
+        count == _lastPersistedPointCount &&
+        elapsedSec == _lastPersistedElapsedSec &&
+        stats.isPaused == _lastPersistedPaused) {
+      return; // Zero disk/ObjectBox I/O while resting at cabană!
+    }
+
+    _lastPersistedPointCount = count;
+    _lastPersistedElapsedSec = elapsedSec;
+    _lastPersistedPaused = stats.isPaused;
+
+    final slab = _breadcrumbSlab;
+    final usedSlab = slab != null;
+    if (usedSlab) {
+      slab.appendFromBreadcrumb(navState.breadcrumb);
+    }
 
     final entity = ActiveNavigationEntity(
       obxId: _activeRowObxId,
@@ -3500,26 +3843,30 @@ class _NavigationScreenState extends ConsumerState<NavigationScreen>
       recordingCosting: widget.isRecording ? _recordingCosting : null,
       navResponseJson: _sessionNavJson,
       currentManeuverIndex: navState.currentManeuverIndex,
-      breadcrumbPolyline: PolylineUtil.encode(
-        navState.breadcrumb
-            .map((wpt) => ml.Geographic(lon: wpt.lon!, lat: wpt.lat!))
-            .toList(),
-      ),
-      // ele/time can be null for a point rehydrated from a resumed session
-      // whose persisted elevations/timestampsUtc were null or short (see
-      // initState) — default rather than force-unwrap so a resumed session
-      // can always be persisted again.
-      elevations: navState.breadcrumb.map((wpt) => wpt.ele ?? 0.0).toList(),
-      timestampsUtc: navState.breadcrumb
-          .map(
-            (wpt) =>
-                (wpt.time ?? DateTime.now()).toUtc().millisecondsSinceEpoch,
-          )
-          .toList(),
+      // When BreadcrumbSlabStore is active, omit O(N) polyline + list copies!
+      breadcrumbPolyline: usedSlab
+          ? ''
+          : PolylineUtil.encode(
+              navState.breadcrumb
+                  .map((wpt) => ml.Geographic(lon: wpt.lon!, lat: wpt.lat!))
+                  .toList(),
+            ),
+      elevations: usedSlab
+          ? null
+          : navState.breadcrumb.map((wpt) => wpt.ele ?? 0.0).toList(),
+      timestampsUtc: usedSlab
+          ? null
+          : navState.breadcrumb
+                .map(
+                  (wpt) => (wpt.time ?? DateTime.now())
+                      .toUtc()
+                      .millisecondsSinceEpoch,
+                )
+                .toList(),
       distanceMeters: stats.distanceMeters,
       elevationGainMeters: stats.elevationGainMeters,
       elevationLossMeters: stats.elevationLossMeters,
-      currentElapsedSeconds: stats.elapsed.inSeconds,
+      currentElapsedSeconds: elapsedSec,
       pausedAccumSeconds: _statsNotifier.pausedAccum.inSeconds,
       isPaused: stats.isPaused,
       updatedAtUtc: DateTime.now().toUtc(),
@@ -3577,7 +3924,6 @@ class _NavigationScreenState extends ConsumerState<NavigationScreen>
       // The full recorded breadcrumb, times and all, doubling as the
       // draft's original track.
       final gpx = buildGpxFromPoints(navState.breadcrumb);
-      final recordedXml = await compute(serializeGpxToXml, gpx);
 
       // For a real trail, keep its own category/subcategory. For a trail-less
       // recording, derive a (sub)category from the chosen travel profile
@@ -3625,7 +3971,9 @@ class _NavigationScreenState extends ConsumerState<NavigationScreen>
         subcategory: subcategory,
         movingDuration: navStats.elapsed,
       );
-      final trail = draft.copyWith(originalGpxData: recordedXml);
+      final trail = draft.copyWith(
+        originalGpxData: draft.expand?.gpxData ?? '',
+      );
 
       // Durability ordering: the draft row is written BEFORE the session row
       // is released, so an OS kill in between can never lose the recording.
@@ -3655,6 +4003,7 @@ class _NavigationScreenState extends ConsumerState<NavigationScreen>
           // so a failed draft write leaves the timer running.
           _persistTimer?.cancel();
           active_nav.clear(_store);
+          _breadcrumbSlab?.clear();
         },
       );
 
@@ -4204,6 +4553,7 @@ class _NavigationScreenState extends ConsumerState<NavigationScreen>
                         ),
                         _LocationMarkerLayer(
                           position: _currentPosition,
+                          headingListenable: _headingNotifier,
                           headingUp: _headingUp,
                           mapBearing: _mapBearing,
                         ),
@@ -4248,6 +4598,7 @@ class _NavigationScreenState extends ConsumerState<NavigationScreen>
                                       _headingUp = !_headingUp;
                                       if (_headingUp) _followEnabled = true;
                                     });
+                                    _syncCompassSamplingRate();
                                     _syncBearingFollowTicker();
                                     // Animates via [_mapBearing]/[_pushCamera]
                                     // rather than a native `animateCamera` —
@@ -4491,6 +4842,7 @@ class _NavigationScreenState extends ConsumerState<NavigationScreen>
           // Deliberate exit — best-effort clear so no stale resume prompt
           // appears on next launch.
           active_nav.clear(_store);
+          _breadcrumbSlab?.clear();
           if (context.mounted) {
             context.pop();
           }
@@ -4605,10 +4957,10 @@ class _NavigationScreenState extends ConsumerState<NavigationScreen>
     return Row(
       crossAxisAlignment: CrossAxisAlignment.center,
       children: [
-        ValueListenableBuilder<LocationMarkerPosition?>(
-          valueListenable: _currentPosition,
-          builder: (context, markerPos, _) {
-            final heading = markerPos?.heading ?? _smoothedHeading ?? 0.0;
+        ValueListenableBuilder<double?>(
+          valueListenable: _headingNotifier,
+          builder: (context, liveHeading, _) {
+            final heading = liveHeading ?? _smoothedHeading ?? 0.0;
             final relDeg = shortestAngleDelta(
               heading,
               reroute.initialBearingDeg,
@@ -4985,35 +5337,72 @@ class _NavigationScreenState extends ConsumerState<NavigationScreen>
     String unit,
   ) {
     final theme = Theme.of(context);
-    return ValueListenableBuilder<double?>(
-      valueListenable: _farPreviewDistanceM,
-      builder: (context, farDist, _) {
-        return ValueListenableBuilder<OffTrailRerouteResult?>(
-          valueListenable: _offTrailNotifier,
-          builder: (context, reroute, _) {
-            return ValueListenableBuilder<GpsSignalState>(
-              valueListenable: _gpsSignalState,
-              builder: (context, sigState, _) {
-                return ValueListenableBuilder<double>(
-                  valueListenable: _effectiveGpsAccuracy,
-                  builder: (context, effAcc, _) {
-                    final hasGpsChip =
-                        sigState == GpsSignalState.degraded ||
-                        sigState == GpsSignalState.coasting ||
-                        sigState == GpsSignalState.cooperative;
-
-                    if (farDist == null && reroute == null && !hasGpsChip) {
-                      return const SizedBox.shrink();
-                    }
-
-                    return Padding(
-                      padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
-                      child: Wrap(
-                        spacing: 8,
-                        runSpacing: 6,
-                        crossAxisAlignment: WrapCrossAlignment.center,
-                        children: [
-                          if (farDist != null) ...[
+    final expeditionEnabled = ref.watch(expeditionBatteryModeProvider);
+    return ValueListenableBuilder<MountainPowerState>(
+      valueListenable: _powerStateNotifier,
+      builder: (context, powerState, _) {
+        final isCabanaSleep =
+            powerState == MountainPowerState.stationaryCabanaSleep;
+        return ValueListenableBuilder<double?>(
+          valueListenable: _farPreviewDistanceM,
+          builder: (context, farDist, _) {
+            return ValueListenableBuilder<OffTrailRerouteResult?>(
+              valueListenable: _offTrailNotifier,
+              builder: (context, reroute, _) {
+                return ValueListenableBuilder<GpsSignalState>(
+                  valueListenable: _gpsSignalState,
+                  builder: (context, sigState, _) {
+                    return ValueListenableBuilder<double>(
+                      valueListenable: _effectiveGpsAccuracy,
+                      builder: (context, effAcc, _) {
+                        return Padding(
+                          padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
+                          child: Wrap(
+                            spacing: 8,
+                            runSpacing: 6,
+                            crossAxisAlignment: WrapCrossAlignment.center,
+                            children: [
+                              if (isCabanaSleep)
+                                Container(
+                                  key: const ValueKey(
+                                    'nav-stationary-sleep-pill',
+                                  ),
+                                  padding: const EdgeInsets.symmetric(
+                                    horizontal: 10,
+                                    vertical: 5,
+                                  ),
+                                  decoration: BoxDecoration(
+                                    color: theme.colorScheme.primaryContainer
+                                        .withValues(alpha: 0.85),
+                                    borderRadius: BorderRadius.circular(12),
+                                  ),
+                                  child: Text(
+                                    _isRo
+                                        ? '💤 Popas activ · GPS în repaus (repornește la primii pași)'
+                                        : '💤 Rest sleep · GPS paused (wakes on first step)',
+                                    style: theme.textTheme.labelSmall?.copyWith(
+                                      fontWeight: FontWeight.w700,
+                                    ),
+                                  ),
+                                ),
+                              _buildContextModeChip(
+                                context,
+                                key: const ValueKey('nav-expedition-mode-chip'),
+                                label: _isRo
+                                    ? '🔋 Mod Expediție'
+                                    : '🔋 Expedition Mode',
+                                selected: expeditionEnabled,
+                                onTap: () {
+                                  unawaited(
+                                    ref
+                                        .read(localSettingsProvider.notifier)
+                                        .setExpeditionBatteryMode(
+                                          !expeditionEnabled,
+                                        ),
+                                  );
+                                },
+                              ),
+                              if (farDist != null) ...[
                             Container(
                               padding: const EdgeInsets.symmetric(
                                 horizontal: 10,
@@ -5202,6 +5591,8 @@ class _NavigationScreenState extends ConsumerState<NavigationScreen>
             );
           },
         );
+      },
+    );
       },
     );
   }
@@ -5783,35 +6174,116 @@ class _NavigationScreenState extends ConsumerState<NavigationScreen>
   }
 }
 
+class _RelativeConeHeadingListenable extends ValueNotifier<double?> {
+  _RelativeConeHeadingListenable(
+    this._source, {
+    required bool headingUp,
+    required double effectiveBearing,
+  }) : _headingUp = headingUp,
+       _effectiveBearing = effectiveBearing,
+       super(_compute(_source.value, headingUp, effectiveBearing)) {
+    _source.addListener(_onSourceChanged);
+  }
+
+  final ValueListenable<double?> _source;
+  bool _headingUp;
+  double _effectiveBearing;
+
+  static double? _compute(
+    double? raw,
+    bool headingUp,
+    double effectiveBearing,
+  ) {
+    if (headingUp) return 0.0;
+    if (raw == null || !raw.isFinite) return null;
+    return normalizeHeading(raw - effectiveBearing);
+  }
+
+  void updateCamera({required bool headingUp, required double effectiveBearing}) {
+    if (_headingUp == headingUp &&
+        (_effectiveBearing - effectiveBearing).abs() < 0.25) {
+      return;
+    }
+    _headingUp = headingUp;
+    _effectiveBearing = effectiveBearing;
+    value = _compute(_source.value, _headingUp, _effectiveBearing);
+  }
+
+  void _onSourceChanged() {
+    value = _compute(_source.value, _headingUp, _effectiveBearing);
+  }
+
+  @override
+  void dispose() {
+    _source.removeListener(_onSourceChanged);
+    super.dispose();
+  }
+}
+
 /// Custom location marker replacing the native MapLibre location puck, sized
 /// at `96x96` (`48px` radius) so `_FlashlightConePainter`'s directional beam
 /// extends cleanly beyond the `20px` blue dot on both light and dark tiles.
-class _LocationMarkerLayer extends StatelessWidget {
+class _LocationMarkerLayer extends StatefulWidget {
   const _LocationMarkerLayer({
     required this.position,
+    required this.headingListenable,
     required this.headingUp,
     this.mapBearing = 0.0,
   });
 
-  /// Latest GPS fix; null until the first fix lands, in which case nothing
-  /// renders.
   final ValueNotifier<LocationMarkerPosition?> position;
+  final ValueListenable<double?> headingListenable;
   final bool headingUp;
   final double mapBearing;
 
   @override
+  State<_LocationMarkerLayer> createState() => _LocationMarkerLayerState();
+}
+
+class _LocationMarkerLayerState extends State<_LocationMarkerLayer> {
+  late _RelativeConeHeadingListenable _coneHeading;
+
+  @override
+  void initState() {
+    super.initState();
+    _coneHeading = _RelativeConeHeadingListenable(
+      widget.headingListenable,
+      headingUp: widget.headingUp,
+      effectiveBearing: widget.mapBearing,
+    );
+  }
+
+  @override
+  void didUpdateWidget(covariant _LocationMarkerLayer oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.headingListenable != widget.headingListenable) {
+      _coneHeading.dispose();
+      _coneHeading = _RelativeConeHeadingListenable(
+        widget.headingListenable,
+        headingUp: widget.headingUp,
+        effectiveBearing: widget.mapBearing,
+      );
+    }
+  }
+
+  @override
+  void dispose() {
+    _coneHeading.dispose();
+    super.dispose();
+  }
+
+  @override
   Widget build(BuildContext context) {
     final effectiveBearing =
-        ml.MapCamera.maybeOf(context)?.bearing ?? mapBearing;
+        ml.MapCamera.maybeOf(context)?.bearing ?? widget.mapBearing;
+    _coneHeading.updateCamera(
+      headingUp: widget.headingUp,
+      effectiveBearing: effectiveBearing,
+    );
     return ValueListenableBuilder<LocationMarkerPosition?>(
-      valueListenable: position,
+      valueListenable: widget.position,
       builder: (context, pos, _) {
         if (pos == null) return const SizedBox.shrink();
-        final double? coneHeading = headingUp
-            ? 0.0
-            : (pos.heading == null
-                  ? null
-                  : normalizeHeading(pos.heading! - effectiveBearing));
         return ml.WidgetLayer(
           markers: [
             ml.Marker(
@@ -5820,7 +6292,7 @@ class _LocationMarkerLayer extends StatelessWidget {
               child: LocationPuck(
                 size: 96,
                 dotSize: 20,
-                heading: coneHeading,
+                headingListenable: _coneHeading,
                 headingAccuracy: pos.headingAccuracy,
                 showHeading: true,
               ),
@@ -5833,8 +6305,9 @@ class _LocationMarkerLayer extends StatelessWidget {
 }
 
 /// Renders active community Waze reports, permanent landmarks, nearby SOS
-/// emergency pins, and live hiking group friends on the navigation map.
-class _LiveCommunityMarkerLayer extends StatelessWidget {
+/// emergency pins, and live hiking group friends on the navigation map using
+/// [ScreenMarkerLayer] (`projectBatched` $O(1)$ camera-frame cost).
+class _LiveCommunityMarkerLayer extends StatefulWidget {
   const _LiveCommunityMarkerLayer({
     required this.reports,
     required this.sosAlerts,
@@ -5860,211 +6333,216 @@ class _LiveCommunityMarkerLayer extends StatelessWidget {
   final ValueChanged<GroupMemberModel> onGroupMemberTap;
 
   @override
+  State<_LiveCommunityMarkerLayer> createState() =>
+      _LiveCommunityMarkerLayerState();
+}
+
+class _LiveCommunityMarkerLayerState extends State<_LiveCommunityMarkerLayer> {
+  List<TrailReportModel>? _lastReports;
+  List<SosAlertModel>? _lastSos;
+  GroupSessionModel? _lastSession;
+  GroupMemberModel? _lastSelectedFriend;
+  bool? _lastIsRo;
+  Brightness? _lastBrightness;
+  List<ml.Marker> _cachedMarkers = const <ml.Marker>[];
+
+  List<ml.Marker> _resolveMarkers(
+    ThemeData theme,
+    List<TrailReportModel> reportList,
+    List<SosAlertModel> sosList,
+    GroupSessionModel? session,
+    GroupMemberModel? selectedFriend,
+  ) {
+    if (identical(_lastReports, reportList) &&
+        identical(_lastSos, sosList) &&
+        identical(_lastSession, session) &&
+        identical(_lastSelectedFriend, selectedFriend) &&
+        _lastIsRo == widget.isRo &&
+        _lastBrightness == theme.brightness) {
+      return _cachedMarkers;
+    }
+
+    _lastReports = reportList;
+    _lastSos = sosList;
+    _lastSession = session;
+    _lastSelectedFriend = selectedFriend;
+    _lastIsRo = widget.isRo;
+    _lastBrightness = theme.brightness;
+
+    final peers = session?.peers ?? const <GroupMemberModel>[];
+    final userPosVal = widget.userPosition.value;
+    final userGeo = userPosVal != null
+        ? ml.Geographic(lat: userPosVal.latitude, lon: userPosVal.longitude)
+        : null;
+
+    _cachedMarkers = <ml.Marker>[
+      for (final report in reportList)
+        ml.Marker(
+          point: ml.Geographic(lat: report.lat, lon: report.lon),
+          size: const Size(38, 38),
+          child: GestureDetector(
+            key: ValueKey<String>('rep-${report.id}'),
+            behavior: HitTestBehavior.opaque,
+            onTap: () => widget.onReportTap(report),
+            child: Opacity(
+              opacity: report.isDryOrClosed ? 0.65 : 1.0,
+              child: Container(
+                decoration: BoxDecoration(
+                  color: Colors.white,
+                  shape: BoxShape.circle,
+                  border: Border.all(
+                    color: categoryAccentColor(report.category),
+                    width: 2.5,
+                  ),
+                  boxShadow: [
+                    BoxShadow(
+                      color: Colors.black.withValues(alpha: 0.28),
+                      blurRadius: 4,
+                      offset: const Offset(0, 1),
+                    ),
+                  ],
+                ),
+                alignment: Alignment.center,
+                child: Text(
+                  report.category.emoji,
+                  style: const TextStyle(fontSize: 18),
+                ),
+              ),
+            ),
+          ),
+        ),
+      for (final friend in peers)
+        ml.Marker(
+          point: ml.Geographic(lat: friend.lat, lon: friend.lon),
+          size: selectedFriend?.memberId == friend.memberId
+              ? const Size(164, 62)
+              : const Size(36, 36),
+          child: GestureDetector(
+            key: ValueKey<String>('peer-${friend.memberId}'),
+            behavior: HitTestBehavior.opaque,
+            onTap: () => widget.onGroupMemberTap(friend),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                if (selectedFriend?.memberId == friend.memberId)
+                  Container(
+                    margin: const EdgeInsets.only(bottom: 3),
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 8,
+                      vertical: 3,
+                    ),
+                    decoration: BoxDecoration(
+                      color: theme.colorScheme.surface.withValues(alpha: 0.95),
+                      borderRadius: BorderRadius.circular(10),
+                      border: Border.all(
+                        color: theme.colorScheme.outline.withValues(alpha: 0.55),
+                      ),
+                    ),
+                    child: Text(
+                      () {
+                        final rel = formatRelativeGroupDistance(
+                          member: friend,
+                          userAlongTrackM: widget.userAlongTrackM.value,
+                          userPos: userGeo,
+                          isRo: widget.isRo,
+                        );
+                        final restSuffix = friend.isStationary ? ' · 💤' : '';
+                        return rel.isNotEmpty
+                            ? '${friend.displayName} · $rel$restSuffix'
+                            : '${friend.displayName}$restSuffix';
+                      }(),
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: theme.textTheme.labelSmall?.copyWith(
+                        fontWeight: FontWeight.w700,
+                        fontSize: 10.5,
+                      ),
+                    ),
+                  ),
+                Container(
+                  width: 32,
+                  height: 32,
+                  decoration: BoxDecoration(
+                    color: parseGroupHexColor(friend.colorHex),
+                    shape: BoxShape.circle,
+                    border: Border.all(color: Colors.white, width: 2.5),
+                    boxShadow: [
+                      BoxShadow(
+                        color: Colors.black.withValues(alpha: 0.25),
+                        blurRadius: 4,
+                        offset: const Offset(0, 1),
+                      ),
+                    ],
+                  ),
+                  alignment: Alignment.center,
+                  child: Text(
+                    friend.isStationary ? '💤' : friend.initials,
+                    style: const TextStyle(
+                      color: Colors.white,
+                      fontSize: 11,
+                      fontWeight: FontWeight.w800,
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      for (final sos in sosList)
+        ml.Marker(
+          point: ml.Geographic(lat: sos.lat, lon: sos.lon),
+          size: const Size(46, 46),
+          child: GestureDetector(
+            key: ValueKey<String>('sos-${sos.id}'),
+            behavior: HitTestBehavior.opaque,
+            onTap: () => widget.onSosTap(sos),
+            child: Container(
+              decoration: BoxDecoration(
+                color: const Color(0xFFDC2626),
+                shape: BoxShape.circle,
+                border: Border.all(color: Colors.white, width: 3),
+                boxShadow: [
+                  BoxShadow(
+                    color: const Color(0xFFDC2626).withValues(alpha: 0.55),
+                    blurRadius: 8,
+                    spreadRadius: 1,
+                  ),
+                ],
+              ),
+              alignment: Alignment.center,
+              child: const Text('🆘', style: TextStyle(fontSize: 20)),
+            ),
+          ),
+        ),
+    ];
+    return _cachedMarkers;
+  }
+
+  @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     return ValueListenableBuilder<List<TrailReportModel>>(
-      valueListenable: reports,
+      valueListenable: widget.reports,
       builder: (context, reportList, _) {
         return ValueListenableBuilder<List<SosAlertModel>>(
-          valueListenable: sosAlerts,
+          valueListenable: widget.sosAlerts,
           builder: (context, sosList, _) {
             return ValueListenableBuilder<GroupSessionModel?>(
-              valueListenable: groupSession,
+              valueListenable: widget.groupSession,
               builder: (context, session, _) {
                 return ValueListenableBuilder<GroupMemberModel?>(
-                  valueListenable: selectedGroupMember,
+                  valueListenable: widget.selectedGroupMember,
                   builder: (context, selectedFriend, _) {
-                    final peers = session?.peers ?? const <GroupMemberModel>[];
-                    if (reportList.isEmpty &&
-                        sosList.isEmpty &&
-                        peers.isEmpty) {
-                      return const SizedBox.shrink();
-                    }
-                    final userPosVal = userPosition.value;
-                    final userGeo = userPosVal != null
-                        ? ml.Geographic(
-                            lat: userPosVal.latitude,
-                            lon: userPosVal.longitude,
-                          )
-                        : null;
-                    return ml.WidgetLayer(
-                      markers: [
-                        for (final report in reportList)
-                          ml.Marker(
-                            point: ml.Geographic(
-                              lat: report.lat,
-                              lon: report.lon,
-                            ),
-                            size: const Size(38, 38),
-                            child: GestureDetector(
-                              behavior: HitTestBehavior.opaque,
-                              onTap: () => onReportTap(report),
-                              child: Opacity(
-                                opacity: report.isDryOrClosed ? 0.65 : 1.0,
-                                child: Container(
-                                  decoration: BoxDecoration(
-                                    color: Colors.white,
-                                    shape: BoxShape.circle,
-                                    border: Border.all(
-                                      color: categoryAccentColor(
-                                        report.category,
-                                      ),
-                                      width: 2.5,
-                                    ),
-                                    boxShadow: [
-                                      BoxShadow(
-                                        color: Colors.black.withValues(
-                                          alpha: 0.28,
-                                        ),
-                                        blurRadius: 4,
-                                        offset: const Offset(0, 1),
-                                      ),
-                                    ],
-                                  ),
-                                  alignment: Alignment.center,
-                                  child: Text(
-                                    report.category.emoji,
-                                    style: const TextStyle(fontSize: 18),
-                                  ),
-                                ),
-                              ),
-                            ),
-                          ),
-                        for (final friend in peers)
-                          ml.Marker(
-                            point: ml.Geographic(
-                              lat: friend.lat,
-                              lon: friend.lon,
-                            ),
-                            size: selectedFriend?.memberId == friend.memberId
-                                ? const Size(156, 62)
-                                : const Size(36, 36),
-                            child: GestureDetector(
-                              behavior: HitTestBehavior.opaque,
-                              onTap: () => onGroupMemberTap(friend),
-                              child: Column(
-                                mainAxisSize: MainAxisSize.min,
-                                mainAxisAlignment: MainAxisAlignment.center,
-                                children: [
-                                  if (selectedFriend?.memberId ==
-                                      friend.memberId)
-                                    Container(
-                                      margin: const EdgeInsets.only(bottom: 3),
-                                      padding: const EdgeInsets.symmetric(
-                                        horizontal: 8,
-                                        vertical: 3,
-                                      ),
-                                      decoration: BoxDecoration(
-                                        color: theme.colorScheme.surface
-                                            .withValues(alpha: 0.95),
-                                        borderRadius: BorderRadius.circular(10),
-                                        border: Border.all(
-                                          color: theme.colorScheme.outline
-                                              .withValues(alpha: 0.55),
-                                        ),
-                                        boxShadow: [
-                                          BoxShadow(
-                                            color: Colors.black.withValues(
-                                              alpha: 0.16,
-                                            ),
-                                            blurRadius: 4,
-                                          ),
-                                        ],
-                                      ),
-                                      child: Text(
-                                        () {
-                                          final rel =
-                                              formatRelativeGroupDistance(
-                                                member: friend,
-                                                userAlongTrackM:
-                                                    userAlongTrackM.value,
-                                                userPos: userGeo,
-                                                isRo: isRo,
-                                              );
-                                          return rel.isNotEmpty
-                                              ? '${friend.displayName} · $rel'
-                                              : friend.displayName;
-                                        }(),
-                                        maxLines: 1,
-                                        overflow: TextOverflow.ellipsis,
-                                        style: theme.textTheme.labelSmall
-                                            ?.copyWith(
-                                              fontWeight: FontWeight.w700,
-                                              fontSize: 10.5,
-                                            ),
-                                      ),
-                                    ),
-                                  Container(
-                                    width: 32,
-                                    height: 32,
-                                    decoration: BoxDecoration(
-                                      color: parseGroupHexColor(
-                                        friend.colorHex,
-                                      ),
-                                      shape: BoxShape.circle,
-                                      border: Border.all(
-                                        color: Colors.white,
-                                        width: 2.5,
-                                      ),
-                                      boxShadow: [
-                                        BoxShadow(
-                                          color: Colors.black.withValues(
-                                            alpha: 0.25,
-                                          ),
-                                          blurRadius: 4,
-                                          offset: const Offset(0, 1),
-                                        ),
-                                      ],
-                                    ),
-                                    alignment: Alignment.center,
-                                    child: Text(
-                                      friend.initials,
-                                      style: const TextStyle(
-                                        color: Colors.white,
-                                        fontSize: 11,
-                                        fontWeight: FontWeight.w800,
-                                      ),
-                                    ),
-                                  ),
-                                ],
-                              ),
-                            ),
-                          ),
-                        for (final sos in sosList)
-                          ml.Marker(
-                            point: ml.Geographic(lat: sos.lat, lon: sos.lon),
-                            size: const Size(46, 46),
-                            child: GestureDetector(
-                              behavior: HitTestBehavior.opaque,
-                              onTap: () => onSosTap(sos),
-                              child: Container(
-                                decoration: BoxDecoration(
-                                  color: const Color(0xFFDC2626),
-                                  shape: BoxShape.circle,
-                                  border: Border.all(
-                                    color: Colors.white,
-                                    width: 3,
-                                  ),
-                                  boxShadow: [
-                                    BoxShadow(
-                                      color: const Color(
-                                        0xFFDC2626,
-                                      ).withValues(alpha: 0.55),
-                                      blurRadius: 8,
-                                      spreadRadius: 1,
-                                    ),
-                                  ],
-                                ),
-                                alignment: Alignment.center,
-                                child: const Text(
-                                  '🆘',
-                                  style: TextStyle(fontSize: 20),
-                                ),
-                              ),
-                            ),
-                          ),
-                      ],
+                    final markers = _resolveMarkers(
+                      theme,
+                      reportList,
+                      sosList,
+                      session,
+                      selectedFriend,
                     );
+                    if (markers.isEmpty) return const SizedBox.shrink();
+                    return ScreenMarkerLayer(markers: markers);
                   },
                 );
               },

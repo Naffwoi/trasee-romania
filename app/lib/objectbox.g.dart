@@ -787,7 +787,7 @@ final _entities = <obx_int.ModelEntity>[
   obx_int.ModelEntity(
     id: const obx_int.IdUid(8, 5734302023385580278),
     name: 'LocalSettingsEntity',
-    lastPropertyId: const obx_int.IdUid(9, 682150364037804139),
+    lastPropertyId: const obx_int.IdUid(10, 6452254148793560149),
     flags: 0,
     properties: <obx_int.ModelProperty>[
       obx_int.ModelProperty(
@@ -836,6 +836,12 @@ final _entities = <obx_int.ModelEntity>[
         id: const obx_int.IdUid(9, 682150364037804139),
         name: 'recentServersJson',
         type: 9,
+        flags: 0,
+      ),
+      obx_int.ModelProperty(
+        id: const obx_int.IdUid(10, 6452254148793560149),
+        name: 'expeditionBatteryMode',
+        type: 1,
         flags: 0,
       ),
     ],
@@ -2225,7 +2231,7 @@ obx_int.ModelDefinition getObjectBoxModel() {
         final recentServersJsonOffset = fbb.writeString(
           object.recentServersJson,
         );
-        fbb.startTable(10);
+        fbb.startTable(11);
         fbb.addInt64(0, object.obxId);
         fbb.addOffset(1, themeModeOffset);
         fbb.addBool(3, object.backgroundLocationAsked);
@@ -2234,6 +2240,7 @@ obx_int.ModelDefinition getObjectBoxModel() {
         fbb.addOffset(6, mapStyleSourcesJsonOffset);
         fbb.addOffset(7, demTileTemplateOffset);
         fbb.addOffset(8, recentServersJsonOffset);
+        fbb.addBool(9, object.expeditionBatteryMode);
         fbb.finish(fbb.endTable());
         return object.obxId;
       },
@@ -2266,6 +2273,12 @@ obx_int.ModelDefinition getObjectBoxModel() {
         final recentServersJsonParam = const fb.StringReader(
           asciiOptimization: true,
         ).vTableGet(buffer, rootOffset, 20, '');
+        final expeditionBatteryModeParam = const fb.BoolReader().vTableGet(
+          buffer,
+          rootOffset,
+          22,
+          false,
+        );
         final object = LocalSettingsEntity(
           themeMode: themeModeParam,
           backgroundLocationAsked: backgroundLocationAskedParam,
@@ -2274,6 +2287,7 @@ obx_int.ModelDefinition getObjectBoxModel() {
           mapStyleSourcesJson: mapStyleSourcesJsonParam,
           demTileTemplate: demTileTemplateParam,
           recentServersJson: recentServersJsonParam,
+          expeditionBatteryMode: expeditionBatteryModeParam,
         )..obxId = const fb.Int64Reader().vTableGet(buffer, rootOffset, 4, 0);
 
         return object;
@@ -3397,6 +3411,10 @@ class LocalSettingsEntity_ {
   static final recentServersJson = obx.QueryStringProperty<LocalSettingsEntity>(
     _entities[6].properties[7],
   );
+
+  /// See [LocalSettingsEntity.expeditionBatteryMode].
+  static final expeditionBatteryMode =
+      obx.QueryBooleanProperty<LocalSettingsEntity>(_entities[6].properties[8]);
 }
 
 /// [SubcategoryEntity] entity fields to define ObjectBox queries.

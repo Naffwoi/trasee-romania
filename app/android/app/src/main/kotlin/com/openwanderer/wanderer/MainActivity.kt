@@ -40,6 +40,7 @@ class MainActivity : FlutterActivity() {
         super.configureFlutterEngine(flutterEngine)
 
         flutterEngine.plugins.add(BleProximityPlugin())
+        flutterEngine.plugins.add(MountainMotionPlugin())
 
         MethodChannel(flutterEngine.dartExecutor.binaryMessenger, USER_CA_CHANNEL)
             .setMethodCallHandler { call, result ->

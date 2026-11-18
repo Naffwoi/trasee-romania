@@ -10,6 +10,7 @@ import 'package:wanderer/entities/downloaded_tile_package_entity.dart';
 import 'package:wanderer/entities/region_entity.dart';
 import 'package:wanderer/models/region_status.dart';
 import 'package:wanderer/objectbox.g.dart';
+import 'package:wanderer/services/resumable_archive_downloader.dart';
 import 'package:wanderer/util/region/disk_space.dart';
 import 'package:wanderer/util/region/file_path.dart';
 
@@ -218,7 +219,7 @@ class TileRepositoryManager {
       );
 
       if (!await _isValidPmTiles(partPath)) {
-        if (partFile.existsSync()) partFile.deleteSync();
+        deleteArchivePartAndEtag(partPath);
         _updatePackageStatus(package, status: PackageStatus.error);
         return;
       }
@@ -248,7 +249,9 @@ class TileRepositoryManager {
         }
       });
     } on DioException catch (e) {
-      if (partFile.existsSync()) partFile.deleteSync();
+      if (CancelToken.isCancel(e)) {
+        deleteArchivePartAndEtag(partPath);
+      }
       _updatePackageStatus(
         package,
         status: CancelToken.isCancel(e)
@@ -317,7 +320,7 @@ class TileRepositoryManager {
       );
 
       if (!await _isValidPmTiles(partPath)) {
-        if (partFile.existsSync()) partFile.deleteSync();
+        deleteArchivePartAndEtag(partPath);
         _updatePackageStatus(package, status: PackageStatus.error);
         return;
       }
@@ -331,7 +334,9 @@ class TileRepositoryManager {
         downloadedAtUtc: DateTime.now().toUtc(),
       );
     } on DioException catch (e) {
-      if (partFile.existsSync()) partFile.deleteSync();
+      if (CancelToken.isCancel(e)) {
+        deleteArchivePartAndEtag(partPath);
+      }
       _updatePackageStatus(
         package,
         status: CancelToken.isCancel(e)
@@ -412,7 +417,11 @@ class TileRepositoryManager {
       regionVectorPath(root, path),
       regionDemPath(root, path),
     ]) {
-      for (final candidate in [finalPath, '$finalPath.part']) {
+      for (final candidate in [
+        finalPath,
+        '$finalPath.part',
+        '$finalPath.part.etag',
+      ]) {
         final file = File(candidate);
         if (file.existsSync()) file.deleteSync();
       }
@@ -455,7 +464,11 @@ class TileRepositoryManager {
     // Best-effort, outside the transaction: a missing file is never fatal.
     final root = (await getApplicationDocumentsDirectory()).path;
     final finalPath = regionDemPath(root, path);
-    for (final candidate in [finalPath, '$finalPath.part']) {
+    for (final candidate in [
+      finalPath,
+      '$finalPath.part',
+      '$finalPath.part.etag',
+    ]) {
       final file = File(candidate);
       if (file.existsSync()) file.deleteSync();
     }
@@ -515,12 +528,12 @@ class TileRepositoryManager {
     required CancelToken cancelToken,
     void Function(int received, int total)? onProgress,
   }) async {
-    await _api.download(
-      requestPath,
-      partPath,
+    await downloadArchiveWithResume(
+      dio: _api,
+      requestPath: requestPath,
+      partPath: partPath,
       cancelToken: cancelToken,
-      deleteOnError: true,
-      onReceiveProgress: onProgress,
+      onProgress: onProgress,
     );
   }
 

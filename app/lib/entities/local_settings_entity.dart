@@ -47,6 +47,10 @@ class LocalSettingsEntity {
   /// image), never credentials.
   String recentServersJson;
 
+  /// Optional "Mod Expediție" battery saver (`12m` GPS distance filter,
+  /// `250ms` compass only in heading-up, `30 FPS` cap, wider radio coalescing).
+  bool expeditionBatteryMode;
+
   LocalSettingsEntity({
     this.themeMode = 'system',
     this.backgroundLocationAsked = false,
@@ -55,5 +59,6 @@ class LocalSettingsEntity {
     this.mapStyleSourcesJson = '',
     this.demTileTemplate = '',
     this.recentServersJson = '',
+    this.expeditionBatteryMode = false,
   });
 }

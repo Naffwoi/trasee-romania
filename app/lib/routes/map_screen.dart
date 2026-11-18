@@ -35,6 +35,7 @@ import 'package:wanderer/provider/location_tracking_mode_provider.dart';
 import 'package:wanderer/provider/map_camera_provider.dart';
 import 'package:wanderer/provider/map_style_json_provider.dart';
 import 'package:wanderer/provider/map_style_sources_provider.dart';
+import 'package:wanderer/provider/nav_session_hibernation_provider.dart';
 import 'package:wanderer/provider/online_status_provider.dart';
 import 'package:wanderer/provider/settings_provider.dart';
 import 'package:wanderer/provider/trail/category_provider.dart';
@@ -502,6 +503,12 @@ class _MapScreenState extends ConsumerState<MapScreen>
       onTrailTap: _selectTrail,
     );
 
+    final isNavHibernating = ref.watch(navSessionHibernationProvider);
+    if (isNavHibernating && _controller != null) {
+      _controller = null;
+      _initialSearchDone = false;
+    }
+
     return Stack(
       children: [
         if (!isOnline)
@@ -514,6 +521,8 @@ class _MapScreenState extends ConsumerState<MapScreen>
               onRetry: _retryOnline,
             ),
           )
+        else if (isNavHibernating)
+          ColoredBox(color: Theme.of(context).colorScheme.surface)
         else
           // Offstage, not removed: the native map and its camera stay alive,
           // so shrinking the sheet (including the Map button's instant
@@ -1182,30 +1191,31 @@ class _MapScreenState extends ConsumerState<MapScreen>
               children: [
                 // Omitted rather than showing a placeholder while there is
                 // no fix (permission denied, GPS still searching).
-                StreamBuilder<LocationMarkerPosition?>(
-                  stream: ref.watch(liveLocationProvider),
-                  builder: (context, snapshot) {
-                    final position = snapshot.data;
-                    if (position == null) return const SizedBox.shrink();
-                    final meters = haversineMeters(
-                      Wpt(lat: position.latitude, lon: position.longitude),
-                      Wpt(lat: location.lat, lon: location.lon),
-                    );
-                    return Padding(
-                      padding: const EdgeInsets.only(bottom: 12),
-                      child: Text(
-                        l10n.distance_from_your_location(
-                          formatDistance(meters, unit: unit),
-                        ),
-                        style: theme.textTheme.bodyMedium?.copyWith(
-                          color: theme.colorScheme.onSurface.withValues(
-                            alpha: 0.7,
+                if (shouldAcquireForegroundMapSensors(context, ref))
+                  StreamBuilder<LocationMarkerPosition?>(
+                    stream: ref.watch(liveLocationProvider),
+                    builder: (context, snapshot) {
+                      final position = snapshot.data;
+                      if (position == null) return const SizedBox.shrink();
+                      final meters = haversineMeters(
+                        Wpt(lat: position.latitude, lon: position.longitude),
+                        Wpt(lat: location.lat, lon: location.lon),
+                      );
+                      return Padding(
+                        padding: const EdgeInsets.only(bottom: 12),
+                        child: Text(
+                          l10n.distance_from_your_location(
+                            formatDistance(meters, unit: unit),
+                          ),
+                          style: theme.textTheme.bodyMedium?.copyWith(
+                            color: theme.colorScheme.onSurface.withValues(
+                              alpha: 0.7,
+                            ),
                           ),
                         ),
-                      ),
-                    );
-                  },
-                ),
+                      );
+                    },
+                  ),
                 OutlinedButton.icon(
                   onPressed: () => _planRouteFrom(location),
                   icon: const FaIcon(FontAwesomeIcons.route, size: 14),

@@ -26,7 +26,7 @@ packages:
     source: hosted
     version: "0.3.4"
   archive:
-    dependency: transitive
+    dependency: "direct main"
     description:
       name: archive
       sha256: a96e8b390886ee8abb49b7bd3ac8df6f451c621619f52a26e815fdcf568959ff
@@ -209,6 +209,14 @@ packages:
       url: "https://pub.dev"
     source: hosted
     version: "4.0.9"
+  cronet_http:
+    dependency: transitive
+    description:
+      name: cronet_http
+      sha256: d8aa6c72b4a3b6c9b299a53f0c4e10cfc87961b2c7496e6c9a7216157f9c529c
+      url: "https://pub.dev"
+    source: hosted
+    version: "1.10.0"
   cross_file:
     dependency: transitive
     description:
@@ -218,7 +226,7 @@ packages:
     source: hosted
     version: "0.3.5+2"
   crypto:
-    dependency: transitive
+    dependency: "direct main"
     description:
       name: crypto
       sha256: c8ea0233063ba03258fbcf2ca4d6dadfefe14f02fab57702265467a19f27fadf
@@ -233,6 +241,14 @@ packages:
       url: "https://pub.dev"
     source: hosted
     version: "1.0.2"
+  cupertino_http:
+    dependency: transitive
+    description:
+      name: cupertino_http
+      sha256: "9eb9a41b1e2c442d530be7aeb537b21b02060c6df5e36b8e8975db23dc7d8371"
+      url: "https://pub.dev"
+    source: hosted
+    version: "3.1.1"
   dart_style:
     dependency: transitive
     description:
@@ -725,8 +741,16 @@ packages:
       url: "https://pub.dev"
     source: hosted
     version: "4.1.2"
-  image:
+  http_profile:
     dependency: transitive
+    description:
+      name: http_profile
+      sha256: "7e679e355b09aaee2ab5010915c932cce3f2d1c11c3b2dc177891687014ffa78"
+      url: "https://pub.dev"
+    source: hosted
+    version: "0.1.0"
+  image:
+    dependency: "direct main"
     description:
       name: image
       sha256: f9881ff4998044947ec38d098bc7c8316ae1186fa786eddffdb867b9bc94dfce
@@ -1021,6 +1045,14 @@ packages:
       url: "https://pub.dev"
     source: hosted
     version: "2.1.1"
+  native_dio_adapter:
+    dependency: "direct main"
+    description:
+      name: native_dio_adapter
+      sha256: "7ca3d04c76095a02c3b0d2e6f3c90e7781373671f7aacad34b81f31074a7369b"
+      url: "https://pub.dev"
+    source: hosted
+    version: "1.8.0"
   native_toolchain_c:
     dependency: transitive
     description:

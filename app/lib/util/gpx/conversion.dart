@@ -509,6 +509,31 @@ Trail trailFromGpxIsolate(
 /// recording-Stop / planner-Finish / import moments that call it.
 String serializeGpxToXml(Gpx gpx) => GpxWriter().asString(gpx);
 
+/// Combined single-isolate entry point performing BOTH GPX XML serialization
+/// and [trailFromGpx] metrics calculation in one isolate spawn so stopping an
+/// 8–12h recording never copies a 30,000-point [Gpx] graph across isolates
+/// multiple times.
+({String xml, Trail trail}) serializeAndBuildTrailIsolate(
+  ({
+    Gpx gpx,
+    bool plannedRoute,
+    String? fallbackName,
+    Duration? movingDuration,
+  })
+  args,
+) {
+  final xml = args.plannedRoute
+      ? serializePlannedRoute(args.gpx)
+      : serializeGpxToXml(args.gpx);
+  final trail = trailFromGpx(
+    args.gpx,
+    fallbackName: args.fallbackName,
+    movingDuration: args.movingDuration,
+    gpxData: xml,
+  );
+  return (xml: xml, trail: trail);
+}
+
 Trail trailFromGpx(
   Gpx gpx, {
   String? fallbackName,

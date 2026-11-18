@@ -14,7 +14,8 @@ import 'package:wanderer/provider/route_anchor_provider.dart';
 import 'package:wanderer/provider/trail/category_provider.dart';
 import 'package:wanderer/provider/subcategory_preference_provider.dart';
 import 'package:wanderer/provider/trail/subcategory_provider.dart';
-import 'package:wanderer/util/gpx/conversion.dart' show serializeGpxToXml;
+import 'package:wanderer/util/gpx/conversion.dart'
+    show serializeAndBuildTrailIsolate;
 import 'package:wanderer/util/gpx/route_anchor_marks.dart'
     show serializePlannedRoute;
 import 'package:wanderer/util/gpx/gpx.dart';
@@ -351,17 +352,13 @@ Future<Trail> buildDraftTrail(
   // never a capturing closure — the enclosing scope holds a WidgetRef) — this
   // runs at the recording Stop tap / planner Finish, over the full track.
   // The planner runs serializePlannedRoute, a recording the plain writer.
-  final xml = await compute(
-    plannedRoute ? serializePlannedRoute : serializeGpxToXml,
-    finalGpx,
-  );
-
-  Trail trail = await buildLocalTrail(
-    ref,
-    finalGpx,
+  final built = await compute(serializeAndBuildTrailIsolate, (
+    gpx: finalGpx,
+    plannedRoute: plannedRoute,
+    fallbackName: null,
     movingDuration: movingDuration,
-    gpxData: xml,
-  );
+  ));
+  Trail trail = await enrichLocalTrailLocationIfOnline(ref, built.trail);
 
   trail = trail.copyWith(
     category: category,

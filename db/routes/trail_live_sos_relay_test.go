@@ -210,9 +210,10 @@ func TestTrailLiveSosRelayMultiMuleDedupDriftAndClamping(t *testing.T) {
 	}
 
 	// Verify SSE frames: both Mule B and Near subscriber see isMine:false, Far subscriber gets nothing!
-	for name, ch := range map[string]<-chan string{"muleB": subMuleB.Ch, "near": subNear.Ch} {
+	for name, ch := range map[string]<-chan []byte{"muleB": subMuleB.Ch, "near": subNear.Ch} {
 		select {
-		case frame := <-ch:
+		case rawFrame := <-ch:
+			frame := string(rawFrame)
 			if !strings.Contains(frame, `"isMine":false`) || !strings.Contains(frame, fmt.Sprintf(`"clientSosId":%q`, clientSosID)) {
 				t.Fatalf("SSE frame for %s expected isMine:false and clientSosId, got %s", name, frame)
 			}
@@ -222,7 +223,7 @@ func TestTrailLiveSosRelayMultiMuleDedupDriftAndClamping(t *testing.T) {
 	}
 	select {
 	case frame := <-subFar.Ch:
-		t.Fatalf("far subscriber must not receive sos_update, got %s", frame)
+		t.Fatalf("far subscriber must not receive sos_update, got %s", string(frame))
 	default:
 	}
 
@@ -294,7 +295,8 @@ func TestTrailLiveSosRelayMultiMuleDedupDriftAndClamping(t *testing.T) {
 
 	// Drain subNear SSE update from Mule D's coordinate refresh.
 	select {
-	case frameD := <-subNear.Ch:
+	case rawFrameD := <-subNear.Ch:
+		frameD := string(rawFrameD)
 		if !strings.Contains(frameD, "45.443") {
 			t.Fatalf("expected SSE update with Mule D coords, got %s", frameD)
 		}
@@ -457,7 +459,7 @@ func TestTrailLiveSosRelayResolutionPreimageVerification(t *testing.T) {
 	// Confirm no SSE resolution leaked and DB record is still active!
 	select {
 	case unexpected := <-subNear.Ch:
-		t.Fatalf("rogue resolution must not broadcast SSE, got %s", unexpected)
+		t.Fatalf("rogue resolution must not broadcast SSE, got %s", string(unexpected))
 	default:
 	}
 
@@ -490,7 +492,8 @@ func TestTrailLiveSosRelayResolutionPreimageVerification(t *testing.T) {
 	}
 
 	select {
-	case sseFrame := <-subNear.Ch:
+	case rawSSE := <-subNear.Ch:
+		sseFrame := string(rawSSE)
 		if !strings.Contains(sseFrame, "event: sos_update\n") || !strings.Contains(sseFrame, `"status":"resolved"`) {
 			t.Fatalf("expected SSE sos_update with status:resolved, got %s", sseFrame)
 		}
@@ -611,7 +614,8 @@ func TestTrailLiveSosVictim4GRecoveryClaimAndUpdateSos(t *testing.T) {
 	}
 
 	select {
-	case victimSSE := <-subVictim.Ch:
+	case rawVictimSSE := <-subVictim.Ch:
+		victimSSE := string(rawVictimSSE)
 		if !strings.Contains(victimSSE, `"isMine":true`) {
 			t.Fatalf("expected Victim SSE frame to have isMine:true after ownership claim, got %s", victimSSE)
 		}

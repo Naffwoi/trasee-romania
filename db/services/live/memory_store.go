@@ -585,7 +585,8 @@ func (s *LiveMemoryStore) DeleteGroup(code string) {
 	sh.mu.Unlock()
 }
 
-// TouchGroupTTL extends the in-memory group ExpiresAt and reports whether SQLite also needs a lazy write.
+// TouchGroupTTL extends the in-memory group ExpiresAt and reports whether SQLite also needs a lazy write
+// based on the SQL-persisted expiry (LastDBSyncAt + ttl), so frequent 5s pings never starve hourly DB syncs.
 func (s *LiveMemoryStore) TouchGroupTTL(code string, newExpiresAt time.Time, dbRefreshThreshold time.Duration, now time.Time) (CachedGroup, bool) {
 	norm := strings.ToUpper(strings.TrimSpace(code))
 	sh := &s.groups[shardIndex(norm)]
@@ -595,7 +596,12 @@ func (s *LiveMemoryStore) TouchGroupTTL(code string, newExpiresAt time.Time, dbR
 	if !ok {
 		return CachedGroup{}, false
 	}
-	needsDBWrite := bucket.meta.ExpiresAt.Sub(now) < dbRefreshThreshold
+	ttl := newExpiresAt.Sub(now)
+	sqlExpiresAt := bucket.meta.ExpiresAt
+	if !bucket.meta.LastDBSyncAt.IsZero() && ttl > 0 {
+		sqlExpiresAt = bucket.meta.LastDBSyncAt.Add(ttl)
+	}
+	needsDBWrite := bucket.meta.LastDBSyncAt.IsZero() || sqlExpiresAt.Sub(now) < dbRefreshThreshold
 	bucket.meta.ExpiresAt = newExpiresAt
 	if needsDBWrite {
 		bucket.meta.LastDBSyncAt = now

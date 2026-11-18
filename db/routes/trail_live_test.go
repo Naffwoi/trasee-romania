@@ -289,12 +289,92 @@ func TestTrailLivePresenceCountingPrivacyAndGC(t *testing.T) {
 	if err := RunTrailLiveGC(app, hub, curTime); err != nil {
 		t.Fatalf("RunTrailLiveGC: %v", err)
 	}
-	remainingPresence, err := app.CountRecords("trail_presence")
-	if err != nil {
+	if gotRam := handler.memoryStore().PresenceCount(); gotRam != 1 {
+		t.Fatalf("remaining RAM presence entries after GC = %d, want 1", gotRam)
+	}
+	if dbRows, _ := app.CountRecords("trail_presence"); dbRows != 0 {
+		t.Fatalf("expected 0 SQLite trail_presence writes on RAM hot path, found %d", dbRows)
+	}
+}
+
+func TestTrailLiveStateHashDeltaAndStationaryWindow(t *testing.T) {
+	app := newRemoteRealSchemaApp(t)
+	t.Setenv("POCKETBASE_PROXY_SECRET", testLiveSecret)
+
+	hub := live.NewTrailLiveHub()
+	handler := NewTrailLiveHandler(hub)
+	curTime := time.Date(2026, 11, 18, 11, 0, 0, 0, time.UTC)
+	handler.Now = func() time.Time { return curTime }
+
+	// Stationary hiker at cabana sends stationary:true heartbeat.
+	st, _ := invokeLiveHandler(t, app, handler.Heartbeat, liveCallOptions{
+		method:     http.MethodPost,
+		target:     "/live/heartbeat",
+		body:       `{"trailId":"trail-bucegi","lat":45.4100,"lon":25.5400,"inNavigation":true,"stationary":true}`,
+		secret:     testLiveSecret,
+		deviceHash: "hiker-cabana",
+	})
+	if st != http.StatusOK {
+		t.Fatalf("cabana heartbeat status = %d", st)
+	}
+
+	// Create one report so stateHash covers non-empty state.
+	st, _ = invokeLiveHandler(t, app, handler.CreateReport, liveCallOptions{
+		method:     http.MethodPost,
+		target:     "/live/reports",
+		body:       `{"trailId":"trail-bucegi","category":"spring","note":"Izvor","lat":45.4102,"lon":25.5402}`,
+		secret:     testLiveSecret,
+		deviceHash: "hiker-cabana",
+	})
+	if st != http.StatusOK {
+		t.Fatalf("create report status = %d", st)
+	}
+
+	// Advance 8m30s (>2m moving window, <10m stationary window): hiker-a queries without stateHash -> gets full payload + stateHash.
+	curTime = curTime.Add(8*time.Minute + 30*time.Second)
+	st, fullRaw := invokeLiveHandler(t, app, handler.Heartbeat, liveCallOptions{
+		method:     http.MethodPost,
+		target:     "/live/heartbeat",
+		body:       `{"trailId":"trail-bucegi","lat":45.4105,"lon":25.5405}`,
+		secret:     testLiveSecret,
+		deviceHash: "hiker-a",
+	})
+	if st != http.StatusOK {
+		t.Fatalf("full heartbeat status = %d: %s", st, fullRaw)
+	}
+	var fullResp struct {
+		ActiveHikers30m int              `json:"activeHikers30m"`
+		StateHash       string           `json:"stateHash"`
+		Unchanged       bool             `json:"unchanged"`
+		Reports         []TrailReportDto `json:"reports"`
+	}
+	if err := json.Unmarshal(fullRaw, &fullResp); err != nil {
 		t.Fatal(err)
 	}
-	if remainingPresence != 1 {
-		t.Fatalf("remaining trail_presence rows after GC = %d, want 1", remainingPresence)
+	if fullResp.ActiveHikers30m != 1 || len(fullResp.StateHash) != 16 || fullResp.Unchanged || len(fullResp.Reports) != 1 {
+		t.Fatalf("unexpected initial full heartbeat response: %+v", fullResp)
+	}
+
+	// Repeat heartbeat with matching stateHash -> compact delta response (unchanged: true, omitted reports/sosAlerts).
+	st, deltaRaw := invokeLiveHandler(t, app, handler.Heartbeat, liveCallOptions{
+		method:     http.MethodPost,
+		target:     "/live/heartbeat",
+		body:       `{"trailId":"trail-bucegi","lat":45.4106,"lon":25.5406,"stateHash":"` + fullResp.StateHash + `"}`,
+		secret:     testLiveSecret,
+		deviceHash: "hiker-a",
+	})
+	if st != http.StatusOK {
+		t.Fatalf("delta heartbeat status = %d: %s", st, deltaRaw)
+	}
+	var deltaMap map[string]any
+	if err := json.Unmarshal(deltaRaw, &deltaMap); err != nil {
+		t.Fatal(err)
+	}
+	if deltaMap["unchanged"] != true {
+		t.Fatalf("expected unchanged:true on matching stateHash, got %s", deltaRaw)
+	}
+	if _, hasReports := deltaMap["reports"]; hasReports {
+		t.Fatalf("expected reports array omitted on unchanged delta response, got %s", deltaRaw)
 	}
 }
 
@@ -602,7 +682,8 @@ func TestTrailLiveSosPushTargetsRespondersAndSSE(t *testing.T) {
 
 	// Verify SSE broadcasts: victim gets isMine=true, near gets isMine=false, far gets nothing!
 	select {
-	case victimFrame := <-subVictim.Ch:
+	case rawVictim := <-subVictim.Ch:
+		victimFrame := string(rawVictim)
 		if !strings.Contains(victimFrame, "event: sos_update\n") || !strings.Contains(victimFrame, `"isMine":true`) {
 			t.Fatalf("victim SSE frame expected isMine:true, got %s", victimFrame)
 		}
@@ -611,7 +692,8 @@ func TestTrailLiveSosPushTargetsRespondersAndSSE(t *testing.T) {
 	}
 
 	select {
-	case nearFrame := <-subNear.Ch:
+	case rawNear := <-subNear.Ch:
+		nearFrame := string(rawNear)
 		if !strings.Contains(nearFrame, "event: sos_update\n") || !strings.Contains(nearFrame, `"isMine":false`) {
 			t.Fatalf("near SSE frame expected isMine:false, got %s", nearFrame)
 		}
@@ -621,7 +703,7 @@ func TestTrailLiveSosPushTargetsRespondersAndSSE(t *testing.T) {
 
 	select {
 	case farFrame := <-subFar.Ch:
-		t.Fatalf("far subscriber outside 5km must NOT receive sos_update, got %s", farFrame)
+		t.Fatalf("far subscriber outside 5km must NOT receive sos_update, got %s", string(farFrame))
 	default:
 	}
 

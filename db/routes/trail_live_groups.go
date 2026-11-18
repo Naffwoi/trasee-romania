@@ -16,6 +16,8 @@ import (
 
 	"github.com/pocketbase/dbx"
 	"github.com/pocketbase/pocketbase/core"
+
+	"pocketbase/services/live"
 )
 
 const (
@@ -23,13 +25,12 @@ const (
 	groupCodeAlphabet        = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
 	groupCodeLength          = 6
 	groupDefaultTTL          = 12 * time.Hour
+	groupDBRefreshThreshold  = 11 * time.Hour
 	groupActiveMemberWindow  = 10 * time.Minute
 	groupStaleMemberGCWindow = 2 * time.Hour
 	groupDefaultDisplayName  = "Drumeț"
-	unsetGroupOptionalFloat  = -1.0
 )
 
-// Calm slate / forest / teal / indigo palette for deterministic group avatars.
 var groupMemberPalette = []string{
 	"#242734",
 	"#0f766e",
@@ -53,12 +54,12 @@ type GroupMemberDto struct {
 	Speed        *float64 `json:"speed"`
 	AlongTrackM  *float64 `json:"alongTrackM"`
 	InNavigation bool     `json:"inNavigation"`
+	Stationary   bool     `json:"stationary"`
 	IsSelf       bool     `json:"isSelf"`
 	UpdatedAt    string   `json:"updatedAt"`
 }
 
-// GroupSessionDto is the camelCase wire representation of a live hiking group
-// session returned by create, get, join, and ping endpoints.
+// GroupSessionDto is the camelCase wire representation of a live hiking group session.
 type GroupSessionDto struct {
 	Code         string           `json:"code"`
 	TrailID      string           `json:"trailId"`
@@ -67,21 +68,30 @@ type GroupSessionDto struct {
 	Members      []GroupMemberDto `json:"members"`
 }
 
+// GroupMemberUpdateEventDto is the single-envelope SSE payload broadcast on `event: group_member_update`.
+type GroupMemberUpdateEventDto struct {
+	Type      string         `json:"type"`
+	GroupCode string         `json:"groupCode"`
+	Member    GroupMemberDto `json:"member"`
+}
+
 // GroupMemberLeftDto is the SSE payload broadcast on `event: group_member_left`.
 type GroupMemberLeftDto struct {
+	Type      string `json:"type"`
 	GroupCode string `json:"groupCode"`
 	MemberID  string `json:"memberId"`
 }
 
-func deriveGroupMemberID(code, deviceHash string) string {
+func deriveGroupMemberIDAndColor(code, deviceHash string) (string, string) {
 	sum := sha256.Sum256([]byte("group-member:" + code + ":" + deviceHash))
-	return hex.EncodeToString(sum[:])[:12]
+	memberID := hex.EncodeToString(sum[:])[:12]
+	colorHex := groupMemberPalette[int(binary.BigEndian.Uint32(sum[:4]))%len(groupMemberPalette)]
+	return memberID, colorHex
 }
 
-func deriveGroupMemberColor(code, deviceHash string) string {
-	sum := sha256.Sum256([]byte("group-member:" + code + ":" + deviceHash))
-	idx := int(binary.BigEndian.Uint32(sum[:4])) % len(groupMemberPalette)
-	return groupMemberPalette[idx]
+func deriveGroupMemberID(code, deviceHash string) string {
+	id, _ := deriveGroupMemberIDAndColor(code, deviceHash)
+	return id
 }
 
 func normalizeAndValidateGroupCode(raw string) (string, bool) {
@@ -97,7 +107,7 @@ func normalizeAndValidateGroupCode(raw string) (string, bool) {
 	return code, true
 }
 
-func generateUniqueGroupCode(app core.App) (string, error) {
+func generateUniqueGroupCode(app core.App, store *live.LiveMemoryStore, now time.Time) (string, error) {
 	buf := make([]byte, groupCodeLength)
 	out := make([]byte, groupCodeLength)
 
@@ -106,10 +116,12 @@ func generateUniqueGroupCode(app core.App) (string, error) {
 			return "", err
 		}
 		for i, b := range buf {
-			// len(groupCodeAlphabet) == 32, so b & 31 has zero modulo bias.
 			out[i] = groupCodeAlphabet[int(b)&31]
 		}
 		code := string(out)
+		if _, inMem := store.GetActiveGroup(code, now); inMem {
+			continue
+		}
 		if existing, err := app.FindFirstRecordByData("trail_groups", "code", code); err != nil || existing == nil {
 			return code, nil
 		}
@@ -117,16 +129,28 @@ func generateUniqueGroupCode(app core.App) (string, error) {
 	return "", errors.New("failed to generate unique group code")
 }
 
-func findActiveGroupByCode(app core.App, code string, now time.Time) (*core.Record, error) {
+func resolveActiveGroupCached(app core.App, store *live.LiveMemoryStore, code string, now time.Time) (live.CachedGroup, bool) {
+	if meta, ok := store.GetActiveGroup(code, now); ok {
+		return meta, true
+	}
 	rec, err := app.FindFirstRecordByData("trail_groups", "code", code)
 	if err != nil || rec == nil {
-		return nil, nil
+		return live.CachedGroup{}, false
 	}
 	expDT := rec.GetDateTime("expires_at")
 	if !expDT.IsZero() && expDT.Time().Before(now) {
-		return nil, nil
+		return live.CachedGroup{}, false
 	}
-	return rec, nil
+	meta := live.CachedGroup{
+		RecordID:        rec.Id,
+		Code:            code,
+		TrailID:         rec.GetString("trail_id"),
+		OwnerDeviceHash: rec.GetString("owner_device_hash"),
+		ExpiresAt:       expDT.Time().UTC(),
+		LastDBSyncAt:    now,
+	}
+	store.UpsertGroup(meta)
+	return meta, true
 }
 
 func bindOptionalGroupBody(e *core.RequestEvent, dst any) error {
@@ -157,186 +181,146 @@ type groupMemberUpsertInput struct {
 	Speed                  *float64
 	AlongTrackM            *float64
 	InNavigation           *bool
+	Stationary             *bool
 	ReplaceOptionalMetrics bool
 }
 
-func upsertGroupMember(
-	app core.App,
+func sanitizeOptionalFloatPtr(v *float64) *float64 {
+	if v != nil && !math.IsNaN(*v) && !math.IsInf(*v, 0) && *v >= 0 {
+		cp := *v
+		return &cp
+	}
+	return nil
+}
+
+func upsertGroupMemberInStore(
+	store *live.LiveMemoryStore,
 	code string,
 	deviceHash string,
 	in groupMemberUpsertInput,
 	now time.Time,
-) (*core.Record, error) {
-	membersCol, err := app.FindCachedCollectionByNameOrId("trail_group_members")
-	if err != nil {
-		return nil, err
-	}
-
-	rec, findErr := app.FindFirstRecordByFilter(
-		"trail_group_members",
-		"group_code = {:code} && device_hash = {:deviceHash}",
-		dbx.Params{"code": code, "deviceHash": deviceHash},
-	)
-	isNew := findErr != nil || rec == nil
-	if isNew {
-		rec = core.NewRecord(membersCol)
-		rec.Set("group_code", code)
-		rec.Set("device_hash", deviceHash)
-		rec.Set("heading", unsetGroupOptionalFloat)
-		rec.Set("speed", unsetGroupOptionalFloat)
-		rec.Set("along_track_m", unsetGroupOptionalFloat)
-	}
-
-	rec.Set("member_id", deriveGroupMemberID(code, deviceHash))
-	rec.Set("color_hex", deriveGroupMemberColor(code, deviceHash))
+) live.CachedGroupMember {
+	prev, existed := store.GetGroupMember(code, deviceHash)
+	memberID, colorHex := deriveGroupMemberIDAndColor(code, deviceHash)
 
 	cleanName := sanitizePlainText(in.DisplayName, 24)
-	if cleanName != "" {
-		rec.Set("display_name", cleanName)
-	} else if strings.TrimSpace(rec.GetString("display_name")) == "" {
-		rec.Set("display_name", groupDefaultDisplayName)
-	}
-
-	if in.Lat != nil && in.Lon != nil {
-		rec.Set("lat", *in.Lat)
-		rec.Set("lon", *in.Lon)
-	}
-	if in.Ele != nil && !math.IsNaN(*in.Ele) && !math.IsInf(*in.Ele, 0) {
-		rec.Set("ele", *in.Ele)
-	}
-	if in.Accuracy != nil && !math.IsNaN(*in.Accuracy) && !math.IsInf(*in.Accuracy, 0) && *in.Accuracy >= 0 {
-		rec.Set("accuracy", *in.Accuracy)
-	}
-
-	setOptionalMetric := func(field string, val *float64) {
-		if val != nil && !math.IsNaN(*val) && !math.IsInf(*val, 0) && *val >= 0 {
-			rec.Set(field, *val)
-		} else if in.ReplaceOptionalMetrics || isNew {
-			rec.Set(field, unsetGroupOptionalFloat)
+	if cleanName == "" {
+		if existed && strings.TrimSpace(prev.DisplayName) != "" {
+			cleanName = prev.DisplayName
+		} else {
+			cleanName = groupDefaultDisplayName
 		}
 	}
-	setOptionalMetric("heading", in.Heading)
-	setOptionalMetric("speed", in.Speed)
-	setOptionalMetric("along_track_m", in.AlongTrackM)
 
+	lat, lon := prev.Lat, prev.Lon
+	if in.Lat != nil && in.Lon != nil {
+		lat = *in.Lat
+		lon = *in.Lon
+	}
+	ele := prev.Ele
+	if in.Ele != nil && !math.IsNaN(*in.Ele) && !math.IsInf(*in.Ele, 0) {
+		ele = *in.Ele
+	}
+	acc := prev.Accuracy
+	if in.Accuracy != nil && !math.IsNaN(*in.Accuracy) && !math.IsInf(*in.Accuracy, 0) && *in.Accuracy >= 0 {
+		acc = *in.Accuracy
+	}
+
+	pickOptional := func(incoming, existing *float64) *float64 {
+		if clean := sanitizeOptionalFloatPtr(incoming); clean != nil {
+			return clean
+		}
+		if in.ReplaceOptionalMetrics || !existed {
+			return nil
+		}
+		return existing
+	}
+
+	inNav := prev.InNavigation
 	if in.InNavigation != nil {
-		rec.Set("in_navigation", *in.InNavigation)
+		inNav = *in.InNavigation
 	}
-	rec.Set("last_seen", toPBDateTime(now))
+	stationary := prev.Stationary
+	if in.Stationary != nil {
+		stationary = *in.Stationary
+	}
 
-	if err := app.Save(rec); err != nil {
-		return nil, err
-	}
-	return rec, nil
+	return store.UpsertGroupMember(code, live.CachedGroupMember{
+		DeviceHash:   deviceHash,
+		MemberID:     memberID,
+		DisplayName:  cleanName,
+		ColorHex:     colorHex,
+		Lat:          lat,
+		Lon:          lon,
+		Ele:          ele,
+		Accuracy:     acc,
+		Heading:      pickOptional(in.Heading, prev.Heading),
+		Speed:        pickOptional(in.Speed, prev.Speed),
+		AlongTrackM:  pickOptional(in.AlongTrackM, prev.AlongTrackM),
+		InNavigation: inNav,
+		Stationary:   stationary,
+		CreatedAt:    prev.CreatedAt,
+		LastSeen:     now,
+	})
 }
 
-func toGroupMemberDto(rec *core.Record, callerDeviceHash string, fallbackNow time.Time) GroupMemberDto {
-	var headingPtr *float64
-	if h := rec.GetFloat("heading"); h >= 0 {
-		v := h
-		headingPtr = &v
-	}
-
-	var speedPtr *float64
-	if s := rec.GetFloat("speed"); s >= 0 {
-		v := s
-		speedPtr = &v
-	}
-
-	var alongPtr *float64
-	if a := rec.GetFloat("along_track_m"); a >= 0 {
-		v := a
-		alongPtr = &v
-	}
-
+func cachedMemberToDto(m live.CachedGroupMember, callerDeviceHash string, fallbackNow time.Time) GroupMemberDto {
 	updatedStr := fallbackNow.UTC().Format(time.RFC3339)
-	if lastSeenDT := rec.GetDateTime("last_seen"); !lastSeenDT.IsZero() {
-		updatedStr = lastSeenDT.Time().UTC().Format(time.RFC3339)
-	} else if updDT := rec.GetDateTime("updated"); !updDT.IsZero() {
-		updatedStr = updDT.Time().UTC().Format(time.RFC3339)
+	if !m.LastSeen.IsZero() {
+		updatedStr = m.LastSeen.UTC().Format(time.RFC3339)
 	}
-
-	code := rec.GetString("group_code")
-	recDeviceHash := rec.GetString("device_hash")
-	memberID := strings.TrimSpace(rec.GetString("member_id"))
-	if memberID == "" && code != "" && recDeviceHash != "" {
-		memberID = deriveGroupMemberID(code, recDeviceHash)
-	}
-	colorHex := strings.TrimSpace(rec.GetString("color_hex"))
-	if colorHex == "" && code != "" && recDeviceHash != "" {
-		colorHex = deriveGroupMemberColor(code, recDeviceHash)
-	}
-	if colorHex == "" {
-		colorHex = groupMemberPalette[0]
-	}
-
-	displayName := strings.TrimSpace(rec.GetString("display_name"))
+	displayName := strings.TrimSpace(m.DisplayName)
 	if displayName == "" {
 		displayName = groupDefaultDisplayName
 	}
-
-	isSelf := callerDeviceHash != "" && recDeviceHash != "" && callerDeviceHash == recDeviceHash
-
+	colorHex := m.ColorHex
+	if colorHex == "" {
+		colorHex = groupMemberPalette[0]
+	}
 	return GroupMemberDto{
-		MemberID:     memberID,
+		MemberID:     m.MemberID,
 		DisplayName:  displayName,
 		ColorHex:     colorHex,
-		Lat:          rec.GetFloat("lat"),
-		Lon:          rec.GetFloat("lon"),
-		Ele:          rec.GetFloat("ele"),
-		Accuracy:     rec.GetFloat("accuracy"),
-		Heading:      headingPtr,
-		Speed:        speedPtr,
-		AlongTrackM:  alongPtr,
-		InNavigation: rec.GetBool("in_navigation"),
-		IsSelf:       isSelf,
+		Lat:          m.Lat,
+		Lon:          m.Lon,
+		Ele:          m.Ele,
+		Accuracy:     m.Accuracy,
+		Heading:      m.Heading,
+		Speed:        m.Speed,
+		AlongTrackM:  m.AlongTrackM,
+		InNavigation: m.InNavigation,
+		Stationary:   m.Stationary,
+		IsSelf:       callerDeviceHash != "" && m.DeviceHash == callerDeviceHash,
 		UpdatedAt:    updatedStr,
 	}
 }
 
-func buildGroupSessionDto(
-	app core.App,
-	groupRec *core.Record,
+func buildGroupSessionDtoFromStore(
+	store *live.LiveMemoryStore,
+	meta live.CachedGroup,
 	callerDeviceHash string,
 	now time.Time,
-) (GroupSessionDto, error) {
-	code := groupRec.GetString("code")
-	cutoff := toPBDateTime(now.Add(-groupActiveMemberWindow)).String()
-
-	records, err := app.FindRecordsByFilter(
-		"trail_group_members",
-		"group_code = {:code} && last_seen >= {:cutoff}",
-		"+created",
-		100,
-		0,
-		dbx.Params{"code": code, "cutoff": cutoff},
-	)
-	if err != nil {
-		return GroupSessionDto{}, err
+) GroupSessionDto {
+	rawMembers := store.ListActiveGroupMembers(meta.Code, groupActiveMemberWindow, now)
+	members := make([]GroupMemberDto, len(rawMembers))
+	for i, m := range rawMembers {
+		members[i] = cachedMemberToDto(m, callerDeviceHash, now)
 	}
-
-	members := make([]GroupMemberDto, 0, len(records))
-	for _, rec := range records {
-		members = append(members, toGroupMemberDto(rec, callerDeviceHash, now))
-	}
-
 	expiresStr := now.Add(groupDefaultTTL).UTC().Format(time.RFC3339)
-	if expDT := groupRec.GetDateTime("expires_at"); !expDT.IsZero() {
-		expiresStr = expDT.Time().UTC().Format(time.RFC3339)
+	if !meta.ExpiresAt.IsZero() {
+		expiresStr = meta.ExpiresAt.UTC().Format(time.RFC3339)
 	}
-
 	selfMemberID := ""
 	if callerDeviceHash != "" {
-		selfMemberID = deriveGroupMemberID(code, callerDeviceHash)
+		selfMemberID = deriveGroupMemberID(meta.Code, callerDeviceHash)
 	}
-
 	return GroupSessionDto{
-		Code:         code,
-		TrailID:      groupRec.GetString("trail_id"),
+		Code:         meta.Code,
+		TrailID:      meta.TrailID,
 		ExpiresAt:    expiresStr,
 		SelfMemberID: selfMemberID,
 		Members:      members,
-	}, nil
+	}
 }
 
 type createGroupRequest struct {
@@ -351,12 +335,10 @@ type createGroupRequest struct {
 	Speed         *float64 `json:"speed"`
 	AlongTrackM   *float64 `json:"alongTrackM"`
 	InNavigation  *bool    `json:"inNavigation"`
+	Stationary    *bool    `json:"stationary"`
 }
 
-// CreateGroup handles POST /live/groups.
-// Supports optional `preferredCode` (`^[A-HJ-NP-Z2-9]{6}$`) so hiking groups
-// formed offline over BLE sync to the exact same 6-character code on 4G return
-// (merging members seamlessly if a groupmate already synced seconds earlier).
+// CreateGroup handles POST /live/groups (persisting group header in SQLite and member telemetry in RAM).
 func (h *TrailLiveHandler) CreateGroup(e *core.RequestEvent) error {
 	if err := verifyLiveInternalSecret(e); err != nil {
 		return err
@@ -382,6 +364,8 @@ func (h *TrailLiveHandler) CreateGroup(e *core.RequestEvent) error {
 	}
 
 	now := h.nowUTC()
+	store := h.readyStore(e.App)
+	newExp := now.Add(groupDefaultTTL)
 	memberInput := groupMemberUpsertInput{
 		DisplayName:            req.DisplayName,
 		Lat:                    req.Lat,
@@ -392,6 +376,7 @@ func (h *TrailLiveHandler) CreateGroup(e *core.RequestEvent) error {
 		Speed:                  req.Speed,
 		AlongTrackM:            req.AlongTrackM,
 		InNavigation:           req.InNavigation,
+		Stationary:             req.Stationary,
 		ReplaceOptionalMetrics: true,
 	}
 
@@ -407,9 +392,7 @@ func (h *TrailLiveHandler) CreateGroup(e *core.RequestEvent) error {
 			if findErr == nil && existing != nil {
 				expDT := existing.GetDateTime("expires_at")
 				if !expDT.IsZero() && expDT.Time().Before(now) {
-					_, _ = txApp.DB().NewQuery(
-						"DELETE FROM trail_group_members WHERE group_code = {:code}",
-					).Bind(dbx.Params{"code": prefCode}).Execute()
+					store.DeleteGroup(prefCode)
 					if delErr := txApp.Delete(existing); delErr != nil {
 						return delErr
 					}
@@ -419,7 +402,7 @@ func (h *TrailLiveHandler) CreateGroup(e *core.RequestEvent) error {
 
 			if existing != nil {
 				groupRec = existing
-				groupRec.Set("expires_at", toPBDateTime(now.Add(groupDefaultTTL)))
+				groupRec.Set("expires_at", toPBDateTime(newExp))
 				if groupRec.GetString("trail_id") == "" && strings.TrimSpace(req.TrailID) != "" {
 					groupRec.Set("trail_id", strings.TrimSpace(req.TrailID))
 				}
@@ -432,26 +415,30 @@ func (h *TrailLiveHandler) CreateGroup(e *core.RequestEvent) error {
 				groupRec.Set("code", prefCode)
 				groupRec.Set("trail_id", strings.TrimSpace(req.TrailID))
 				groupRec.Set("owner_device_hash", deviceHash)
-				groupRec.Set("expires_at", toPBDateTime(now.Add(groupDefaultTTL)))
+				groupRec.Set("expires_at", toPBDateTime(newExp))
 				if saveErr := txApp.Save(groupRec); saveErr != nil {
 					return saveErr
 				}
 			}
-
-			_, upErr := upsertGroupMember(txApp, prefCode, deviceHash, memberInput, now)
-			return upErr
+			return nil
 		}); err != nil {
 			return err
 		}
 
-		session, err := buildGroupSessionDto(e.App, groupRec, deviceHash, now)
-		if err != nil {
-			return err
+		meta := live.CachedGroup{
+			RecordID:        groupRec.Id,
+			Code:            prefCode,
+			TrailID:         groupRec.GetString("trail_id"),
+			OwnerDeviceHash: groupRec.GetString("owner_device_hash"),
+			ExpiresAt:       newExp,
+			LastDBSyncAt:    now,
 		}
-		return e.JSON(http.StatusOK, session)
+		store.UpsertGroup(meta)
+		upsertGroupMemberInStore(store, prefCode, deviceHash, memberInput, now)
+		return e.JSON(http.StatusOK, buildGroupSessionDtoFromStore(store, meta, deviceHash, now))
 	}
 
-	code, err := generateUniqueGroupCode(e.App)
+	code, err := generateUniqueGroupCode(e.App, store, now)
 	if err != nil {
 		return err
 	}
@@ -460,49 +447,43 @@ func (h *TrailLiveHandler) CreateGroup(e *core.RequestEvent) error {
 	groupRec.Set("code", code)
 	groupRec.Set("trail_id", strings.TrimSpace(req.TrailID))
 	groupRec.Set("owner_device_hash", deviceHash)
-	groupRec.Set("expires_at", toPBDateTime(now.Add(groupDefaultTTL)))
-
+	groupRec.Set("expires_at", toPBDateTime(newExp))
 	if err := e.App.Save(groupRec); err != nil {
 		return err
 	}
 
-	if _, err := upsertGroupMember(e.App, code, deviceHash, memberInput, now); err != nil {
-		return err
+	meta := live.CachedGroup{
+		RecordID:        groupRec.Id,
+		Code:            code,
+		TrailID:         groupRec.GetString("trail_id"),
+		OwnerDeviceHash: deviceHash,
+		ExpiresAt:       newExp,
+		LastDBSyncAt:    now,
 	}
-
-	session, err := buildGroupSessionDto(e.App, groupRec, deviceHash, now)
-	if err != nil {
-		return err
-	}
-	return e.JSON(http.StatusOK, session)
+	store.UpsertGroup(meta)
+	upsertGroupMemberInStore(store, code, deviceHash, memberInput, now)
+	return e.JSON(http.StatusOK, buildGroupSessionDtoFromStore(store, meta, deviceHash, now))
 }
 
-// GetGroup handles GET /live/groups/{code}.
+// GetGroup handles GET /live/groups/{code} directly from RAM.
 func (h *TrailLiveHandler) GetGroup(e *core.RequestEvent) error {
 	if err := verifyLiveInternalSecret(e); err != nil {
 		return err
 	}
-
 	code, ok := normalizeAndValidateGroupCode(e.Request.PathValue("code"))
 	if !ok {
 		return e.BadRequestError("Invalid group code", nil)
 	}
 
 	now := h.nowUTC()
-	groupRec, err := findActiveGroupByCode(e.App, code, now)
-	if err != nil {
-		return err
-	}
-	if groupRec == nil {
+	store := h.readyStore(e.App)
+	meta, active := resolveActiveGroupCached(e.App, store, code, now)
+	if !active {
 		return e.NotFoundError("Group not found or expired", nil)
 	}
 
 	callerDeviceHash := readDeviceHash(e.Request, false)
-	session, err := buildGroupSessionDto(e.App, groupRec, callerDeviceHash, now)
-	if err != nil {
-		return err
-	}
-	return e.JSON(http.StatusOK, session)
+	return e.JSON(http.StatusOK, buildGroupSessionDtoFromStore(store, meta, callerDeviceHash, now))
 }
 
 type joinGroupRequest struct {
@@ -515,6 +496,7 @@ type joinGroupRequest struct {
 	Speed        *float64 `json:"speed"`
 	AlongTrackM  *float64 `json:"alongTrackM"`
 	InNavigation *bool    `json:"inNavigation"`
+	Stationary   *bool    `json:"stationary"`
 }
 
 // JoinGroup handles POST /live/groups/{code}/join.
@@ -543,20 +525,18 @@ func (h *TrailLiveHandler) JoinGroup(e *core.RequestEvent) error {
 	}
 
 	now := h.nowUTC()
-	groupRec, err := findActiveGroupByCode(e.App, code, now)
-	if err != nil {
-		return err
-	}
-	if groupRec == nil {
+	store := h.readyStore(e.App)
+	if _, active := resolveActiveGroupCached(e.App, store, code, now); !active {
 		return e.NotFoundError("Group not found or expired", nil)
 	}
 
-	groupRec.Set("expires_at", toPBDateTime(now.Add(groupDefaultTTL)))
-	if err := e.App.Save(groupRec); err != nil {
-		return err
-	}
+	newExp := now.Add(groupDefaultTTL)
+	meta, _ := store.TouchGroupTTL(code, newExp, groupDefaultTTL+time.Second, now)
+	_, _ = e.App.DB().NewQuery(
+		"UPDATE trail_groups SET expires_at = {:exp} WHERE code = {:code}",
+	).Bind(dbx.Params{"exp": toPBDateTime(newExp).String(), "code": code}).Execute()
 
-	if _, err := upsertGroupMember(e.App, code, deviceHash, groupMemberUpsertInput{
+	upsertGroupMemberInStore(store, code, deviceHash, groupMemberUpsertInput{
 		DisplayName:            req.DisplayName,
 		Lat:                    req.Lat,
 		Lon:                    req.Lon,
@@ -566,16 +546,11 @@ func (h *TrailLiveHandler) JoinGroup(e *core.RequestEvent) error {
 		Speed:                  req.Speed,
 		AlongTrackM:            req.AlongTrackM,
 		InNavigation:           req.InNavigation,
+		Stationary:             req.Stationary,
 		ReplaceOptionalMetrics: false,
-	}, now); err != nil {
-		return err
-	}
+	}, now)
 
-	session, err := buildGroupSessionDto(e.App, groupRec, deviceHash, now)
-	if err != nil {
-		return err
-	}
-	return e.JSON(http.StatusOK, session)
+	return e.JSON(http.StatusOK, buildGroupSessionDtoFromStore(store, meta, deviceHash, now))
 }
 
 type pingGroupRequest struct {
@@ -588,11 +563,10 @@ type pingGroupRequest struct {
 	Speed        *float64 `json:"speed"`
 	AlongTrackM  *float64 `json:"alongTrackM"`
 	InNavigation *bool    `json:"inNavigation"`
+	Stationary   *bool    `json:"stationary"`
 }
 
-// PingGroup handles POST /live/groups/{code}/ping.
-// Updates member coordinates & telemetry, refreshes group expires_at (now + 12h),
-// and broadcasts `event: group_member_update` strictly to subscribers of `{code}`.
+// PingGroup handles POST /live/groups/{code}/ping in RAM (0 SQLite queries on 99.86% of pings).
 func (h *TrailLiveHandler) PingGroup(e *core.RequestEvent) error {
 	if err := verifyLiveInternalSecret(e); err != nil {
 		return err
@@ -616,20 +590,20 @@ func (h *TrailLiveHandler) PingGroup(e *core.RequestEvent) error {
 	}
 
 	now := h.nowUTC()
-	groupRec, err := findActiveGroupByCode(e.App, code, now)
-	if err != nil {
-		return err
-	}
-	if groupRec == nil {
+	store := h.readyStore(e.App)
+	if _, active := resolveActiveGroupCached(e.App, store, code, now); !active {
 		return e.NotFoundError("Group not found or expired", nil)
 	}
 
-	groupRec.Set("expires_at", toPBDateTime(now.Add(groupDefaultTTL)))
-	if err := e.App.Save(groupRec); err != nil {
-		return err
+	newExp := now.Add(groupDefaultTTL)
+	meta, needsDBWrite := store.TouchGroupTTL(code, newExp, groupDBRefreshThreshold, now)
+	if needsDBWrite {
+		_, _ = e.App.DB().NewQuery(
+			"UPDATE trail_groups SET expires_at = {:exp} WHERE code = {:code}",
+		).Bind(dbx.Params{"exp": toPBDateTime(newExp).String(), "code": code}).Execute()
 	}
 
-	memberRec, err := upsertGroupMember(e.App, code, deviceHash, groupMemberUpsertInput{
+	member := upsertGroupMemberInStore(store, code, deviceHash, groupMemberUpsertInput{
 		DisplayName:            req.DisplayName,
 		Lat:                    req.Lat,
 		Lon:                    req.Lon,
@@ -639,26 +613,31 @@ func (h *TrailLiveHandler) PingGroup(e *core.RequestEvent) error {
 		Speed:                  req.Speed,
 		AlongTrackM:            req.AlongTrackM,
 		InNavigation:           req.InNavigation,
+		Stationary:             req.Stationary,
 		ReplaceOptionalMetrics: true,
 	}, now)
-	if err != nil {
-		return err
+
+	h.liveHub().UpdateSubscriberLocation(deviceHash, *req.Lat, *req.Lon, meta.TrailID)
+	broadcastDto := cachedMemberToDto(member, "", now)
+	h.liveHub().PublishGroupEvent(code, "group_member_update", GroupMemberUpdateEventDto{
+		Type:      "group_member_update",
+		GroupCode: code,
+		Member:    broadcastDto,
+	})
+
+	if ack := strings.TrimSpace(e.Request.URL.Query().Get("ack")); ack == "1" || strings.EqualFold(ack, "true") {
+		return e.JSON(http.StatusOK, map[string]any{
+			"ok":           true,
+			"code":         code,
+			"selfMemberId": member.MemberID,
+			"expiresAt":    meta.ExpiresAt.UTC().Format(time.RFC3339),
+		})
 	}
 
-	// Outgoing SSE payload ALWAYS has isSelf: false so remote peers never mistake
-	// a teammate's broadcast for their own marker.
-	broadcastDto := toGroupMemberDto(memberRec, "", now)
-	h.liveHub().PublishGroupEvent(code, "group_member_update", broadcastDto)
-
-	session, err := buildGroupSessionDto(e.App, groupRec, deviceHash, now)
-	if err != nil {
-		return err
-	}
-	return e.JSON(http.StatusOK, session)
+	return e.JSON(http.StatusOK, buildGroupSessionDtoFromStore(store, meta, deviceHash, now))
 }
 
-// LeaveGroup handles POST /live/groups/{code}/leave.
-// Deletes the caller's member row and broadcasts `event: group_member_left`.
+// LeaveGroup handles POST /live/groups/{code}/leave in RAM and broadcasts `group_member_left`.
 func (h *TrailLiveHandler) LeaveGroup(e *core.RequestEvent) error {
 	if err := verifyLiveInternalSecret(e); err != nil {
 		return err
@@ -674,18 +653,11 @@ func (h *TrailLiveHandler) LeaveGroup(e *core.RequestEvent) error {
 	}
 
 	selfMemberID := deriveGroupMemberID(code, deviceHash)
-
-	if rec, findErr := e.App.FindFirstRecordByFilter(
-		"trail_group_members",
-		"group_code = {:code} && device_hash = {:deviceHash}",
-		dbx.Params{"code": code, "deviceHash": deviceHash},
-	); findErr == nil && rec != nil {
-		if err := e.App.Delete(rec); err != nil {
-			return err
-		}
-	}
+	store := h.readyStore(e.App)
+	store.RemoveGroupMember(code, deviceHash)
 
 	h.liveHub().PublishGroupEvent(code, "group_member_left", GroupMemberLeftDto{
+		Type:      "group_member_left",
 		GroupCode: code,
 		MemberID:  selfMemberID,
 	})
@@ -697,7 +669,7 @@ func (h *TrailLiveHandler) LeaveGroup(e *core.RequestEvent) error {
 	})
 }
 
-func cleanTrailGroupsGC(app core.App, now time.Time) error {
+func cleanTrailGroupsGC(app core.App, store *live.LiveMemoryStore, now time.Time) error {
 	nowStr := toPBDateTime(now).String()
 	staleMemberCutoff := toPBDateTime(now.Add(-groupStaleMemberGCWindow)).String()
 
@@ -711,11 +683,14 @@ func cleanTrailGroupsGC(app core.App, now time.Time) error {
 
 	if _, err := app.FindCachedCollectionByNameOrId("trail_group_members"); err == nil {
 		if _, err := app.DB().NewQuery(
-			"DELETE FROM trail_group_members WHERE last_seen = '' OR last_seen < {:cutoff} OR group_code NOT IN (SELECT code FROM trail_groups)",
+			"DELETE FROM trail_group_members WHERE last_seen = '' OR last_seen < {:cutoff}",
 		).Bind(dbx.Params{"cutoff": staleMemberCutoff}).Execute(); err != nil {
 			return err
 		}
 	}
 
+	if store != nil {
+		store.SweepGroupsGC(groupStaleMemberGCWindow, now)
+	}
 	return nil
 }

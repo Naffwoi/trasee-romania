@@ -13,19 +13,16 @@ import (
 	"github.com/pocketbase/dbx"
 	"github.com/pocketbase/pocketbase/core"
 	"github.com/pocketbase/pocketbase/tools/types"
-	"github.com/twpayne/go-polyline"
 
 	"pocketbase/services/live"
 	"pocketbase/util"
 )
 
 const (
-	presenceWindow           = 30 * time.Minute
-	livePresenceWindow       = 2 * time.Minute
-	presenceAreaRadiusMeters = 2000.0
-	reportDedupMeters        = 40.0
-	sosDefaultTTL            = 6 * time.Hour
-	unsetAlongTrackVal       = -1.0
+	presenceWindow     = 30 * time.Minute
+	reportDedupMeters  = 40.0
+	sosDefaultTTL      = 6 * time.Hour
+	unsetAlongTrackVal = -1.0
 )
 
 type reportCategoryMeta struct {
@@ -124,8 +121,9 @@ type PushTargetDto struct {
 // TrailLiveHandler groups the internal `/live/*` endpoints with an injectable
 // SSE hub and clock for deterministic unit tests.
 type TrailLiveHandler struct {
-	Hub *live.TrailLiveHub
-	Now func() time.Time
+	Hub   *live.TrailLiveHub
+	Store *live.LiveMemoryStore
+	Now   func() time.Time
 }
 
 // NewTrailLiveHandler creates a handler backed by hub (or live.DefaultHub() if nil).
@@ -134,8 +132,9 @@ func NewTrailLiveHandler(hub *live.TrailLiveHub) *TrailLiveHandler {
 		hub = live.DefaultHub()
 	}
 	return &TrailLiveHandler{
-		Hub: hub,
-		Now: func() time.Time { return time.Now().UTC() },
+		Hub:   hub,
+		Store: storeForHub(hub),
+		Now:   func() time.Time { return time.Now().UTC() },
 	}
 }
 
@@ -151,6 +150,19 @@ func (h *TrailLiveHandler) liveHub() *live.TrailLiveHub {
 		return h.Hub
 	}
 	return live.DefaultHub()
+}
+
+func (h *TrailLiveHandler) memoryStore() *live.LiveMemoryStore {
+	if h != nil && h.Store != nil {
+		return h.Store
+	}
+	return storeForHub(h.liveHub())
+}
+
+func (h *TrailLiveHandler) readyStore(app core.App) *live.LiveMemoryStore {
+	st := h.memoryStore()
+	_ = HydrateLiveMemoryStore(app, st)
+	return st
 }
 
 // RegisterTrailLiveRoutes wires all `/live/*` routes on se.Router.
@@ -354,156 +366,30 @@ func toSosAlertDto(rec *core.Record, callerDeviceHash string, respondingDevices 
 	}
 }
 
-func distanceToCoordsCorridorMeters(lat, lon float64, coords [][]float64) float64 {
-	if len(coords) == 0 {
-		return math.Inf(1)
-	}
-	if len(coords) == 1 {
-		return util.HaversineDistanceMeters(lat, lon, coords[0][0], coords[0][1])
-	}
-
-	const metersPerDegLat = 111132.92
-	cosLat := math.Max(0.1, math.Cos(lat*math.Pi/180.0))
-	metersPerDegLon := metersPerDegLat * cosLat
-
-	minDistSq := math.Inf(1)
-	for i := 0; i < len(coords)-1; i++ {
-		ax := (coords[i][1] - lon) * metersPerDegLon
-		ay := (coords[i][0] - lat) * metersPerDegLat
-		bx := (coords[i+1][1] - lon) * metersPerDegLon
-		by := (coords[i+1][0] - lat) * metersPerDegLat
-
-		dx := bx - ax
-		dy := by - ay
-		segLenSq := dx*dx + dy*dy
-		var t float64
-		if segLenSq > 1e-9 {
-			t = -(ax*dx + ay*dy) / segLenSq
-			if t < 0 {
-				t = 0
-			} else if t > 1 {
-				t = 1
-			}
-		}
-		px := ax + t*dx
-		py := ay + t*dy
-		dSq := px*px + py*py
-		if dSq < minDistSq {
-			minDistSq = dSq
-		}
-	}
-	return math.Sqrt(minDistSq)
-}
-
-func resolveTrailOrRefCorridor(app core.App, trailID string, refLat, refLon float64, hasRefCoords bool) [][]float64 {
-	trailID = strings.TrimSpace(trailID)
-	if trailID != "" {
-		if trailRec, err := app.FindRecordById("trails", trailID); err == nil && trailRec != nil {
-			if poly := strings.TrimSpace(trailRec.GetString("polyline")); poly != "" {
-				if coords, _, decErr := polyline.DecodeCoords([]byte(poly)); decErr == nil && len(coords) > 0 {
-					return coords
-				}
-			}
-			tLat := trailRec.GetFloat("lat")
-			tLon := trailRec.GetFloat("lon")
-			if tLat != 0 || tLon != 0 {
-				return [][]float64{{tLat, tLon}}
-			}
-		}
-	}
-	if hasRefCoords {
-		return [][]float64{{refLat, refLon}}
-	}
-	return nil
-}
-
-// countActiveNearbyUsers counts OTHER distinct devices (`device_hash != callerDeviceHash`)
-// that currently have the app open (`last_seen >= now - 2 min`) AND have live GPS location
-// inside the 2 km corridor of the target trail / reference location.
-func countActiveNearbyUsers(
+func queryLiveSnapshotFromStore(
 	app core.App,
+	store *live.LiveMemoryStore,
 	trailID string,
 	refLat, refLon float64,
 	hasRefCoords bool,
 	callerDeviceHash string,
 	now time.Time,
-) (int, error) {
-	corridor := resolveTrailOrRefCorridor(app, trailID, refLat, refLon, hasRefCoords)
-	if len(corridor) == 0 {
-		return 0, nil
+) (int, []TrailReportDto, []SosAlertDto) {
+	corridor := resolveTrailCorridorCached(app, store, trailID, refLat, refLon, hasRefCoords)
+	activeHikers := store.CountActiveNearbyUsers(corridor, callerDeviceHash, now)
+
+	cachedReps := store.QueryVisibleReports(trailID, refLat, refLon, hasRefCoords, now)
+	reports := make([]TrailReportDto, len(cachedReps))
+	for i, r := range cachedReps {
+		reports[i] = cachedReportToDto(r)
 	}
 
-	minLat, maxLat := corridor[0][0], corridor[0][0]
-	minLon, maxLon := corridor[0][1], corridor[0][1]
-	for _, c := range corridor[1:] {
-		if c[0] < minLat {
-			minLat = c[0]
-		}
-		if c[0] > maxLat {
-			maxLat = c[0]
-		}
-		if c[1] < minLon {
-			minLon = c[1]
-		}
-		if c[1] > maxLon {
-			maxLon = c[1]
-		}
+	cachedSos, respBySos := store.QueryActiveSos(trailID, refLat, refLon, hasRefCoords, callerDeviceHash, now)
+	sosAlerts := make([]SosAlertDto, len(cachedSos))
+	for i, s := range cachedSos {
+		sosAlerts[i] = cachedSosToDto(s, callerDeviceHash, respBySos[s.ID])
 	}
-	// ~2 km margin with generous latitude/longitude buffer for fast SQL pre-filtering
-	const latPad = 0.03
-	const lonPad = 0.05
-
-	cutoff := toPBDateTime(now.Add(-livePresenceWindow)).String()
-	records, err := app.FindRecordsByFilter(
-		"trail_presence",
-		"last_seen >= {:cutoff} && lat >= {:minLat} && lat <= {:maxLat} && lon >= {:minLon} && lon <= {:maxLon}",
-		"",
-		500,
-		0,
-		dbx.Params{
-			"cutoff": cutoff,
-			"minLat": minLat - latPad,
-			"maxLat": maxLat + latPad,
-			"minLon": minLon - lonPad,
-			"maxLon": maxLon + lonPad,
-		},
-	)
-	if err != nil {
-		return 0, err
-	}
-
-	seenDevices := make(map[string]bool)
-	for _, rec := range records {
-		dh := strings.TrimSpace(rec.GetString("device_hash"))
-		if dh == "" || (callerDeviceHash != "" && dh == callerDeviceHash) || seenDevices[dh] {
-			continue
-		}
-		pLat := rec.GetFloat("lat")
-		pLon := rec.GetFloat("lon")
-		if distanceToCoordsCorridorMeters(pLat, pLon, corridor) <= presenceAreaRadiusMeters {
-			seenDevices[dh] = true
-		}
-	}
-
-	return len(seenDevices), nil
-}
-
-func isReportVisibleAt(rec *core.Record, now time.Time) bool {
-	status := rec.GetString("condition_status")
-	if status != "active" && status != "dry_or_closed" {
-		return false
-	}
-	if rec.GetBool("is_permanent") {
-		return true
-	}
-	if meta, ok := reportCategories[rec.GetString("category")]; ok && meta.IsPermanent {
-		return true
-	}
-	expDT := rec.GetDateTime("expires_at")
-	if expDT.IsZero() {
-		return true
-	}
-	return !expDT.Time().Before(now)
+	return activeHikers, reports, sosAlerts
 }
 
 func loadActiveRespondersMap(app core.App, sosID string, now time.Time) (map[string]bool, error) {
@@ -528,89 +414,17 @@ func loadActiveRespondersMap(app core.App, sosID string, now time.Time) (map[str
 	return out, nil
 }
 
-func queryVisibleReports(app core.App, trailID string, lat, lon float64, hasCoords bool, now time.Time) ([]TrailReportDto, error) {
-	records, err := app.FindRecordsByFilter(
-		"trail_reports",
-		"condition_status = 'active' || condition_status = 'dry_or_closed'",
-		"-created",
-		500,
-		0,
-		nil,
-	)
-	if err != nil {
-		return nil, err
-	}
-
-	dtos := make([]TrailReportDto, 0)
-	for _, rec := range records {
-		if !isReportVisibleAt(rec, now) {
-			continue
-		}
-		recTrail := rec.GetString("trail_id")
-		matched := false
-		if trailID != "" && recTrail == trailID {
-			matched = true
-		} else if hasCoords {
-			if util.HaversineDistanceMeters(lat, lon, rec.GetFloat("lat"), rec.GetFloat("lon")) <= live.LiveRadiusMeters {
-				matched = true
-			}
-		}
-		if matched {
-			dtos = append(dtos, toTrailReportDto(rec))
-		}
-	}
-	return dtos, nil
-}
-
-func queryActiveSosAlerts(app core.App, trailID string, lat, lon float64, hasCoords bool, callerDeviceHash string, now time.Time) ([]SosAlertDto, error) {
-	nowStr := toPBDateTime(now).String()
-	records, err := app.FindRecordsByFilter(
-		"sos_alerts",
-		"status = 'active' && (expires_at = '' || expires_at >= {:now})",
-		"-created",
-		100,
-		0,
-		dbx.Params{"now": nowStr},
-	)
-	if err != nil {
-		return nil, err
-	}
-
-	dtos := make([]SosAlertDto, 0)
-	for _, rec := range records {
-		recTrail := rec.GetString("trail_id")
-		isOwner := callerDeviceHash != "" && rec.GetString("device_hash") == callerDeviceHash
-		matched := isOwner
-		if !matched && trailID != "" && recTrail == trailID {
-			matched = true
-		}
-		if !matched && hasCoords {
-			if util.HaversineDistanceMeters(lat, lon, rec.GetFloat("lat"), rec.GetFloat("lon")) <= live.LiveRadiusMeters {
-				matched = true
-			}
-		}
-		respMap, _ := loadActiveRespondersMap(app, rec.Id, now)
-		if !matched && callerDeviceHash != "" && respMap[callerDeviceHash] {
-			matched = true
-		}
-		if matched {
-			dtos = append(dtos, toSosAlertDto(rec, callerDeviceHash, respMap))
-		}
-	}
-	return dtos, nil
-}
-
 type heartbeatRequest struct {
 	TrailID      string   `json:"trailId"`
 	Lat          *float64 `json:"lat"`
 	Lon          *float64 `json:"lon"`
 	Ele          *float64 `json:"ele"`
 	InNavigation *bool    `json:"inNavigation"`
+	Stationary   *bool    `json:"stationary"`
+	StateHash    string   `json:"stateHash"`
 }
 
-// Heartbeat handles POST /live/heartbeat.
-// Upserts trail_presence (never exposing raw presence coordinates), updates any
-// push_subscriptions for this deviceHash, and returns { activeHikers30m, reports, sosAlerts }.
+// Heartbeat handles POST /live/heartbeat entirely in RAM (0 SQLite reads/writes on hot path).
 func (h *TrailLiveHandler) Heartbeat(e *core.RequestEvent) error {
 	if err := verifyLiveInternalSecret(e); err != nil {
 		return err
@@ -629,7 +443,7 @@ func (h *TrailLiveHandler) Heartbeat(e *core.RequestEvent) error {
 	}
 
 	now := h.nowUTC()
-	nowDT := toPBDateTime(now)
+	store := h.readyStore(e.App)
 	trailID := strings.TrimSpace(req.TrailID)
 	ele := 0.0
 	if req.Ele != nil && !math.IsNaN(*req.Ele) && !math.IsInf(*req.Ele, 0) {
@@ -639,62 +453,38 @@ func (h *TrailLiveHandler) Heartbeat(e *core.RequestEvent) error {
 	if req.InNavigation != nil {
 		inNav = *req.InNavigation
 	}
-
-	presenceCol, err := e.App.FindCachedCollectionByNameOrId("trail_presence")
-	if err != nil {
-		return err
+	stationary := false
+	if req.Stationary != nil {
+		stationary = *req.Stationary
 	}
 
-	presenceRec, err := e.App.FindFirstRecordByData("trail_presence", "device_hash", deviceHash)
-	if err != nil || presenceRec == nil {
-		presenceRec = core.NewRecord(presenceCol)
-		presenceRec.Set("device_hash", deviceHash)
-	}
-	presenceRec.Set("trail_id", trailID)
-	presenceRec.Set("lat", *req.Lat)
-	presenceRec.Set("lon", *req.Lon)
-	presenceRec.Set("ele", ele)
-	presenceRec.Set("in_navigation", inNav)
-	presenceRec.Set("last_seen", nowDT)
+	store.UpsertPresence(live.PresenceEntry{
+		DeviceHash:   deviceHash,
+		TrailID:      trailID,
+		Lat:          *req.Lat,
+		Lon:          *req.Lon,
+		Ele:          ele,
+		InNavigation: inNav,
+		Stationary:   stationary,
+		LastSeen:     now,
+	})
+	store.TouchPushLocation(deviceHash, *req.Lat, *req.Lon, trailID)
+	h.liveHub().UpdateSubscriberLocation(deviceHash, *req.Lat, *req.Lon, trailID)
 
-	if err := e.App.Save(presenceRec); err != nil {
-		return err
-	}
+	activeHikers, reports, sosAlerts := queryLiveSnapshotFromStore(e.App, store, trailID, *req.Lat, *req.Lon, true, deviceHash, now)
+	stateHash := computeLiveStateHash(reports, sosAlerts)
 
-	// Keep push_subscriptions location/trail fresh for 5 km SOS fan-out.
-	if subs, subErr := e.App.FindRecordsByFilter(
-		"push_subscriptions",
-		"device_hash = {:deviceHash}",
-		"",
-		50,
-		0,
-		dbx.Params{"deviceHash": deviceHash},
-	); subErr == nil {
-		for _, sub := range subs {
-			sub.Set("lat", *req.Lat)
-			sub.Set("lon", *req.Lon)
-			sub.Set("trail_id", trailID)
-			_ = e.App.Save(sub)
-		}
-	}
-
-	activeHikers, err := countActiveNearbyUsers(e.App, trailID, *req.Lat, *req.Lon, true, deviceHash, now)
-	if err != nil {
-		return err
-	}
-
-	reports, err := queryVisibleReports(e.App, trailID, *req.Lat, *req.Lon, true, now)
-	if err != nil {
-		return err
-	}
-
-	sosAlerts, err := queryActiveSosAlerts(e.App, trailID, *req.Lat, *req.Lon, true, deviceHash, now)
-	if err != nil {
-		return err
+	if reqHash := strings.TrimSpace(req.StateHash); reqHash != "" && strings.EqualFold(reqHash, stateHash) {
+		return e.JSON(http.StatusOK, map[string]any{
+			"activeHikers30m": activeHikers,
+			"stateHash":       stateHash,
+			"unchanged":       true,
+		})
 	}
 
 	return e.JSON(http.StatusOK, map[string]any{
 		"activeHikers30m": activeHikers,
+		"stateHash":       stateHash,
 		"reports":         reports,
 		"sosAlerts":       sosAlerts,
 	})
@@ -710,9 +500,7 @@ func (h *TrailLiveHandler) ClearHeartbeat(e *core.RequestEvent) error {
 	if err != nil {
 		return err
 	}
-	if rec, findErr := e.App.FindFirstRecordByData("trail_presence", "device_hash", deviceHash); findErr == nil && rec != nil {
-		_ = e.App.Delete(rec)
-	}
+	h.readyStore(e.App).DeletePresence(deviceHash)
 	return e.JSON(http.StatusOK, map[string]any{"ok": true})
 }
 
@@ -743,24 +531,22 @@ func (h *TrailLiveHandler) TrailSummary(e *core.RequestEvent) error {
 		}
 	}
 
-	activeHikers, err := countActiveNearbyUsers(e.App, trailID, refLat, refLon, hasRefCoords, callerDeviceHash, now)
-	if err != nil {
-		return err
-	}
-
-	reports, err := queryVisibleReports(e.App, trailID, refLat, refLon, hasRefCoords, now)
-	if err != nil {
-		return err
-	}
-
-	sosAlerts, err := queryActiveSosAlerts(e.App, trailID, refLat, refLon, hasRefCoords, callerDeviceHash, now)
-	if err != nil {
-		return err
+	store := h.readyStore(e.App)
+	activeHikers, reports, sosAlerts := queryLiveSnapshotFromStore(e.App, store, trailID, refLat, refLon, hasRefCoords, callerDeviceHash, now)
+	stateHash := computeLiveStateHash(reports, sosAlerts)
+	if reqHash := strings.TrimSpace(q.Get("stateHash")); reqHash != "" && strings.EqualFold(reqHash, stateHash) {
+		return e.JSON(http.StatusOK, map[string]any{
+			"trailId":         trailID,
+			"activeHikers30m": activeHikers,
+			"stateHash":       stateHash,
+			"unchanged":       true,
+		})
 	}
 
 	return e.JSON(http.StatusOK, map[string]any{
 		"trailId":         trailID,
 		"activeHikers30m": activeHikers,
+		"stateHash":       stateHash,
 		"reports":         reports,
 		"sosAlerts":       sosAlerts,
 	})
@@ -806,30 +592,11 @@ func (h *TrailLiveHandler) CreateReport(e *core.RequestEvent) error {
 	now := h.nowUTC()
 	cleanNote := sanitizePlainText(req.Note, 160)
 	trailID := strings.TrimSpace(req.TrailID)
+	store := h.readyStore(e.App)
 
-	// Deduplicate within 40 m if an active/dry_or_closed report of the same category exists.
-	candidates, err := e.App.FindRecordsByFilter(
-		"trail_reports",
-		"category = {:category} && (condition_status = 'active' || condition_status = 'dry_or_closed')",
-		"-created",
-		200,
-		0,
-		dbx.Params{"category": category},
-	)
-	if err == nil {
-		var closest *core.Record
-		closestDist := reportDedupMeters + 1.0
-		for _, cand := range candidates {
-			if !isReportVisibleAt(cand, now) {
-				continue
-			}
-			d := util.HaversineDistanceMeters(*req.Lat, *req.Lon, cand.GetFloat("lat"), cand.GetFloat("lon"))
-			if d <= reportDedupMeters && d < closestDist {
-				closest = cand
-				closestDist = d
-			}
-		}
-		if closest != nil {
+	// Deduplicate within 40 m via O(1) RAM spatial index.
+	if dup, found := store.FindNearbyDuplicateReport(category, *req.Lat, *req.Lon, reportDedupMeters, now); found {
+		if closest, findErr := e.App.FindRecordById("trail_reports", dup.ID); findErr == nil && closest != nil {
 			if closest.GetString("note") == "" && cleanNote != "" {
 				closest.Set("note", cleanNote)
 			}
@@ -895,6 +662,7 @@ func (h *TrailLiveHandler) CreateReport(e *core.RequestEvent) error {
 	voteRec.Set("vote", "confirm")
 	_ = e.App.Save(voteRec)
 
+	store.UpsertReport(recordToCachedReport(rec))
 	dto := toTrailReportDto(rec)
 	h.liveHub().BroadcastReportUpdate(live.GeoTarget{
 		TrailID:   dto.TrailID,
@@ -1049,6 +817,7 @@ func (h *TrailLiveHandler) applyReportVote(app core.App, reportRec *core.Record,
 		return TrailReportDto{}, err
 	}
 
+	h.readyStore(app).UpsertReport(recordToCachedReport(reportRec))
 	dto := toTrailReportDto(reportRec)
 	h.liveHub().BroadcastReportUpdate(live.GeoTarget{
 		TrailID:   dto.TrailID,
@@ -1123,6 +892,7 @@ func (h *TrailLiveHandler) CreateSos(e *core.RequestEvent) error {
 	}
 
 	now := h.nowUTC()
+	store := h.readyStore(e.App)
 	trailID := strings.TrimSpace(req.TrailID)
 	cleanMessage := sanitizePlainText(req.Message, 200)
 	cleanRequester := sanitizePlainText(req.RequesterName, 40)
@@ -1214,15 +984,10 @@ func (h *TrailLiveHandler) CreateSos(e *core.RequestEvent) error {
 			return txErr
 		}
 
+		store.UpsertSos(recordToCachedSos(sosRec))
 		pushTargets := []PushTargetDto{}
 		if !claimedExisting {
-			pts, ptErr := selectSosPushTargets(e.App, deviceHash, trailID, *req.Lat, *req.Lon, now)
-			if ptErr != nil {
-				return ptErr
-			}
-			if len(pts) > 0 {
-				pushTargets = pts
-			}
+			pushTargets = selectSosPushTargetsFromStore(store, deviceHash, trailID, *req.Lat, *req.Lon, now)
 		}
 
 		h.broadcastSosRecord(sosRec, respondingDevices)
@@ -1254,10 +1019,8 @@ func (h *TrailLiveHandler) CreateSos(e *core.RequestEvent) error {
 		return err
 	}
 
-	pushTargets, err := selectSosPushTargets(e.App, deviceHash, trailID, *req.Lat, *req.Lon, now)
-	if err != nil {
-		return err
-	}
+	store.UpsertSos(recordToCachedSos(sosRec))
+	pushTargets := selectSosPushTargetsFromStore(store, deviceHash, trailID, *req.Lat, *req.Lon, now)
 
 	respondingDevices := map[string]bool{}
 	h.broadcastSosRecord(sosRec, respondingDevices)
@@ -1269,90 +1032,18 @@ func (h *TrailLiveHandler) CreateSos(e *core.RequestEvent) error {
 	})
 }
 
-func selectSosPushTargets(app core.App, callerDeviceHash, sosTrailID string, sosLat, sosLon float64, now time.Time) ([]PushTargetDto, error) {
-	cutoff := toPBDateTime(now.Add(-presenceWindow)).String()
-	presenceRecords, _ := app.FindRecordsByFilter(
-		"trail_presence",
-		"last_seen >= {:cutoff}",
-		"",
-		0,
-		0,
-		dbx.Params{"cutoff": cutoff},
-	)
-	presenceByDevice := make(map[string]*core.Record, len(presenceRecords))
-	for _, p := range presenceRecords {
-		if dh := p.GetString("device_hash"); dh != "" && dh != callerDeviceHash {
-			presenceByDevice[dh] = p
+func selectSosPushTargetsFromStore(store *live.LiveMemoryStore, callerDeviceHash, sosTrailID string, sosLat, sosLon float64, now time.Time) []PushTargetDto {
+	matched := store.SelectSosPushTargets(callerDeviceHash, sosTrailID, sosLat, sosLon, now)
+	out := make([]PushTargetDto, len(matched))
+	for i, m := range matched {
+		out[i] = PushTargetDto{
+			Endpoint:  m.Endpoint,
+			P256dh:    m.P256dh,
+			Auth:      m.Auth,
+			DistanceM: m.DistanceM,
 		}
 	}
-
-	subs, err := app.FindRecordsByFilter(
-		"push_subscriptions",
-		"device_hash != {:callerHash}",
-		"",
-		0,
-		0,
-		dbx.Params{"callerHash": callerDeviceHash},
-	)
-	if err != nil {
-		return []PushTargetDto{}, nil
-	}
-
-	targets := make([]PushTargetDto, 0)
-	seenEndpoints := make(map[string]bool)
-
-	for _, sub := range subs {
-		endpoint := strings.TrimSpace(sub.GetString("endpoint"))
-		p256dh := strings.TrimSpace(sub.GetString("p256dh"))
-		auth := strings.TrimSpace(sub.GetString("auth"))
-		subDevice := sub.GetString("device_hash")
-
-		if endpoint == "" || p256dh == "" || auth == "" || subDevice == callerDeviceHash || seenEndpoints[endpoint] {
-			continue
-		}
-
-		matched := false
-		bestDist := math.Inf(1)
-
-		if pres, ok := presenceByDevice[subDevice]; ok {
-			d := util.HaversineDistanceMeters(sosLat, sosLon, pres.GetFloat("lat"), pres.GetFloat("lon"))
-			bestDist = d
-			if d <= live.LiveRadiusMeters || (sosTrailID != "" && pres.GetString("trail_id") == sosTrailID) {
-				matched = true
-			}
-		}
-
-		subLat := sub.GetFloat("lat")
-		subLon := sub.GetFloat("lon")
-		if subLat != 0 || subLon != 0 {
-			d := util.HaversineDistanceMeters(sosLat, sosLon, subLat, subLon)
-			if math.IsInf(bestDist, 1) {
-				bestDist = d
-			}
-			if d <= live.LiveRadiusMeters {
-				matched = true
-			}
-		}
-
-		if sosTrailID != "" && sub.GetString("trail_id") == sosTrailID {
-			matched = true
-		}
-
-		if matched {
-			seenEndpoints[endpoint] = true
-			if math.IsInf(bestDist, 1) {
-				bestDist = 0
-			}
-			targets = append(targets, PushTargetDto{
-				Endpoint:  endpoint,
-				P256dh:    p256dh,
-				Auth:      auth,
-				DistanceM: math.Round(bestDist),
-			})
-		}
-	}
-
-	return targets, nil
+	return out
 }
 
 type updateSosRequest struct {
@@ -1454,6 +1145,7 @@ func (h *TrailLiveHandler) UpdateSos(e *core.RequestEvent) error {
 		return err
 	}
 
+	h.readyStore(e.App).UpsertSos(recordToCachedSos(sosRec))
 	h.broadcastSosRecord(sosRec, respondingDevices)
 	dto := toSosAlertDto(sosRec, deviceHash, respondingDevices)
 	return e.JSON(http.StatusOK, map[string]any{"sos": dto})
@@ -1574,6 +1266,20 @@ func (h *TrailLiveHandler) RespondSos(e *core.RequestEvent) error {
 		return err
 	}
 
+	store := h.readyStore(e.App)
+	store.UpsertSos(recordToCachedSos(sosRec))
+	store.UpsertSosResponder(live.CachedSosResponder{
+		RecordID:   respRec.Id,
+		SosID:      sosRec.Id,
+		DeviceHash: deviceHash,
+		Lat:        lat,
+		Lon:        lon,
+		Ele:        ele,
+		DistanceM:  math.Round(distM),
+		EtaSec:     etaSec,
+		Status:     status,
+		LastSeen:   now,
+	})
 	h.broadcastSosRecord(sosRec, respondingDevices)
 	dto := toSosAlertDto(sosRec, deviceHash, respondingDevices)
 	return e.JSON(http.StatusOK, map[string]any{"sos": dto})
@@ -1724,6 +1430,17 @@ func (h *TrailLiveHandler) PushSubscribe(e *core.RequestEvent) error {
 		return err
 	}
 
+	h.readyStore(e.App).UpsertPushSub(live.PushSubEntry{
+		ID:         subRec.Id,
+		DeviceHash: deviceHash,
+		Endpoint:   endpoint,
+		P256dh:     p256dh,
+		Auth:       auth,
+		Lat:        subRec.GetFloat("lat"),
+		Lon:        subRec.GetFloat("lon"),
+		TrailID:    subRec.GetString("trail_id"),
+	}, true)
+
 	return e.JSON(http.StatusOK, map[string]any{"ok": true})
 }
 
@@ -1754,6 +1471,7 @@ func (h *TrailLiveHandler) PushUnsubscribe(e *core.RequestEvent) error {
 			return err
 		}
 	}
+	h.readyStore(e.App).DeletePushSub(endpoint)
 
 	return e.JSON(http.StatusOK, map[string]any{"ok": true})
 }
@@ -1801,10 +1519,18 @@ func (h *TrailLiveHandler) Stream(e *core.RequestEvent) error {
 // expires_at="") are never expired.
 func RunTrailLiveGC(app core.App, hub *live.TrailLiveHub, now time.Time) error {
 	now = now.UTC()
+	store := storeForHub(hub)
+	_ = HydrateLiveMemoryStore(app, store)
+
+	// 1. Sweep ephemeral RAM presence (>30m) and flush coarse-drifted push_subscriptions.
+	store.SweepStalePresence(now)
+	store.SweepGroupsGC(groupStaleMemberGCWindow, now)
+	_ = flushDirtyPushSubsToDB(app, store)
+
 	cutoffPresence := toPBDateTime(now.Add(-presenceWindow)).String()
 	nowStr := toPBDateTime(now).String()
 
-	// 1. Purge trail_presence rows older than 30 minutes.
+	// Clean any legacy trail_presence rows left in SQLite from pre-upgrade runs.
 	if _, err := app.DB().NewQuery(
 		"DELETE FROM trail_presence WHERE last_seen = '' OR last_seen < {:cutoff}",
 	).Bind(dbx.Params{"cutoff": cutoffPresence}).Execute(); err != nil {
@@ -1831,6 +1557,7 @@ func RunTrailLiveGC(app core.App, hub *live.TrailLiveHub, now time.Time) error {
 		if err := app.Save(rep); err != nil {
 			return err
 		}
+		store.RemoveReport(rep.Id)
 		if hub != nil {
 			dto := toTrailReportDto(rep)
 			hub.BroadcastReportUpdate(live.GeoTarget{
@@ -1859,8 +1586,9 @@ func RunTrailLiveGC(app core.App, hub *live.TrailLiveHub, now time.Time) error {
 		if err := app.Save(sosRec); err != nil {
 			return err
 		}
+		respMap := store.ActiveRespondersMap(sosRec.Id, now)
+		store.UpsertSos(recordToCachedSos(sosRec))
 		if hub != nil {
-			respMap, _ := loadActiveRespondersMap(app, sosRec.Id, now)
 			ownerHash := sosRec.GetString("device_hash")
 			target := live.GeoTarget{
 				TrailID:   sosRec.GetString("trail_id"),
@@ -1875,7 +1603,7 @@ func RunTrailLiveGC(app core.App, hub *live.TrailLiveHub, now time.Time) error {
 	}
 
 	// 4. Clean up expired trail_groups (< now) and stale trail_group_members (< now - 2h).
-	if err := cleanTrailGroupsGC(app, now); err != nil {
+	if err := cleanTrailGroupsGC(app, store, now); err != nil {
 		return err
 	}
 

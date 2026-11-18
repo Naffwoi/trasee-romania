@@ -19,11 +19,11 @@
       "iconURL": "https://trasee.skillfy.ro/favicon-512x512.png",
       "tintColor": "#047857",
       "category": "navigation",
-      "version": "0.1.0",
-      "versionDate": "2026-11-17T13:29:00Z",
-      "versionDescription": "Preconfigurat cu trasee.skillfy.ro, navigație live, ETA și redresare off-trail A* DEM.",
+      "version": "0.2.0",
+      "versionDate": "2026-11-18T17:25:30Z",
+      "versionDescription": "v0.2.0: Salvamont 41 ANSMR, SOS 112 Pro + semnal GSM, motor baterie montană în 4 stări, Peak Finder offline, pantă avalanșă/soare, Satelit hibrid/zăpadă și filtrul „Cu trenul”.",
       "downloadURL": "https://trasee.skillfy.ro/downloads/TraseeRomania-iOS-unsigned.ipa",
-      "size": 21091569,
+      "size": 22339385,
       "appPermissions": {
         "entitlements": [],
         "privacy": {
@@ -33,12 +33,12 @@
       },
       "versions": [
         {
-          "version": "0.1.0",
-          "buildVersion": "12",
-          "date": "2026-11-17T13:29:00Z",
-          "localizedDescription": "Preconfigurat cu trasee.skillfy.ro, navigație live, ETA și redresare off-trail A* DEM.",
+          "version": "0.2.0",
+          "buildVersion": "29",
+          "date": "2026-11-18T17:25:30Z",
+          "localizedDescription": "v0.2.0: Salvamont 41 ANSMR, SOS 112 Pro + semnal GSM, motor baterie montană în 4 stări, Peak Finder offline, pantă avalanșă/soare, Satelit hibrid/zăpadă și filtrul „Cu trenul”.",
           "downloadURL": "https://trasee.skillfy.ro/downloads/TraseeRomania-iOS-unsigned.ipa",
-          "size": 21091569,
+          "size": 22339385,
           "minOSVersion": "14.0"
         }
       ]

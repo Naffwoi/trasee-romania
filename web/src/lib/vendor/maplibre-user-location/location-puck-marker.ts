@@ -45,6 +45,15 @@ export function createPuckElement(): PuckElementHandle {
     svg.style.cssText = "overflow:visible;display:block;";
 
     const defs = document.createElementNS(SVG_NS, "defs");
+    const styleEl = document.createElementNS(SVG_NS, "style");
+    styleEl.textContent = `
+        @keyframes wanderer-puck-pulse {
+            0%, 100% { transform: scale(0.82); opacity: 0.55; }
+            50% { transform: scale(1.36); opacity: 0.08; }
+        }
+        .wanderer-puck-pulse-ring { transform-origin: ${CENTER}px ${CENTER}px; animation: wanderer-puck-pulse 2.5s ease-in-out infinite; will-change: transform, opacity; }
+    `;
+    defs.appendChild(styleEl);
     const radial = document.createElementNS(SVG_NS, "radialGradient");
     radial.setAttribute("id", gradId);
     radial.setAttribute("cx", String(CENTER));
@@ -72,18 +81,7 @@ export function createPuckElement(): PuckElementHandle {
     pulseCircle.setAttribute("cy", String(CENTER));
     pulseCircle.setAttribute("r", "11");
     pulseCircle.setAttribute("fill", "rgba(66, 133, 244, 0.25)");
-    const animR = document.createElementNS(SVG_NS, "animate");
-    animR.setAttribute("attributeName", "r");
-    animR.setAttribute("values", "9;15;9");
-    animR.setAttribute("dur", "2.5s");
-    animR.setAttribute("repeatCount", "indefinite");
-    const animOp = document.createElementNS(SVG_NS, "animate");
-    animOp.setAttribute("attributeName", "opacity");
-    animOp.setAttribute("values", "0.55;0.08;0.55");
-    animOp.setAttribute("dur", "2.5s");
-    animOp.setAttribute("repeatCount", "indefinite");
-    pulseCircle.appendChild(animR);
-    pulseCircle.appendChild(animOp);
+    pulseCircle.setAttribute("class", "wanderer-puck-pulse-ring");
 
     const coneGroup = document.createElementNS(SVG_NS, "g");
     coneGroup.style.display = "none";

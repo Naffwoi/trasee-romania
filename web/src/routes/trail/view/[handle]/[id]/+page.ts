@@ -5,9 +5,14 @@ import { error, type Load } from "@sveltejs/kit";
 
 export const load: Load = async ({ params, fetch, url }) => {
     try {
-        const trail = await trails_show(params.id!, params.handle, url.searchParams.get("share") ?? undefined, true, fetch)
-
-        return { trail }
+        const trail = await trails_show(
+            params.id!,
+            params.handle,
+            url.searchParams.get("share") ?? undefined,
+            false,
+            fetch,
+        );
+        return { trail };
     } catch (e) {
         if (e instanceof APIError) {
             const { message, ...properties } = remoteContentError(e);
@@ -15,5 +20,4 @@ export const load: Load = async ({ params, fetch, url }) => {
         }
         console.error(e);
     }
-
 };

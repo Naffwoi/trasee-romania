@@ -12,13 +12,22 @@ type WebKitDeviceOrientationEvent = DeviceOrientationEvent & {
 /**
  * Subscribes to device orientation / magnetometer events across iOS Safari
  * (`webkitCompassHeading`) and Android/W3C (`deviceorientationabsolute`),
- * smoothing readings with a circular low-pass filter.
+ * smoothing readings with a circular low-pass filter and 1.2° deadband + rAF coalescing.
  */
 export class CompassSensor {
     private readonly filter = new CircularHeadingFilter(0.22, 0.5);
     private activeListeners: Array<{ type: OrientationEventName; handler: (event: Event) => void }> = [];
     private hasReceivedAbsoluteEvent = false;
     private permissionGranted: boolean | null = null;
+    private lastEmittedHeading: number | null = null;
+    private lastEmitTimeMs = 0;
+    private pendingReading: CompassReading | null = null;
+    private rafId: number | null = null;
+    private readonly deadbandDeg: number;
+
+    constructor(options?: { deadbandDeg?: number }) {
+        this.deadbandDeg = options?.deadbandDeg ?? 1.2;
+    }
 
     /**
      * Must be invoked synchronously inside a user gesture handler (e.g., button click)
@@ -55,6 +64,18 @@ export class CompassSensor {
             return;
         }
 
+        const angularDiff = (a: number, b: number): number => {
+            const d = Math.abs(a - b) % 360;
+            return d > 180 ? 360 - d : d;
+        };
+
+        const flushReading = (reading: CompassReading, nowMs: number) => {
+            this.lastEmittedHeading = reading.heading;
+            this.lastEmitTimeMs = nowMs;
+            this.pendingReading = null;
+            onReading(reading);
+        };
+
         const emitReading = (event: WebKitDeviceOrientationEvent) => {
             const screenAngle =
                 typeof window.screen?.orientation?.angle === "number"
@@ -65,8 +86,34 @@ export class CompassSensor {
                 return;
             }
             const smoothed = this.filter.update(extracted.heading);
-            if (smoothed !== null) {
-                onReading({ heading: smoothed, accuracy: extracted.accuracy });
+            if (smoothed === null) return;
+            if (
+                this.lastEmittedHeading !== null &&
+                angularDiff(smoothed, this.lastEmittedHeading) < this.deadbandDeg
+            ) {
+                return;
+            }
+
+            const nextReading: CompassReading = { heading: smoothed, accuracy: extracted.accuracy };
+            const nowMs = typeof performance !== "undefined" ? performance.now() : Date.now();
+            if (
+                this.lastEmittedHeading === null ||
+                nowMs - this.lastEmitTimeMs >= 16 ||
+                typeof requestAnimationFrame !== "function"
+            ) {
+                flushReading(nextReading, nowMs);
+                return;
+            }
+
+            this.pendingReading = nextReading;
+            if (this.rafId === null) {
+                this.rafId = requestAnimationFrame(() => {
+                    this.rafId = null;
+                    if (this.pendingReading) {
+                        const ts = typeof performance !== "undefined" ? performance.now() : Date.now();
+                        flushReading(this.pendingReading, ts);
+                    }
+                });
             }
         };
 
@@ -97,6 +144,10 @@ export class CompassSensor {
     }
 
     stop(): void {
+        if (this.rafId !== null && typeof cancelAnimationFrame === "function") {
+            cancelAnimationFrame(this.rafId);
+            this.rafId = null;
+        }
         if (typeof window !== "undefined") {
             for (const { type, handler } of this.activeListeners) {
                 window.removeEventListener(type, handler, true);
@@ -104,6 +155,9 @@ export class CompassSensor {
         }
         this.activeListeners = [];
         this.hasReceivedAbsoluteEvent = false;
+        this.lastEmittedHeading = null;
+        this.lastEmitTimeMs = 0;
+        this.pendingReading = null;
         this.filter.reset();
     }
 }

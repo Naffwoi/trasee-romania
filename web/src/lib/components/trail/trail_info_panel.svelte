@@ -16,7 +16,7 @@
         comments_update,
     } from "#lib/stores/comment_store.ts";
     import { currentUser } from "#lib/stores/user_store.ts";
-    import { getFileURL, isVideoURL } from "#lib/util/file_util.ts";
+    import { fetchGPX, getFileURL, isVideoURL } from "#lib/util/file_util.ts";
     import {
         formatDistance,
         formatElevation,
@@ -38,7 +38,7 @@
     import { show_toast } from "#lib/stores/toast_store.svelte.ts";
     import * as M from "maplibre-gl";
     import "photoswipe/style.css";
-    import { onMount, untrack } from "svelte";
+    import { onMount, tick, untrack } from "svelte";
     import { _, locale } from "svelte-i18n";
     import Button from "../base/button.svelte";
     import Chip from "../base/chip.svelte";
@@ -47,7 +47,6 @@
     import EmptyStateComment from "../empty_states/empty_state_comment.svelte";
     import EmptyStateDescription from "../empty_states/empty_state_description.svelte";
     import EmptyStatePhotos from "../empty_states/empty_state_photos.svelte";
-    import PhotoGallery from "../photo_gallery.svelte";
     import ShareInfo from "../share_info.svelte";
     import SummitLogTable from "../summit_log/summit_log_table.svelte";
     import MapWithElevationMaplibre from "./map_with_elevation_maplibre.svelte";
@@ -61,12 +60,13 @@
         summitLogs,
     } from "#lib/stores/summit_log_store.ts";
     import { SummitLog } from "#lib/models/summit_log.ts";
-    import SummitLogModal from "../summit_log/summit_log_modal.svelte";
+    import type PhotoGalleryType from "../photo_gallery.svelte";
+    import type SummitLogModalType from "../summit_log/summit_log_modal.svelte";
     import SkeletonTable from "../base/skeleton_table.svelte";
     import ConfirmModal from "../confirm_modal.svelte";
     import { handleFromRecordWithIRI } from "#lib/util/activitypub_util.ts";
     import LikeButton from "./like_button.svelte";
-    import Editor from "../base/editor.svelte";
+    import Editor from "../base/lazy_editor.svelte";
     import {
         trails_update,
         trails_update_metadata,
@@ -94,7 +94,8 @@
         onback,
     }: Props = $props();
 
-    let summitLogModal: SummitLogModal;
+    let summitLogModal: SummitLogModalType | undefined = $state();
+    let SummitLogModalComponent = $state<typeof SummitLogModalType | null>(null);
     let confirmModal: ConfirmModal;
     let markTrailAsCompletedModal: ConfirmModal;
 
@@ -121,7 +122,8 @@
         (trail.expand?.trail_share_via_trail?.length ?? 0) > 0,
     );
 
-    let gallery: PhotoGallery;
+    let gallery: PhotoGalleryType | undefined = $state();
+    let PhotoGalleryComponent = $state<typeof PhotoGalleryType | null>(null);
 
     let newComment: Comment = $state({
         text: "",
@@ -164,7 +166,14 @@
         ),
     );
 
-    onMount(async () => {});
+    onMount(async () => {
+        if (mode === "overview" && !trail.expand?.gpx_data && trail.gpx) {
+            void fetchGPX(trail).then((gpxData) => {
+                if (!gpxData) return;
+                trail.expand = { ...(trail.expand ?? {}), gpx_data: gpxData };
+            });
+        }
+    });
 
     function openMarkerPopup(i: number) {
         if ((markers[i] as M.Marker).getPopup().isOpen()) {
@@ -282,13 +291,27 @@
         }
     }
 
-    function beforeSummitLogModalOpen(currentSummitLog?: SummitLog) {
+    async function openPhotoGallery(idx: number) {
+        if (!PhotoGalleryComponent) {
+            const mod = await import("../photo_gallery.svelte");
+            PhotoGalleryComponent = mod.default;
+            await tick();
+        }
+        gallery?.openGallery(idx);
+    }
+
+    async function beforeSummitLogModalOpen(currentSummitLog?: SummitLog) {
         currentSummitLog ??= new SummitLog(
             new Date().toISOString().split("T")[0],
         );
 
         summitLog.set(currentSummitLog);
-        summitLogModal.openModal();
+        if (!SummitLogModalComponent) {
+            const mod = await import("../summit_log/summit_log_modal.svelte");
+            SummitLogModalComponent = mod.default;
+            await tick();
+        }
+        summitLogModal?.openModal();
     }
 
     async function saveSummitLog(log: SummitLog) {
@@ -510,17 +533,19 @@
                     ? 'grid-cols-[8fr_5fr]'
                     : 'grid-cols-1'} h-80 rounded-t-3xl overflow-hidden cursor-pointer"
             >
-                <PhotoGallery
-                    photos={trail.photos.map((p) => getFileURL(trail, p))}
-                    bind:this={gallery}
-                ></PhotoGallery>
+                {#if PhotoGalleryComponent}
+                    <PhotoGalleryComponent
+                        photos={trail.photos.map((p) => getFileURL(trail, p))}
+                        bind:this={gallery}
+                    ></PhotoGalleryComponent>
+                {/if}
                 {#each headerPhotos as photo, i}
                     {#if isVideoURL(photo)}
                         <!-- svelte-ignore a11y_media_has_caption -->
                         <video
                             class="object-cover h-full w-full"
                             onclick={trail.photos.length
-                                ? () => gallery.openGallery(i)
+                                ? () => void openPhotoGallery(i)
                                 : null}
                             loop
                             src={photo}
@@ -531,7 +556,7 @@
                         <img
                             class="object-cover h-full w-full"
                             onclick={trail.photos.length
-                                ? () => gallery.openGallery(i)
+                                ? () => void openPhotoGallery(i)
                                 : null}
                             class:row-span-2={i == 0 && headerPhotos.length > 2}
                             src={photo}
@@ -941,7 +966,7 @@
                                         controls={false}
                                         loop
                                         class="rounded-xl cursor-pointer hover:scale-105 transition-transform"
-                                        onclick={() => gallery.openGallery(i)}
+                                        onclick={() => void openPhotoGallery(i)}
                                         onmouseenter={(e) =>
                                             (e.target as any).play()}
                                         onmouseleave={(e) =>
@@ -951,7 +976,7 @@
                                 {:else}
                                     <img
                                         class="rounded-xl cursor-pointer hover:scale-105 transition-transform"
-                                        onclick={() => gallery.openGallery(i)}
+                                        onclick={() => void openPhotoGallery(i)}
                                         src={getFileURL(trail, photo, "600x0")}
                                         alt=""
                                     />
@@ -1047,8 +1072,10 @@
     </section>
 </div>
 
-<SummitLogModal bind:this={summitLogModal} onsave={(log) => saveSummitLog(log)}
-></SummitLogModal>
+{#if SummitLogModalComponent}
+    <SummitLogModalComponent bind:this={summitLogModal} onsave={(log) => saveSummitLog(log)}
+    ></SummitLogModalComponent>
+{/if}
 
 <ConfirmModal
     id="mark-trail-as-completed-modal"

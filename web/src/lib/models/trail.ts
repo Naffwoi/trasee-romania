@@ -406,6 +406,10 @@ export const defaultTrailSearchAttributes = [
     "bounding_box_diagonal",
     "_geo",]
 
+export const trailCardSearchAttributes = defaultTrailSearchAttributes.filter(
+    (attr) => attr !== "polyline",
+);
+
 
 export {
     Trail,

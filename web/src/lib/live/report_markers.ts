@@ -100,6 +100,16 @@ function buildReportPopupDom(
 	return root;
 }
 
+interface CachedMarkerMeta {
+	key: string;
+	signature: string;
+	subEl?: HTMLElement | null;
+	latestSos?: SosAlertDto;
+	latestMember?: GroupMemberDto;
+}
+
+const markerMetaMap = new WeakMap<M.Marker, CachedMarkerMeta>();
+
 export function syncReportMapMarkers(
 	map: M.Map | null,
 	existing: M.Marker[],
@@ -108,20 +118,52 @@ export function syncReportMapMarkers(
 		onVote?: (reportId: string, vote: ReportVoteType) => void;
 	} = {},
 ): M.Marker[] {
+	if (!map) {
+		for (const m of existing) {
+			try {
+				m.remove();
+			} catch {
+				// Ignore
+			}
+		}
+		return [];
+	}
+
+	const prevById = new Map<string, M.Marker>();
 	for (const m of existing) {
-		try {
-			m.remove();
-		} catch {
-			// Ignore marker removal errors
+		const meta = markerMetaMap.get(m);
+		if (meta) prevById.set(meta.key, m);
+		else {
+			try {
+				m.remove();
+			} catch {
+				// Ignore
+			}
 		}
 	}
-	if (!map) return [];
 
 	const nextMarkers: M.Marker[] = [];
 	const nowMs = Date.now();
 
 	for (const report of reports) {
 		if (!isReportVisibleOnMap(report, nowMs)) continue;
+		const sig = `${report.category}|${report.conditionStatus}|${report.confirmCount}|${report.lastConfirmedAt}|${report.note}`;
+		const prev = prevById.get(report.id);
+		if (prev && markerMetaMap.get(prev)?.signature === sig) {
+			prevById.delete(report.id);
+			prev.setLngLat([report.lon, report.lat]);
+			nextMarkers.push(prev);
+			continue;
+		}
+		if (prev) {
+			prevById.delete(report.id);
+			try {
+				prev.remove();
+			} catch {
+				// Ignore
+			}
+		}
+
 		const meta = getReportCategoryMeta(report.category);
 		const isDry = report.conditionStatus === "dry_or_closed";
 
@@ -174,7 +216,16 @@ export function syncReportMapMarkers(
 			.setPopup(popup)
 			.addTo(map);
 
+		markerMetaMap.set(marker, { key: report.id, signature: sig });
 		nextMarkers.push(marker);
+	}
+
+	for (const stale of prevById.values()) {
+		try {
+			stale.remove();
+		} catch {
+			// Ignore
+		}
 	}
 
 	return nextMarkers;
@@ -188,14 +239,29 @@ export function syncSosMapMarkers(
 		onRespond?: (sos: SosAlertDto) => void;
 	} = {},
 ): M.Marker[] {
+	if (!map) {
+		for (const m of existing) {
+			try {
+				m.remove();
+			} catch {
+				// Ignore
+			}
+		}
+		return [];
+	}
+
+	const prevById = new Map<string, M.Marker>();
 	for (const m of existing) {
-		try {
-			m.remove();
-		} catch {
-			// Ignore
+		const meta = markerMetaMap.get(m);
+		if (meta) prevById.set(meta.key, m);
+		else {
+			try {
+				m.remove();
+			} catch {
+				// Ignore
+			}
 		}
 	}
-	if (!map) return [];
 
 	const nextMarkers: M.Marker[] = [];
 
@@ -203,6 +269,25 @@ export function syncSosMapMarkers(
 		if (sos.status !== "active" || !Number.isFinite(sos.lat) || !Number.isFinite(sos.lon)) {
 			continue;
 		}
+		const sig = `${sos.reason}|${sos.amResponding}|${sos.message}|${sos.requesterName}`;
+		const prev = prevById.get(sos.id);
+		const prevMeta = prev ? markerMetaMap.get(prev) : undefined;
+		if (prev && prevMeta && prevMeta.signature === sig) {
+			prevById.delete(sos.id);
+			prevMeta.latestSos = sos;
+			prev.setLngLat([sos.lon, sos.lat]);
+			nextMarkers.push(prev);
+			continue;
+		}
+		if (prev) {
+			prevById.delete(sos.id);
+			try {
+				prev.remove();
+			} catch {
+				// Ignore
+			}
+		}
+
 		const reasonMeta = SOS_REASON_META[sos.reason] ?? SOS_REASON_META.other;
 
 		const el = document.createElement("button");
@@ -252,6 +337,7 @@ export function syncSosMapMarkers(
 			popupRoot.appendChild(msg);
 		}
 
+		const metaEntry: CachedMarkerMeta = { key: sos.id, signature: sig, latestSos: sos };
 		if (!sos.isMine && options.onRespond) {
 			const btn = document.createElement("button");
 			btn.type = "button";
@@ -260,7 +346,7 @@ export function syncSosMapMarkers(
 				"margin-top:8px;width:100%;padding:6px 10px;border-radius:9999px;background:#dc2626;color:#ffffff;font-size:12px;font-weight:700;border:none;cursor:pointer;";
 			btn.addEventListener("click", (ev) => {
 				ev.stopPropagation();
-				options.onRespond?.(sos);
+				options.onRespond?.(metaEntry.latestSos ?? sos);
 			});
 			popupRoot.appendChild(btn);
 		}
@@ -273,7 +359,16 @@ export function syncSosMapMarkers(
 			.setLngLat([sos.lon, sos.lat])
 			.setPopup(popup)
 			.addTo(map);
+		markerMetaMap.set(marker, metaEntry);
 		nextMarkers.push(marker);
+	}
+
+	for (const stale of prevById.values()) {
+		try {
+			stale.remove();
+		} catch {
+			// Ignore
+		}
 	}
 
 	return nextMarkers;
@@ -377,14 +472,29 @@ export function syncGroupMapMarkers(
 	members: readonly GroupMemberDto[],
 	options: SyncGroupMarkersOptions = {},
 ): M.Marker[] {
+	if (!map) {
+		for (const m of prevMarkers) {
+			try {
+				m.remove();
+			} catch {
+				// Ignore
+			}
+		}
+		return [];
+	}
+
+	const prevById = new Map<string, M.Marker>();
 	for (const m of prevMarkers) {
-		try {
-			m.remove();
-		} catch {
-			// Ignore marker removal errors
+		const meta = markerMetaMap.get(m);
+		if (meta) prevById.set(meta.key, m);
+		else {
+			try {
+				m.remove();
+			} catch {
+				// Ignore
+			}
 		}
 	}
-	if (!map) return [];
 
 	const nextMarkers: M.Marker[] = [];
 
@@ -397,6 +507,29 @@ export function syncGroupMapMarkers(
 		const bg = /^#[0-9a-fA-F]{3,8}$/.test(rawColor) ? rawColor : "#242734";
 		const initials = getGroupMemberInitials(member.displayName);
 		const subtitle = formatGroupMemberSubtitle(member, options);
+		const sig = `${member.displayName}|${bg}`;
+		const prev = prevById.get(member.memberId);
+		const prevMeta = prev ? markerMetaMap.get(prev) : undefined;
+		if (prev && prevMeta && prevMeta.signature === sig) {
+			prevById.delete(member.memberId);
+			prevMeta.latestMember = member;
+			prev.setLngLat([member.lon, member.lat]);
+			const el = prev.getElement();
+			el.title = subtitle ? `${member.displayName} · ${subtitle}` : member.displayName;
+			if (prevMeta.subEl) {
+				prevMeta.subEl.textContent = subtitle;
+			}
+			nextMarkers.push(prev);
+			continue;
+		}
+		if (prev) {
+			prevById.delete(member.memberId);
+			try {
+				prev.remove();
+			} catch {
+				// Ignore
+			}
+		}
 
 		const el = document.createElement("button");
 		el.type = "button";
@@ -426,12 +559,6 @@ export function syncGroupMapMarkers(
 		`;
 		el.textContent = initials;
 
-		if (options.onSelectMember) {
-			el.addEventListener("click", () => {
-				options.onSelectMember?.(member);
-			});
-		}
-
 		const popupRoot = document.createElement("div");
 		popupRoot.style.cssText =
 			"padding:8px 11px;min-width:140px;max-width:220px;font-family:system-ui,-apple-system,sans-serif;color:#242734;background:#ffffff;";
@@ -448,11 +575,21 @@ export function syncGroupMapMarkers(
 		header.appendChild(nameSpan);
 		popupRoot.appendChild(header);
 
-		if (subtitle) {
-			const subEl = document.createElement("div");
-			subEl.style.cssText = "margin-top:3px;font-size:11.5px;color:#475569;font-weight:500;";
-			subEl.textContent = subtitle;
-			popupRoot.appendChild(subEl);
+		const subEl = document.createElement("div");
+		subEl.style.cssText = "margin-top:3px;font-size:11.5px;color:#475569;font-weight:500;";
+		subEl.textContent = subtitle;
+		popupRoot.appendChild(subEl);
+
+		const metaEntry: CachedMarkerMeta = {
+			key: member.memberId,
+			signature: sig,
+			subEl,
+			latestMember: member,
+		};
+		if (options.onSelectMember) {
+			el.addEventListener("click", () => {
+				options.onSelectMember?.(metaEntry.latestMember ?? member);
+			});
 		}
 
 		const popup = new M.Popup({
@@ -465,7 +602,16 @@ export function syncGroupMapMarkers(
 			.setLngLat([member.lon, member.lat])
 			.setPopup(popup)
 			.addTo(map);
+		markerMetaMap.set(marker, metaEntry);
 		nextMarkers.push(marker);
+	}
+
+	for (const stale of prevById.values()) {
+		try {
+			stale.remove();
+		} catch {
+			// Ignore
+		}
 	}
 
 	return nextMarkers;

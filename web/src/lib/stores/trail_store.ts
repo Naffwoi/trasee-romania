@@ -1,11 +1,11 @@
 import type { SummitLog } from "#lib/models/summit_log.ts";
 import type { Tag } from "#lib/models/tag.ts";
 import { MAP_MAX_POLYLINES } from "#lib/config/map.ts";
-import { defaultTrailSearchAttributes, Trail, type TrailBoundingBox, type TrailFilter, type TrailFilterValues, type TrailSearchResult } from "#lib/models/trail.ts";
+import { defaultTrailSearchAttributes, trailCardSearchAttributes, Trail, type TrailBoundingBox, type TrailFilter, type TrailFilterValues, type TrailSearchResult } from "#lib/models/trail.ts";
 import type { Waypoint } from "#lib/models/waypoint.ts";
 import { APIError } from "#lib/util/api_util.ts";
 import { deepEqual } from "#lib/util/deep_util.ts";
-import { getFileURL, objectToFormData } from "#lib/util/file_util.ts";
+import { fetchGPX, getFileURL, objectToFormData } from "#lib/util/file_util.ts";
 import { noSubcategoryFilterCategory, trailFilterDateBoundary } from "#lib/util/trail_filter_util.ts";
 import { TRAIL_SEARCH_LIMIT } from "#lib/config/search.ts";
 import { buildTrailSearchBoundsFilter, type TrailSearchBounds } from "#lib/util/trail_search_util.ts";
@@ -83,7 +83,7 @@ async function searchTrailResults(
             q: filter.q,
             options: {
                 filter: filterText,
-                attributesToRetrieve: defaultTrailSearchAttributes,
+                attributesToRetrieve: trailCardSearchAttributes,
                 ...(sort !== "relevance" ? {
                     sort: [`${sort}:${filter.sortOrder === "+" ? "asc" : "desc"}`],
                 } : {}),
@@ -335,7 +335,14 @@ export async function trails_search_map_data(
     return { mapTrails, clusters: clusterFeatureCollection };
 }
 
-export async function trails_show(id: string, handle?: string, share?: string, loadGPX?: boolean, f: (url: RequestInfo | URL, config?: RequestInit) => Promise<Response> = fetch) {
+export async function trails_show(
+    id: string,
+    handle?: string,
+    share?: string,
+    loadGPX?: boolean,
+    f: (url: RequestInfo | URL, config?: RequestInit) => Promise<Response> = fetch,
+    loadSummitLogGPX = false,
+) {
 
     const r = await f(`/api/v1/trail/${id}?` + new URLSearchParams({
         expand: "category,subcategory,subcategory.category,waypoints_via_trail,summit_logs_via_trail,summit_logs_via_trail.author,trail_share_via_trail.actor,trail_like_via_trail,tags,author",
@@ -357,19 +364,18 @@ export async function trails_show(id: string, handle?: string, share?: string, l
             response.expand = {}
         }
         const gpxData: string = await fetchGPX(response, f);
-        if (!response.expand) {
-            response.expand = {};
-        }
         response.expand.gpx_data = gpxData;
 
-
-        for (const log of response.expand.summit_logs_via_trail ?? []) {
-            const gpxData: string = await fetchGPX(log, f);
-
-            if (!log.expand) {
-                log.expand = {};
-            }
-            log.expand.gpx_data = gpxData;
+        if (loadSummitLogGPX) {
+            await Promise.all(
+                (response.expand.summit_logs_via_trail ?? []).map(async (log) => {
+                    const logGpx = await fetchGPX(log, f);
+                    if (!log.expand) {
+                        log.expand = {};
+                    }
+                    log.expand.gpx_data = logGpx;
+                }),
+            );
         }
     }
 
@@ -690,16 +696,7 @@ export async function trails_upload(file: File, ignoreDuplicates: boolean = fals
     });
 }
 
-export async function fetchGPX(trail: { gpx?: string } & Record<string, any>, f: (url: RequestInfo | URL, config?: RequestInit) => Promise<Response> = fetch) {
-    if (!trail.gpx) {
-        return "";
-    }
-    const gpxUrl = getFileURL(trail, trail.gpx);
-    const response: Response = await f(gpxUrl);
-    const gpxData = await response.text();
-
-    return gpxData
-}
+export { fetchGPX };
 
 export async function searchResultToTrailList(hits: Hits<TrailSearchResult>): Promise<Trail[]> {
     const trails: Trail[] = []

@@ -18,8 +18,6 @@
     import { handleFromRecordWithIRI } from "#lib/util/activitypub_util.ts";
     import { getFileURL, saveAs } from "#lib/util/file_util.ts";
     import { trail2gpx } from "#lib/util/gpx_util.ts";
-    import { gpx } from "#lib/vendor/toGeoJSON/toGeoJSON.js";
-    import JSZip from "jszip";
     import { type Snippet } from "svelte";
     import { _ } from "svelte-i18n";
     import Dropdown, { type DropdownItem } from "../base/dropdown.svelte";
@@ -785,6 +783,7 @@
             if (eTrail !== undefined) {
                 let fileData: string = await trail2gpx(eTrail, $currentUser);
                 if (exportSettings.fileFormat == "json") {
+                    const { gpx } = await import("#lib/vendor/toGeoJSON/toGeoJSON.js");
                     fileData = JSON.stringify(
                         gpx(
                             new DOMParser().parseFromString(
@@ -803,6 +802,7 @@
                     });
                     saveAs(blob, `${eTrail.name}.${exportSettings.fileFormat}`);
                 } else {
+                    const { default: JSZip } = await import("jszip");
                     const zip = new JSZip();
                     zip.file(
                         `${eTrail.name}.${exportSettings.fileFormat}`,

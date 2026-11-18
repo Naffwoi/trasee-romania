@@ -52,11 +52,8 @@
     import type { Trail } from "#lib/models/trail.ts";
     import {
         bearingDegrees,
-        computeDirectRescueRoute,
         computeHybridOffTrailReroute,
-        computeOffTrailReroute,
         computeValhallaAccessRoute,
-        DemTileGrid,
         EtaCalculator,
         extractMapLibreObstacles,
         extractRawTrackPoints,
@@ -65,9 +62,12 @@
         fuseCooperativeGps,
         GpsPaceCoaster,
         haversineMeters,
+        NavTerrainClient,
+        parseGpxXmlFastToPackedTrack,
         reverseTrackPoints,
         RouteMapMatcher,
         synthesizeTrailManeuvers,
+        unpackTrackPoints,
         type DirectRescueRouteResult,
         type EtaSnapshot,
         type GpsSignalState,
@@ -80,6 +80,8 @@
         type OffTrailRerouteResult,
         type PeerGpsObservation,
     } from "#lib/navigation/index.ts";
+    import { PwaPowerGovernor } from "#lib/navigation/pwa_power_governor.ts";
+    import { fetchGPX } from "#lib/util/file_util.ts";
     import { decodePolyline } from "#lib/util/polyline_util.ts";
     import { AccuracyLayer } from "#lib/vendor/maplibre-user-location/accuracy-layer.ts";
     import { CompassSensor } from "#lib/vendor/maplibre-user-location/compass-sensor.ts";
@@ -92,7 +94,7 @@
     import type { FeatureCollection } from "geojson";
     import * as M from "maplibre-gl";
     import "maplibre-gl/dist/maplibre-gl.css";
-    import "#lib/util/maplibre_worker.ts";
+    import * as workerUrls from "#lib/util/maplibre_worker.ts";
     import { onDestroy, onMount, untrack } from "svelte";
     import { _, locale } from "svelte-i18n";
 
@@ -123,8 +125,7 @@
     const STORAGE_KEY = "wanderer_active_nav_session";
     const EMPTY_FC: FeatureCollection = { type: "FeatureCollection", features: [] };
 
-    const SRC_WALKED = "nav-trail-walked";
-    const SRC_UPCOMING = "nav-trail-upcoming";
+    const SRC_ROUTE = "nav-trail-route";
     const SRC_BREADCRUMB = "nav-breadcrumb";
     const SRC_OFFTRAIL = "nav-offtrail";
     const SRC_REJOIN = "nav-rejoin-point";
@@ -165,6 +166,8 @@
             if (pts.length > 0) return pts;
         }
         if (t.expand?.gpx_data) {
+            const fastPts = unpackTrackPoints(parseGpxXmlFastToPackedTrack(t.expand.gpx_data));
+            if (fastPts.length > 0) return fastPts;
             try {
                 const parsed = GPX.parse(t.expand.gpx_data);
                 const pts = extractRawTrackPoints(parsed);
@@ -240,12 +243,6 @@
 
     $effect(() => {
         const el = bottomSheetWrapEl;
-        sheetExpanded;
-        activeHikersCount;
-        etaSnapshot;
-        reroute;
-        isFarPreview;
-        signalState;
         if (!el) return;
         const measure = () => {
             const h = Math.round(el.getBoundingClientRect().height);
@@ -266,7 +263,9 @@
     let compassSensor: CompassSensor | null = null;
     let locationPuck: LocationPuckMarker | null = null;
     let accuracyLayer: AccuracyLayer | null = null;
-    let demGrid: DemTileGrid | null = null;
+    let terrainClient: NavTerrainClient | null = null;
+    let powerGovernor: PwaPowerGovernor | null = null;
+    let cachedBasePoints: NavTrackPoint[] = [];
     let customDemSampler: ((lat: number, lon: number) => number | null) | null = null;
     let customObstacles: ObstaclePolygon[] | null = null;
     let matcher: RouteMapMatcher | null = null;
@@ -289,6 +288,7 @@
     let lastHybridRerouteAt = 0;
     let lastHybridReroutePos: { lat: number; lon: number } | null = null;
     let hybridReqSeq = 0;
+    let localRerouteSeq = 0;
     let lastGroupPingAt = 0;
     let lastGroupPingPos: { lat: number; lon: number } | null = null;
     let lastMySosPatchAt = 0;
@@ -297,6 +297,14 @@
     let lastResponderPos: { lat: number; lon: number } | null = null;
     let lastRescueCalcPos: { lat: number; lon: number } | null = null;
     let breadcrumbCoords: [number, number][] = [];
+    let lastSyncedBreadcrumbLen = 0;
+    let routeSourceDirty = true;
+    let lastPaintedProgressRatio = -1;
+    let lastSyncedRerouteRef: OffTrailRerouteResult | null | undefined = undefined;
+    let lastSyncedAccessRef: OffTrailPoint[] | null | undefined = undefined;
+    let lastSyncedAccessActive: boolean | undefined = undefined;
+    let lastSyncedRescueRef: DirectRescueRouteResult | null | undefined = undefined;
+    let currentWatchHighAccuracy = true;
     let latestFix: {
         lat: number;
         lon: number;
@@ -472,6 +480,9 @@
         const ordered = nextReversed ? reverseTrackPoints(base) : base;
         activePoints = ordered;
         reversed = nextReversed;
+        routeSourceDirty = true;
+        lastPaintedProgressRatio = -1;
+        void terrainClient?.setTrack(ordered, false);
         if (ordered.length > 0) {
             matcher = new RouteMapMatcher(ordered);
             etaCalc = new EtaCalculator(ordered, { isCycling });
@@ -487,6 +498,7 @@
                 lastReroutePos = null;
                 lastHybridReroutePos = null;
                 hybridReqSeq++;
+                localRerouteSeq++;
                 isFarPreview = false;
                 farFromTrailDistanceM = null;
                 accessRouteActive = false;
@@ -509,7 +521,7 @@
         if (customDemSampler) {
             return customDemSampler(lat, lon);
         }
-        return demGrid?.sampleElevation(lat, lon) ?? null;
+        return terrainClient?.sampleElevationSync(lat, lon) ?? null;
     }
 
     function resolveHeadingDeg(): number | null {
@@ -586,113 +598,60 @@
         }
     }
 
-    function buildSplitRouteGeoJson(): {
-        walked: FeatureCollection;
-        upcoming: FeatureCollection;
-    } {
-        if (activePoints.length < 2) {
-            return { walked: EMPTY_FC, upcoming: EMPTY_FC };
-        }
-        const total = activePoints[activePoints.length - 1].distanceM;
-        const splitM = Math.max(0, Math.min(total, alongTrackMeters));
-
-        if (splitM <= 0.5) {
-            return {
-                walked: EMPTY_FC,
-                upcoming: {
-                    type: "FeatureCollection",
-                    features: [
-                        {
-                            type: "Feature",
-                            properties: {},
-                            geometry: {
-                                type: "LineString",
-                                coordinates: activePoints.map((p) => [p.lon, p.lat]),
-                            },
-                        },
-                    ],
-                },
-            };
-        }
-
-        if (splitM >= total - 0.5) {
-            return {
-                walked: {
-                    type: "FeatureCollection",
-                    features: [
-                        {
-                            type: "Feature",
-                            properties: {},
-                            geometry: {
-                                type: "LineString",
-                                coordinates: activePoints.map((p) => [p.lon, p.lat]),
-                            },
-                        },
-                    ],
-                },
-                upcoming: EMPTY_FC,
-            };
-        }
-
-        const walkedCoords: [number, number][] = [];
-        const upcomingCoords: [number, number][] = [];
-        let splitInserted = false;
-
-        for (let i = 0; i < activePoints.length; i++) {
-            const pt = activePoints[i];
-            if (!splitInserted && pt.distanceM >= splitM && i > 0) {
-                const prev = activePoints[i - 1];
-                const span = pt.distanceM - prev.distanceM;
-                const t = span > 1e-6 ? (splitM - prev.distanceM) / span : 0;
-                const splitLon = prev.lon + (pt.lon - prev.lon) * t;
-                const splitLat = prev.lat + (pt.lat - prev.lat) * t;
-                walkedCoords.push([splitLon, splitLat]);
-                upcomingCoords.push([splitLon, splitLat]);
-                splitInserted = true;
-            }
-            if (!splitInserted) {
-                walkedCoords.push([pt.lon, pt.lat]);
-            } else {
-                upcomingCoords.push([pt.lon, pt.lat]);
-            }
-        }
-
+    function buildFullRouteGeoJson(): FeatureCollection {
+        if (activePoints.length < 2) return EMPTY_FC;
         return {
-            walked:
-                walkedCoords.length >= 2
-                    ? {
-                          type: "FeatureCollection",
-                          features: [
-                              {
-                                  type: "Feature",
-                                  properties: {},
-                                  geometry: { type: "LineString", coordinates: walkedCoords },
-                              },
-                          ],
-                      }
-                    : EMPTY_FC,
-            upcoming:
-                upcomingCoords.length >= 2
-                    ? {
-                          type: "FeatureCollection",
-                          features: [
-                              {
-                                  type: "Feature",
-                                  properties: {},
-                                  geometry: { type: "LineString", coordinates: upcomingCoords },
-                              },
-                          ],
-                      }
-                    : EMPTY_FC,
+            type: "FeatureCollection",
+            features: [
+                {
+                    type: "Feature",
+                    properties: {},
+                    geometry: {
+                        type: "LineString",
+                        coordinates: activePoints.map((p) => [p.lon, p.lat]),
+                    },
+                },
+            ],
         };
+    }
+
+    function applyRouteProgressGradient() {
+        if (!map || !isStyleReady() || activePoints.length < 2) return;
+        const total = activePoints[activePoints.length - 1].distanceM;
+        const ratio = total > 0 ? Math.max(0, Math.min(1, alongTrackMeters / total)) : 0;
+        if (Math.abs(ratio - lastPaintedProgressRatio) < 0.0002) return;
+        lastPaintedProgressRatio = ratio;
+
+        if (ratio <= 0.0005) {
+            map.setPaintProperty(LAYER_WALKED, "line-gradient", ["interpolate", ["linear"], ["line-progress"], 0, "rgba(148,163,184,0)", 1, "rgba(148,163,184,0)"]);
+            map.setPaintProperty(LAYER_UPCOMING_CASING, "line-gradient", ["interpolate", ["linear"], ["line-progress"], 0, "#ffffff", 1, "#ffffff"]);
+            map.setPaintProperty(LAYER_UPCOMING, "line-gradient", ["interpolate", ["linear"], ["line-progress"], 0, "#2563eb", 1, "#2563eb"]);
+            return;
+        }
+        if (ratio >= 0.9995) {
+            map.setPaintProperty(LAYER_WALKED, "line-gradient", ["interpolate", ["linear"], ["line-progress"], 0, "#94a3b8", 1, "#94a3b8"]);
+            map.setPaintProperty(LAYER_UPCOMING_CASING, "line-gradient", ["interpolate", ["linear"], ["line-progress"], 0, "rgba(255,255,255,0)", 1, "rgba(255,255,255,0)"]);
+            map.setPaintProperty(LAYER_UPCOMING, "line-gradient", ["interpolate", ["linear"], ["line-progress"], 0, "rgba(37,99,235,0)", 1, "rgba(37,99,235,0)"]);
+            return;
+        }
+        map.setPaintProperty(LAYER_WALKED, "line-gradient", ["step", ["line-progress"], "#94a3b8", ratio, "rgba(148,163,184,0)"]);
+        map.setPaintProperty(LAYER_UPCOMING_CASING, "line-gradient", ["step", ["line-progress"], "rgba(255,255,255,0)", ratio, "#ffffff"]);
+        map.setPaintProperty(LAYER_UPCOMING, "line-gradient", ["step", ["line-progress"], "rgba(37,99,235,0)", ratio, "#2563eb"]);
     }
 
     function ensureBaseNavSourcesAndLayers() {
         if (!map || !isStyleReady()) return;
         try {
+            if (!map.getSource(SRC_ROUTE)) {
+                map.addSource(SRC_ROUTE, {
+                    type: "geojson",
+                    data: buildFullRouteGeoJson(),
+                    lineMetrics: true,
+                });
+                routeSourceDirty = false;
+                lastPaintedProgressRatio = -1;
+            }
             for (const srcId of [
-                SRC_WALKED,
-                SRC_UPCOMING,
                 SRC_BREADCRUMB,
                 SRC_OFFTRAIL,
                 SRC_REJOIN,
@@ -708,7 +667,7 @@
                 map.addLayer({
                     id: LAYER_WALKED,
                     type: "line",
-                    source: SRC_WALKED,
+                    source: SRC_ROUTE,
                     layout: { "line-cap": "round", "line-join": "round" },
                     paint: { "line-color": "#94a3b8", "line-width": 5 },
                 });
@@ -718,7 +677,7 @@
                 map.addLayer({
                     id: LAYER_UPCOMING_CASING,
                     type: "line",
-                    source: SRC_UPCOMING,
+                    source: SRC_ROUTE,
                     layout: { "line-cap": "round", "line-join": "round" },
                     paint: { "line-color": "#ffffff", "line-width": 9 },
                 });
@@ -728,7 +687,7 @@
                 map.addLayer({
                     id: LAYER_UPCOMING,
                     type: "line",
-                    source: SRC_UPCOMING,
+                    source: SRC_ROUTE,
                     layout: { "line-cap": "round", "line-join": "round" },
                     paint: { "line-color": "#2563eb", "line-width": 5 },
                 });
@@ -750,6 +709,8 @@
 
     function syncOffTrailLayers(activeReroute: OffTrailRerouteResult | null) {
         if (!map || !isStyleReady()) return;
+        if (activeReroute === lastSyncedRerouteRef) return;
+        lastSyncedRerouteRef = activeReroute;
         try {
             const offSrc = map.getSource(SRC_OFFTRAIL) as M.GeoJSONSource | undefined;
             const rejoinSrc = map.getSource(SRC_REJOIN) as M.GeoJSONSource | undefined;
@@ -833,6 +794,9 @@
 
     function syncAccessRouteLayers(pts: OffTrailPoint[] | null) {
         if (!map || !isStyleReady()) return;
+        if (pts === lastSyncedAccessRef && accessRouteActive === lastSyncedAccessActive) return;
+        lastSyncedAccessRef = pts;
+        lastSyncedAccessActive = accessRouteActive;
         try {
             const accessSrc = map.getSource(SRC_ACCESS) as M.GeoJSONSource | undefined;
             if (accessRouteActive && pts && pts.length >= 2) {
@@ -886,6 +850,8 @@
 
     function syncRescueLayers(rescue: DirectRescueRouteResult | null) {
         if (!map || !isStyleReady()) return;
+        if (rescue === lastSyncedRescueRef) return;
+        lastSyncedRescueRef = rescue;
         try {
             const rescueSrc = map.getSource(SRC_RESCUE) as M.GeoJSONSource | undefined;
             if (rescue && rescue.points.length >= 2) {
@@ -942,29 +908,37 @@
         if (!map || !isStyleReady()) return;
         ensureBaseNavSourcesAndLayers();
         try {
-            const { walked, upcoming } = buildSplitRouteGeoJson();
-            (map.getSource(SRC_WALKED) as M.GeoJSONSource | undefined)?.setData(walked);
-            (map.getSource(SRC_UPCOMING) as M.GeoJSONSource | undefined)?.setData(upcoming);
+            if (routeSourceDirty) {
+                (map.getSource(SRC_ROUTE) as M.GeoJSONSource | undefined)?.setData(
+                    buildFullRouteGeoJson(),
+                );
+                routeSourceDirty = false;
+                lastPaintedProgressRatio = -1;
+            }
+            applyRouteProgressGradient();
 
-            const breadcrumbData: FeatureCollection =
-                breadcrumbCoords.length >= 2
-                    ? {
-                          type: "FeatureCollection",
-                          features: [
-                              {
-                                  type: "Feature",
-                                  properties: {},
-                                  geometry: {
-                                      type: "LineString",
-                                      coordinates: breadcrumbCoords,
+            if (breadcrumbCoords.length !== lastSyncedBreadcrumbLen) {
+                lastSyncedBreadcrumbLen = breadcrumbCoords.length;
+                const breadcrumbData: FeatureCollection =
+                    breadcrumbCoords.length >= 2
+                        ? {
+                              type: "FeatureCollection",
+                              features: [
+                                  {
+                                      type: "Feature",
+                                      properties: {},
+                                      geometry: {
+                                          type: "LineString",
+                                          coordinates: breadcrumbCoords,
+                                      },
                                   },
-                              },
-                          ],
-                      }
-                    : EMPTY_FC;
-            (map.getSource(SRC_BREADCRUMB) as M.GeoJSONSource | undefined)?.setData(
-                breadcrumbData,
-            );
+                              ],
+                          }
+                        : EMPTY_FC;
+                (map.getSource(SRC_BREADCRUMB) as M.GeoJSONSource | undefined)?.setData(
+                    breadcrumbData,
+                );
+            }
 
             syncOffTrailLayers(reroute);
             syncAccessRouteLayers(accessRoutePoints);
@@ -1018,16 +992,19 @@
         fix: { lat: number; lon: number; altitude: number | null },
         matched: NavMatchResult,
         force = false,
-    ): OffTrailRerouteResult | null {
+    ): void {
         if (
             !matched.isOffTrail ||
             matched.crossTrackMeters > FAR_PREVIEW_THRESHOLD_METERS ||
-            activePoints.length === 0
+            activePoints.length === 0 ||
+            !terrainClient
         ) {
             lastReroutePos = null;
             lastHybridReroutePos = null;
             hybridReqSeq++;
-            return null;
+            localRerouteSeq++;
+            reroute = null;
+            return;
         }
 
         const evalUserEle =
@@ -1037,80 +1014,109 @@
 
         const { obstacles, preferredPaths } = gatherCorridorObstacles(fix.lat, fix.lon, matched);
 
-        let syncResult = reroute;
-        if (
+        const shouldRunLocal =
             force ||
             !reroute ||
             !lastReroutePos ||
-            haversineMeters(lastReroutePos.lat, lastReroutePos.lon, fix.lat, fix.lon) >= 15
-        ) {
-            syncResult = computeOffTrailReroute({
+            haversineMeters(lastReroutePos.lat, lastReroutePos.lon, fix.lat, fix.lon) >= 15;
+        if (!shouldRunLocal) return;
+
+        lastReroutePos = { lat: fix.lat, lon: fix.lon };
+        const lSeq = ++localRerouteSeq;
+        void terrainClient
+            .computeReroute({
                 userLat: fix.lat,
                 userLon: fix.lon,
                 userEle: evalUserEle,
-                trailPoints: activePoints,
                 lastAlongTrackM: matched.alongTrackMeters,
-                sampler: activeSampler,
                 mode: offTrailMode,
                 locale: activeLocaleCode(),
                 obstacles,
                 preferredPaths,
-            });
-            lastReroutePos = { lat: fix.lat, lon: fix.lon };
-        }
-
-        const now = Date.now();
-        const movedHybrid =
-            !lastHybridReroutePos ||
-            haversineMeters(
-                lastHybridReroutePos.lat,
-                lastHybridReroutePos.lon,
-                fix.lat,
-                fix.lon,
-            ) >= 20;
-        if (force || movedHybrid || now - lastHybridRerouteAt >= 10_000) {
-            const seq = ++hybridReqSeq;
-            lastHybridRerouteAt = now;
-            lastHybridReroutePos = { lat: fix.lat, lon: fix.lon };
-            void computeHybridOffTrailReroute({
-                userLat: fix.lat,
-                userLon: fix.lon,
-                userEle: evalUserEle,
-                trailPoints: activePoints,
-                lastAlongTrackM: matched.alongTrackMeters,
-                sampler: activeSampler,
-                mode: offTrailMode,
-                locale: activeLocaleCode(),
-                isCycling,
-                obstacles,
-                preferredPaths,
-                map: map as unknown as Parameters<typeof extractMapLibreObstacles>[0],
-            }).then((hybridRes) => {
-                if (seq !== hybridReqSeq) return;
-                if (
-                    !matchResult?.isOffTrail ||
-                    isFarPreview ||
-                    signalState === "degraded" ||
-                    signalState === "coasting"
-                ) {
-                    return;
+            })
+            .then((localRes) => {
+                if (lSeq !== localRerouteSeq || !matchResult?.isOffTrail || isFarPreview) return;
+                reroute = localRes;
+                if (etaCalc) {
+                    const extra = localRes
+                        ? {
+                              distanceM: localRes.distanceM,
+                              durationSec: localRes.estimatedSeconds,
+                              ascentM: localRes.ascentM,
+                              rejoinAlongTrackM: localRes.rejoinAlongTrackM,
+                          }
+                        : null;
+                    etaSnapshot = etaCalc.compute(
+                        alongTrackMeters,
+                        lastRealFixMs ?? Date.now(),
+                        extra,
+                    );
                 }
-                if (hybridRes) {
-                    reroute = hybridRes;
-                    if (etaCalc) {
-                        etaSnapshot = etaCalc.compute(alongTrackMeters, Date.now(), {
-                            distanceM: hybridRes.distanceM,
-                            durationSec: hybridRes.estimatedSeconds,
-                            ascentM: hybridRes.ascentM,
-                            rejoinAlongTrackM: hybridRes.rejoinAlongTrackM,
-                        });
-                    }
-                    syncNavGeoJson();
+                syncNavGeoJson();
+
+                const now = Date.now();
+                const movedHybrid =
+                    !lastHybridReroutePos ||
+                    haversineMeters(
+                        lastHybridReroutePos.lat,
+                        lastHybridReroutePos.lon,
+                        fix.lat,
+                        fix.lon,
+                    ) >= 20;
+                if (localRes && (force || movedHybrid || now - lastHybridRerouteAt >= 10_000)) {
+                    const hSeq = ++hybridReqSeq;
+                    lastHybridRerouteAt = now;
+                    lastHybridReroutePos = { lat: fix.lat, lon: fix.lon };
+                    void computeHybridOffTrailReroute({
+                        userLat: fix.lat,
+                        userLon: fix.lon,
+                        userEle: evalUserEle,
+                        trailPoints: activePoints,
+                        lastAlongTrackM: matched.alongTrackMeters,
+                        sampler: activeSampler,
+                        mode: offTrailMode,
+                        locale: activeLocaleCode(),
+                        isCycling,
+                        obstacles,
+                        preferredPaths,
+                        precomputedLocal: localRes,
+                        connectorSolver: (c) =>
+                            terrainClient!.computeConnector({
+                                ...c,
+                                userEle: evalUserEle,
+                                mode: offTrailMode,
+                                obstacles,
+                                preferredPaths,
+                            }),
+                    }).then((hybridRes) => {
+                        if (hSeq !== hybridReqSeq) return;
+                        if (
+                            !matchResult?.isOffTrail ||
+                            isFarPreview ||
+                            signalState === "degraded" ||
+                            signalState === "coasting"
+                        ) {
+                            return;
+                        }
+                        if (hybridRes) {
+                            reroute = hybridRes;
+                            if (etaCalc) {
+                                etaSnapshot = etaCalc.compute(
+                                    alongTrackMeters,
+                                    lastRealFixMs ?? Date.now(),
+                                    {
+                                        distanceM: hybridRes.distanceM,
+                                        durationSec: hybridRes.estimatedSeconds,
+                                        ascentM: hybridRes.ascentM,
+                                        rejoinAlongTrackM: hybridRes.rejoinAlongTrackM,
+                                    },
+                                );
+                            }
+                            syncNavGeoJson();
+                        }
+                    });
                 }
             });
-        }
-
-        return syncResult;
     }
 
     function handleFocusGroupMember(member: GroupMemberDto) {
@@ -1177,19 +1183,19 @@
         return null;
     }
 
-    function computeRescueRouteToSos(sos: SosAlertDto): DirectRescueRouteResult | null {
+    async function computeRescueRouteToSos(
+        sos: SosAlertDto,
+    ): Promise<DirectRescueRouteResult | null> {
         const origin = getEffectiveResponderOrigin();
-        if (!origin) return null;
+        if (!origin || !terrainClient) return null;
         lastRescueCalcPos = { lat: origin.lat, lon: origin.lon };
-        return computeDirectRescueRoute({
+        return terrainClient.computeRescueRoute({
             fromLat: origin.lat,
             fromLon: origin.lon,
             fromEle: origin.ele,
             targetLat: sos.lat,
             targetLon: sos.lon,
             targetEle: sos.ele,
-            trailPoints: activePoints,
-            sampler: activeSampler,
             mode: offTrailMode,
             locale: activeLocaleCode(),
         });
@@ -1208,15 +1214,19 @@
     async function triggerHeartbeatNow(force = false) {
         if (!latestFix) return;
         const now = Date.now();
-        if (!force && now - lastHeartbeatSentAt < 18_000) return;
+        const isStationary = powerGovernor?.snapshot().isStationary ?? false;
+        const minInterval = isStationary ? 110_000 : 18_000;
+        if (!force && now - lastHeartbeatSentAt < minInterval) return;
         lastHeartbeatSentAt = now;
-        const res = await sendHeartbeat({
+        const hbPayload = {
             trailId: trail.id,
             lat: latestFix.lat,
             lon: latestFix.lon,
             ele: userEle ?? latestFix.altitude,
             inNavigation: true,
-        });
+            stationary: isStationary,
+        };
+        const res = await sendHeartbeat(hbPayload);
         if (res) {
             activeHikersCount = res.activeHikers30m;
             liveReports = res.reports;
@@ -1276,6 +1286,10 @@
     }) {
         const origin = getEffectiveResponderOrigin();
         if (!origin) return;
+        powerGovernor?.resetToMoving(Date.now());
+        if (!currentWatchHighAccuracy) {
+            rebindGeolocationWatch(true);
+        }
         liveBusy = true;
         try {
             const created = await triggerSos({
@@ -1312,15 +1326,19 @@
     async function handleRespondSos(sos: SosAlertDto) {
         const origin = getEffectiveResponderOrigin();
         if (!origin) return;
+        powerGovernor?.resetToMoving(Date.now());
+        if (!currentWatchHighAccuracy) {
+            rebindGeolocationWatch(true);
+        }
         liveBusy = true;
         try {
             activeRescueSosId = sos.id;
-            const initialRoute = computeRescueRouteToSos(sos);
+            const initialRoute = await computeRescueRouteToSos(sos);
             activeRescueRoute = initialRoute;
             syncNavGeoJson();
 
             // Prefetch DEM tiles covering responder -> SOS corridor to refine elevation profile
-            void demGrid
+            void terrainClient
                 ?.prefetchCorridor(
                     [
                         { lat: origin.lat, lon: origin.lon },
@@ -1328,9 +1346,9 @@
                     ],
                     350,
                 )
-                .then(() => {
+                .then(async () => {
                     if (activeRescueSosId === sos.id) {
-                        activeRescueRoute = computeRescueRouteToSos(sos);
+                        activeRescueRoute = await computeRescueRouteToSos(sos);
                         syncNavGeoJson();
                     }
                 });
@@ -1421,13 +1439,14 @@
                   latestFix.lon,
               )
             : Infinity;
-        const minIntervalMs = movedM >= 4 ? 5_500 : 18_000;
+        const isStationary = powerGovernor?.snapshot().isStationary ?? false;
+        const minIntervalMs = isStationary ? 45_000 : movedM >= 4 ? 5_500 : 18_000;
         if (!force && now - lastGroupPingAt < minIntervalMs) return;
 
         lastGroupPingAt = now;
         lastGroupPingPos = { lat: latestFix.lat, lon: latestFix.lon };
         const code = groupSession.code;
-        const updated = await pingLiveGroup(code, {
+        const pingPayload = {
             lat: latestFix.lat,
             lon: latestFix.lon,
             ele: userEle ?? latestFix.altitude,
@@ -1436,7 +1455,9 @@
             speed: latestFix.speed,
             alongTrackM: forwardAlongTrackMeters(),
             inNavigation: true,
-        });
+            stationary: isStationary,
+        };
+        const updated = await pingLiveGroup(code, pingPayload);
         if (updated && groupSession?.code === code) {
             groupSession = {
                 ...groupSession,
@@ -1624,7 +1645,7 @@
             const distStart = haversineMeters(raw.lat, raw.lon, firstPt.lat, firstPt.lon);
             const distEnd = haversineMeters(raw.lat, raw.lon, lastPt.lat, lastPt.lon);
             if (distEnd <= 150 && distStart > 300) {
-                rebuildRouteEngines(buildBasePoints(trail), !reversed);
+                rebuildRouteEngines(cachedBasePoints, !reversed);
                 persistSession();
             }
         }
@@ -1666,6 +1687,19 @@
 
         latestFix = { lat: effLat, lon: effLon, accuracy: effAcc, altitude, heading, speed };
         liveUserPos = { lat: effLat, lon: effLon };
+
+        if (powerGovernor) {
+            const pSnap = powerGovernor.ingestFix({
+                lat: effLat,
+                lon: effLon,
+                speed,
+                nowMs,
+                hasActiveSos: Boolean(myActiveSos || activeRescueSosId),
+            });
+            if (pSnap.highAccuracyGps !== currentWatchHighAccuracy) {
+                rebindGeolocationWatch(pSnap.highAccuracyGps);
+            }
+        }
 
         locationPuck?.setPosition(effLon, effLat);
         accuracyLayer?.update(effLon, effLat, effAcc);
@@ -1729,6 +1763,7 @@
                 lastReroutePos = null;
                 lastHybridReroutePos = null;
                 hybridReqSeq++;
+                localRerouteSeq++;
                 justRejoined = false;
             } else if (coasterRes.suppressOffTrail) {
                 isFarPreview = false;
@@ -1739,12 +1774,13 @@
                 lastReroutePos = null;
                 lastHybridReroutePos = null;
                 hybridReqSeq++;
+                localRerouteSeq++;
             } else if (matched.isOffTrail) {
                 isFarPreview = false;
                 farFromTrailDistanceM = null;
                 accessRouteActive = false;
                 accessRoutePoints = null;
-                reroute = recomputeRerouteForFix(
+                recomputeRerouteForFix(
                     { lat: effLat, lon: effLon, altitude },
                     matched,
                 );
@@ -1759,6 +1795,7 @@
                     lastReroutePos = null;
                     lastHybridReroutePos = null;
                     hybridReqSeq++;
+                    localRerouteSeq++;
                     justRejoined = true;
                     if (rejoinTimer) clearTimeout(rejoinTimer);
                     rejoinTimer = setTimeout(() => {
@@ -1821,7 +1858,10 @@
                         raw.lon,
                     ) >= 15;
                 if (movedForRoute) {
-                    activeRescueRoute = computeRescueRouteToSos(targetSos);
+                    void computeRescueRouteToSos(targetSos).then((r) => {
+                        activeRescueRoute = r;
+                        syncNavGeoJson();
+                    });
                 }
                 const movedForApi =
                     !lastResponderPos ||
@@ -1866,11 +1906,7 @@
         locationPuck?.setHeading(deviceHeading, compassAccuracy);
         if (isFollowing && map) {
             runProgrammaticCamera(() => {
-                map!.easeTo({
-                    bearing: deviceHeading!,
-                    duration: 120,
-                    easing: (t) => t,
-                });
+                map!.jumpTo({ bearing: deviceHeading! });
             });
         }
     }
@@ -1880,23 +1916,15 @@
         offTrailMode = mode;
         persistSession();
         if (latestFix && matchResult?.isOffTrail && !isFarPreview) {
-            reroute = recomputeRerouteForFix(latestFix, matchResult, true);
-            if (etaCalc && matchResult) {
-                const offTrailExtra = reroute
-                    ? {
-                          distanceM: reroute.distanceM,
-                          durationSec: reroute.estimatedSeconds,
-                          ascentM: reroute.ascentM,
-                          rejoinAlongTrackM: reroute.rejoinAlongTrackM,
-                      }
-                    : null;
-                etaSnapshot = etaCalc.compute(alongTrackMeters, Date.now(), offTrailExtra);
-            }
+            recomputeRerouteForFix(latestFix, matchResult, true);
         }
         if (activeRescueSosId) {
             const targetSos = liveSosAlerts.find((s) => s.id === activeRescueSosId);
             if (targetSos) {
-                activeRescueRoute = computeRescueRouteToSos(targetSos);
+                void computeRescueRouteToSos(targetSos).then((r) => {
+                    activeRescueRoute = r;
+                    syncNavGeoJson();
+                });
             }
         }
         syncNavGeoJson();
@@ -1904,8 +1932,7 @@
 
     function handleReverseDirection() {
         userManuallyToggledReverse = true;
-        const base = buildBasePoints(trail);
-        rebuildRouteEngines(base, !reversed);
+        rebuildRouteEngines(cachedBasePoints, !reversed);
         persistSession();
         if (latestFix) {
             // Re-match current position onto the reversed track without altering breadcrumb
@@ -1935,7 +1962,7 @@
                     farFromTrailDistanceM = matched.crossTrackMeters;
                     reroute = null;
                 } else if (!coasterRes.suppressOffTrail && matched.isOffTrail) {
-                    reroute = recomputeRerouteForFix(latestFix, matched, true);
+                    recomputeRerouteForFix(latestFix, matched, true);
                 }
                 const offTrailExtra = reroute
                     ? {
@@ -1991,8 +2018,45 @@
         void goto(share ? `${base}?share=${encodeURIComponent(share)}` : base);
     }
 
+    function rebindGeolocationWatch(highAccuracy: boolean) {
+        if (typeof navigator === "undefined" || !navigator.geolocation) return;
+        currentWatchHighAccuracy = highAccuracy;
+        if (watchId !== null) {
+            navigator.geolocation.clearWatch(watchId);
+            watchId = null;
+        }
+        try {
+            watchId = navigator.geolocation.watchPosition(
+                (pos) => {
+                    handleGpsFix({
+                        lat: pos.coords.latitude,
+                        lon: pos.coords.longitude,
+                        accuracy: pos.coords.accuracy,
+                        altitude: pos.coords.altitude,
+                        heading: pos.coords.heading,
+                        speed: pos.coords.speed,
+                        timestampMs: pos.timestamp || Date.now(),
+                    });
+                },
+                () => {
+                    // Geolocation errors remain non-fatal; test hook or retry can supply fixes
+                },
+                highAccuracy
+                    ? { enableHighAccuracy: true, maximumAge: 2000, timeout: 15000 }
+                    : { enableHighAccuracy: false, maximumAge: 30000, timeout: 30000 },
+            );
+        } catch {
+            // Ignore geolocation availability errors
+        }
+    }
+
     onMount(() => {
+        terrainClient = new NavTerrainClient({
+            workerUrl: (workerUrls as { navTerrainWorkerUrl?: string }).navTerrainWorkerUrl,
+        });
+        powerGovernor = new PwaPowerGovernor();
         const base = buildBasePoints(trail);
+        cachedBasePoints = base;
         const restored = loadPersistedSession();
         if (restored) {
             paused = restored.paused;
@@ -2001,9 +2065,24 @@
         rebuildRouteEngines(base, restored?.reversed ?? false);
         persistSession();
 
-        demGrid = new DemTileGrid();
         if (base.length > 0) {
-            void demGrid.prefetchCorridor(base);
+            void terrainClient.setTrack(activePoints, true);
+        }
+
+        if (!trail.expand?.gpx && !trail.expand?.gpx_data && trail.gpx) {
+            void fetchGPX(trail).then(async (xml) => {
+                if (!xml || !terrainClient) return;
+                const pts3d = await terrainClient.parseGpxText(xml);
+                if (pts3d.length >= 2) {
+                    cachedBasePoints = pts3d;
+                    rebuildRouteEngines(pts3d, reversed);
+                    routeSourceDirty = true;
+                    lastPaintedProgressRatio = -1;
+                    await terrainClient.setTrack(activePoints, true);
+                    syncNavGeoJson();
+                    syncStartEndMarkers();
+                }
+            });
         }
 
         const initialCoord: [number, number] =
@@ -2075,6 +2154,12 @@
                         navLayerManager.addLayer(ovName, new OverlayLayer(ovName));
                     }
                 }
+                routeSourceDirty = true;
+                lastPaintedProgressRatio = -1;
+                lastSyncedBreadcrumbLen = -1;
+                lastSyncedRerouteRef = undefined;
+                lastSyncedAccessRef = undefined;
+                lastSyncedRescueRef = undefined;
                 ensureBaseNavSourcesAndLayers();
                 syncNavGeoJson();
                 syncStartEndMarkers();
@@ -2137,32 +2222,18 @@
                 window.removeEventListener("click", onFirstGesture, { capture: true });
         }
 
-        if (typeof navigator !== "undefined" && navigator.geolocation) {
-            try {
-                watchId = navigator.geolocation.watchPosition(
-                    (pos) => {
-                        handleGpsFix({
-                            lat: pos.coords.latitude,
-                            lon: pos.coords.longitude,
-                            accuracy: pos.coords.accuracy,
-                            altitude: pos.coords.altitude,
-                            heading: pos.coords.heading,
-                            speed: pos.coords.speed,
-                            timestampMs: pos.timestamp || Date.now(),
-                        });
-                    },
-                    () => {
-                        // Geolocation errors remain non-fatal; test hook or retry can supply fixes
-                    },
-                    {
-                        enableHighAccuracy: true,
-                        maximumAge: 2000,
-                        timeout: 15000,
-                    },
-                );
-            } catch {
-                // Ignore geolocation availability errors
+        rebindGeolocationWatch(true);
+
+        const handleDeviceMotion = (ev: DeviceMotionEvent) => {
+            if (!powerGovernor || powerGovernor.currentState !== "stationary_cabana_sleep") return;
+            const acc = ev.acceleration;
+            if (!acc) return;
+            if (powerGovernor.ingestLinearAcceleration(acc.x, acc.y, acc.z, Date.now())) {
+                rebindGeolocationWatch(true);
             }
+        };
+        if (typeof window !== "undefined") {
+            window.addEventListener("devicemotion", handleDeviceMotion, { passive: true });
         }
 
         const acquireWakeLock = async () => {
@@ -2176,13 +2247,94 @@
         };
         void acquireWakeLock();
 
+        const savedGroup = getSavedGroupSession(trail.id);
+        if (savedGroup?.displayName) {
+            savedGroupName = savedGroup.displayName;
+        }
+        const urlGroupCode = normalizeGroupCode(page.url.searchParams.get("group"));
+        const initialGroupCode = urlGroupCode ?? savedGroup?.code ?? null;
+
+        const openNavLiveStream = () => {
+            streamHandle?.close();
+            const liveCallbacks = {
+                onReportUpdate: (rep: TrailReportDto) => {
+                    liveReports = mergeReportIntoList(liveReports, rep);
+                },
+                onSosUpdate: (sos: SosAlertDto) => {
+                    if (!sos.isMine && sos.status === "active" && !alertedSosIds.has(sos.id)) {
+                        alertedSosIds.add(sos.id);
+                        playSosTone();
+                    }
+                    liveSosAlerts = mergeSosIntoList(liveSosAlerts, sos);
+                    if (activeRescueSosId === sos.id) {
+                        if (sos.status === "active") {
+                            void computeRescueRouteToSos(sos).then((r) => {
+                                activeRescueRoute = r;
+                                syncNavGeoJson();
+                            });
+                        } else {
+                            activeRescueSosId = null;
+                            activeRescueRoute = null;
+                            syncNavGeoJson();
+                        }
+                    }
+                },
+                onGroupMemberUpdate: (member: GroupMemberDto) => {
+                    if (!groupSession) return;
+                    groupSession = {
+                        ...groupSession,
+                        members: mergeGroupMemberIntoList(groupSession.members, member),
+                    };
+                },
+                onGroupMemberLeft: ({
+                    groupCode,
+                    memberId,
+                }: {
+                    groupCode: string;
+                    memberId: string;
+                }) => {
+                    if (!groupSession || (groupCode && groupCode !== groupSession.code)) return;
+                    groupSession = {
+                        ...groupSession,
+                        members: removeGroupMemberFromList(groupSession.members, memberId),
+                    };
+                },
+                onResyncRequired: () => {
+                    void triggerHeartbeatNow(true);
+                    if (groupSession) {
+                        void fetchLiveGroup(groupSession.code).then((g) => {
+                            if (g) groupSession = g;
+                        });
+                    }
+                },
+            };
+            streamHandle = connectLiveStream({
+                trailId: trail.id,
+                lat: trail.lat ?? null,
+                lon: trail.lon ?? null,
+                groupCode: groupSession?.code ?? initialGroupCode,
+                callbacks: liveCallbacks,
+            });
+        };
+
         const handleVisibilityChange = () => {
             if (typeof document !== "undefined") {
                 if (document.visibilityState === "visible") {
                     void acquireWakeLock();
+                    compassSensor?.start((reading) =>
+                        handleCompassReading(reading.heading, reading.accuracy),
+                    );
+                    if (!streamHandle) {
+                        openNavLiveStream();
+                    }
                     void triggerHeartbeatNow(true);
-                } else if (document.visibilityState === "hidden" && latestFix) {
-                    void clearHeartbeat();
+                } else if (document.visibilityState === "hidden") {
+                    compassSensor?.stop();
+                    streamHandle?.close();
+                    streamHandle = null;
+                    if (latestFix) {
+                        void clearHeartbeat();
+                    }
                 }
             }
         };
@@ -2245,7 +2397,9 @@
         }, 45_000);
 
         coastingTimer = setInterval(() => {
-            runCoastingTick(Date.now());
+            if (typeof document === "undefined" || document.visibilityState === "visible") {
+                runCoastingTick(Date.now());
+            }
         }, 1_000);
 
         groupPingTimer = setInterval(() => {
@@ -2254,54 +2408,7 @@
             }
         }, 6_000);
 
-        const savedGroup = getSavedGroupSession(trail.id);
-        if (savedGroup?.displayName) {
-            savedGroupName = savedGroup.displayName;
-        }
-        const urlGroupCode = normalizeGroupCode(page.url.searchParams.get("group"));
-        const initialGroupCode = urlGroupCode ?? savedGroup?.code ?? null;
-
-        streamHandle = connectLiveStream({
-            trailId: trail.id,
-            lat: trail.lat ?? null,
-            lon: trail.lon ?? null,
-            groupCode: initialGroupCode,
-            callbacks: {
-                onReportUpdate: (rep) => {
-                    liveReports = mergeReportIntoList(liveReports, rep);
-                },
-                onSosUpdate: (sos) => {
-                    if (!sos.isMine && sos.status === "active" && !alertedSosIds.has(sos.id)) {
-                        alertedSosIds.add(sos.id);
-                        playSosTone();
-                    }
-                    liveSosAlerts = mergeSosIntoList(liveSosAlerts, sos);
-                    if (activeRescueSosId === sos.id) {
-                        if (sos.status === "active") {
-                            activeRescueRoute = computeRescueRouteToSos(sos);
-                        } else {
-                            activeRescueSosId = null;
-                            activeRescueRoute = null;
-                        }
-                        syncNavGeoJson();
-                    }
-                },
-                onGroupMemberUpdate: (member) => {
-                    if (!groupSession) return;
-                    groupSession = {
-                        ...groupSession,
-                        members: mergeGroupMemberIntoList(groupSession.members, member),
-                    };
-                },
-                onGroupMemberLeft: ({ groupCode, memberId }) => {
-                    if (!groupSession || (groupCode && groupCode !== groupSession.code)) return;
-                    groupSession = {
-                        ...groupSession,
-                        members: removeGroupMemberFromList(groupSession.members, memberId),
-                    };
-                },
-            },
-        });
+        openNavLiveStream();
 
         if (urlGroupCode) {
             void joinLiveGroup(urlGroupCode, {
@@ -2326,6 +2433,7 @@
         // Expose deterministic E2E test hook
         if (typeof window !== "undefined") {
             (window as unknown as Record<string, unknown>).__wandererNavTest = {
+                getMap: () => map,
                 pushFix: (fix: NavFixInput) => handleGpsFix(fix),
                 tickCoasting: (nowMs?: number) => runCoastingTick(nowMs ?? Date.now()),
                 setCompass: (headingDeg: number, accuracyDeg: number | null = 10) =>
@@ -2333,23 +2441,7 @@
                 setCustomObstacles: (obstacles: ObstaclePolygon[] | null) => {
                     customObstacles = obstacles;
                     if (latestFix && matchResult?.isOffTrail && !isFarPreview) {
-                        reroute = recomputeRerouteForFix(latestFix, matchResult, true);
-                        if (etaCalc) {
-                            const offTrailExtra = reroute
-                                ? {
-                                      distanceM: reroute.distanceM,
-                                      durationSec: reroute.estimatedSeconds,
-                                      ascentM: reroute.ascentM,
-                                      rejoinAlongTrackM: reroute.rejoinAlongTrackM,
-                                  }
-                                : null;
-                            etaSnapshot = etaCalc.compute(
-                                alongTrackMeters,
-                                Date.now(),
-                                offTrailExtra,
-                            );
-                        }
-                        syncNavGeoJson();
+                        recomputeRerouteForFix(latestFix, matchResult, true);
                     }
                 },
                 injectGroupSession: (session: GroupSessionDto | null) => {
@@ -2361,28 +2453,17 @@
                     sampler: ((lat: number, lon: number) => number | null) | null,
                 ) => {
                     customDemSampler = sampler;
+                    terrainClient?.setCustomDemSampler(sampler);
                     if (latestFix && matchResult?.isOffTrail && !isFarPreview) {
-                        reroute = recomputeRerouteForFix(latestFix, matchResult, true);
-                        if (etaCalc) {
-                            const offTrailExtra = reroute
-                                ? {
-                                      distanceM: reroute.distanceM,
-                                      durationSec: reroute.estimatedSeconds,
-                                      ascentM: reroute.ascentM,
-                                      rejoinAlongTrackM: reroute.rejoinAlongTrackM,
-                                  }
-                                : null;
-                            etaSnapshot = etaCalc.compute(
-                                alongTrackMeters,
-                                Date.now(),
-                                offTrailExtra,
-                            );
-                        }
+                        recomputeRerouteForFix(latestFix, matchResult, true);
                     }
                     if (activeRescueSosId) {
                         const targetSos = liveSosAlerts.find((s) => s.id === activeRescueSosId);
                         if (targetSos) {
-                            activeRescueRoute = computeRescueRouteToSos(targetSos);
+                            void computeRescueRouteToSos(targetSos).then((r) => {
+                                activeRescueRoute = r;
+                                syncNavGeoJson();
+                            });
                         }
                     }
                     syncNavGeoJson();
@@ -2413,11 +2494,15 @@
             }
             if (typeof window !== "undefined") {
                 window.removeEventListener("pagehide", handlePageHide);
+                window.removeEventListener("devicemotion", handleDeviceMotion);
             }
         };
     });
 
     onDestroy(() => {
+        terrainClient?.destroy();
+        terrainClient = null;
+        powerGovernor = null;
         if (latestFix) {
             void clearHeartbeat();
         }

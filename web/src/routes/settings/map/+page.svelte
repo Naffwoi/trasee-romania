@@ -15,7 +15,7 @@
     } from "#lib/stores/search_store.ts";
     import { settings_update } from "#lib/stores/settings_store.ts";
     import { currentUser } from "#lib/stores/user_store.ts";
-    import { getIconForLocation } from "#lib/util/icon_util.ts";
+    import { getIconForLocation } from "#lib/util/location_icon_util.ts";
     import { onMount, untrack } from "svelte";
     import { _ } from "svelte-i18n";
     import Toggle from "#lib/components/base/toggle.svelte";

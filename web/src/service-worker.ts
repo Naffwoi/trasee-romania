@@ -1,6 +1,6 @@
-// Minimal SvelteKit PWA Service Worker strictly for Web Push & SOS Notification Clicks.
-// Intentionally omits a `fetch` handler so dynamic SvelteKit SSR, PocketBase auth cookies,
-// and live SSE streams are never intercepted or cached.
+// SvelteKit PWA Service Worker for Web Push, SOS Notification Clicks, and strict allowlist
+// static shell caching. Dynamic SvelteKit SSR HTML, PocketBase auth cookies, `/api/*`, and
+// live SSE (`text/event-stream`) requests return immediately without `respondWith()`.
 
 interface SosNotificationData {
 	type?: string;
@@ -61,12 +61,18 @@ interface SwNotificationEvent extends SwExtendableEvent {
 	};
 }
 
+interface SwFetchEvent extends SwExtendableEvent {
+	readonly request: Request;
+	respondWith(response: Promise<Response> | Response): void;
+}
+
 interface SwGlobal {
 	readonly location: Location;
 	readonly clients: SwClients;
 	readonly registration: SwRegistration;
 	skipWaiting(): Promise<void>;
 	addEventListener(type: "install" | "activate", listener: (event: SwExtendableEvent) => void): void;
+	addEventListener(type: "fetch", listener: (event: SwFetchEvent) => void): void;
 	addEventListener(type: "push", listener: (event: SwPushEvent) => void): void;
 	addEventListener(
 		type: "notificationclick",
@@ -75,13 +81,100 @@ interface SwGlobal {
 }
 
 const sw = self as unknown as SwGlobal;
+const IMMUTABLE_CACHE = "wanderer-immutable-v1";
+const STATIC_SHELL_CACHE = "wanderer-static-v1";
+const ACTIVE_CACHES = new Set([
+	IMMUTABLE_CACHE,
+	STATIC_SHELL_CACHE,
+	"wanderer-gpx-v1",
+	"wanderer-dem16-v1",
+]);
+
+function isStaticShellAsset(pathname: string): boolean {
+	return (
+		pathname.startsWith("/styles/") ||
+		pathname.startsWith("/fonts/") ||
+		pathname.startsWith("/favicon") ||
+		pathname === "/apple-touch-icon.png" ||
+		pathname === "/manifest.json"
+	);
+}
 
 sw.addEventListener("install", (event) => {
 	event.waitUntil(sw.skipWaiting());
 });
 
 sw.addEventListener("activate", (event) => {
-	event.waitUntil(sw.clients.claim());
+	event.waitUntil(
+		(async () => {
+			if (typeof caches !== "undefined") {
+				const keys = await caches.keys();
+				await Promise.all(
+					keys
+						.filter((k) => k.startsWith("wanderer-") && !ACTIVE_CACHES.has(k))
+						.map((k) => caches.delete(k)),
+				);
+			}
+			await sw.clients.claim();
+		})(),
+	);
+});
+
+sw.addEventListener("fetch", (event) => {
+	const req = event.request;
+	if (req.method !== "GET") return;
+	if (req.mode === "navigate") return;
+	const accept = req.headers.get("accept") ?? "";
+	if (accept.includes("text/event-stream")) return;
+
+	let url: URL;
+	try {
+		url = new URL(req.url);
+	} catch {
+		return;
+	}
+	if (url.origin !== sw.location.origin) return;
+	const { pathname } = url;
+	if (pathname.startsWith("/api/")) return;
+
+	if (pathname.startsWith("/_app/immutable/")) {
+		event.respondWith(
+			(async () => {
+				const cache = await caches.open(IMMUTABLE_CACHE);
+				const cached = await cache.match(req);
+				if (cached) return cached;
+				const net = await fetch(req);
+				if (net.ok) {
+					await cache.put(req, net.clone());
+				}
+				return net;
+			})(),
+		);
+		return;
+	}
+
+	if (isStaticShellAsset(pathname)) {
+		event.respondWith(
+			(async () => {
+				const cache = await caches.open(STATIC_SHELL_CACHE);
+				const cached = await cache.match(req);
+				const revalidate = fetch(req)
+					.then(async (net) => {
+						if (net.ok) {
+							await cache.put(req, net.clone());
+						}
+						return net;
+					})
+					.catch(() => null);
+				if (cached) {
+					event.waitUntil(revalidate);
+					return cached;
+				}
+				const net = await revalidate;
+				return net ?? Response.error();
+			})(),
+		);
+	}
 });
 
 sw.addEventListener("push", (event) => {

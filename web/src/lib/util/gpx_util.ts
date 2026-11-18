@@ -1,7 +1,6 @@
 import GPX from "#lib/models/gpx/gpx.ts";
 import Person from "#lib/models/gpx/person.ts";
 import { Trail } from "#lib/models/trail.ts";
-import { kml, tcx } from "#lib/vendor/toGeoJSON/toGeoJSON.js";
 import cryptoRandomString from "crypto-random-string";
 //@ts-ignore
 import { browser } from "$app/env";
@@ -10,14 +9,12 @@ import TrackSegment from "#lib/models/gpx/track-segment.ts";
 import GPXWaypoint, { hasUsablePosition } from "#lib/models/gpx/waypoint.ts";
 import { Waypoint } from "#lib/models/waypoint.ts";
 import { trails_show } from "#lib/stores/trail_store.ts";
-import FitParser from "#lib/vendor/fit-parser/fit_parser.ts";
-import { DOMParser as XMLDOMParser } from "@xmldom/xmldom";
 import type { Feature, FeatureCollection, GeoJsonProperties, Position } from 'geojson';
-import JSZip from "jszip";
+import type JSZip from "jszip";
 import { ClientResponseError, type AuthRecord } from "pocketbase";
 import { handleFromRecordWithIRI } from "./activitypub_util";
 import { joinContiguousTrackSegments } from "./gpx_segment_util";
-import { icons } from "./icon_util";
+import { isSafeFontAwesomeSlug } from "./location_icon_util";
 import { serverLimits } from "./track_limits.ts";
 
 
@@ -55,8 +52,8 @@ export async function gpx2trail(gpxString: string, fallbackName?: string, correc
         wp.id = cryptoRandomString({ length: 15 });
         wp.name = wpt.name ?? ""
         wp.description = wpt.desc;
-        if(wpt.sym && icons.includes(wpt.sym as typeof icons[number])) {
-            wp.icon = wpt.sym as typeof icons[number];
+        if (isSafeFontAwesomeSlug(wpt.sym)) {
+            wp.icon = wpt.sym as Waypoint["icon"];
         }
         trail.expand!.waypoints_via_trail?.push(wp);
     }
@@ -256,7 +253,7 @@ export async function fromFile(file: File | Blob) {
 
     if (fileContent.includes("http://www.opengis.net/kml")) {
         assertServerLimit(file.size, serverLimits().kmlBytes);
-        gpxData = fromKML(fileContent);
+        gpxData = await fromKML(fileContent);
         gpxFile = new Blob([gpxData], {
             type: "application/gpx+xml",
         });
@@ -286,9 +283,14 @@ export async function fromFile(file: File | Blob) {
     return { gpxData, gpxFile };
 }
 
-export function fromKML(kmlData: string) {
+export async function fromKML(kmlData: string) {
     assertServerLimit(countTags(kmlData), serverLimits().domTags);
-    const parser = browser ? new DOMParser() : new XMLDOMParser();
+    const [{ kml }, parser] = await Promise.all([
+        import("#lib/vendor/toGeoJSON/toGeoJSON.js"),
+        browser
+            ? Promise.resolve(new DOMParser())
+            : import("@xmldom/xmldom").then((m) => new m.DOMParser()),
+    ]);
     const nodes = parser.parseFromString(kmlData, "text/xml")
     const geojson = kml(nodes) as Feature | FeatureCollection
 
@@ -365,17 +367,19 @@ function inflateEntry(entry: JSZip.JSZipObject, maxBytes: number) {
 }
 
 export async function fromKMZ(kmzData: ArrayBuffer, maxDocumentBytes = browser ? MAX_BROWSER_KMZ_DOCUMENT_BYTES : serverLimits().kmlBytes) {
+    const { default: JSZip } = await import("jszip");
     const zip = new JSZip()
     await zip.loadAsync(kmzData)
     const entry = zip.file('doc.kml');
     if (!entry) {
         throw new Error("KMZ has no doc.kml");
     }
-    return fromKML(await inflateEntry(entry, maxDocumentBytes))
+    return await fromKML(await inflateEntry(entry, maxDocumentBytes))
 }
 
 export async function fromTCX(tcxData: string) {
     if (browser) {
+        const { tcx } = await import("#lib/vendor/toGeoJSON/toGeoJSON.js");
         const nodes = new DOMParser().parseFromString(tcxData, "text/xml");
         return fromGeoJSON(tcx(nodes) as Feature | FeatureCollection);
     }
@@ -385,6 +389,7 @@ export async function fromTCX(tcxData: string) {
 }
 
 export async function fromFIT(fitData: ArrayBuffer) {
+    const { default: FitParser } = await import("#lib/vendor/fit-parser/fit_parser.ts");
     const fitParser = new FitParser();
     return new Promise<string>((resolve, reject) => fitParser.parse(fitData, function (error, data) {
 

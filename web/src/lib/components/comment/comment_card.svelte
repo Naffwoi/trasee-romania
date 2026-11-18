@@ -6,7 +6,7 @@
     import { untrack } from "svelte";
     import { fade } from "svelte/transition";
     import { handleFromRecordWithIRI } from "#lib/util/activitypub_util.ts";
-    import Editor from "../base/editor.svelte";
+    import Editor from "../base/lazy_editor.svelte";
 
     interface Props {
         comment: Comment;

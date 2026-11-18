@@ -16,7 +16,7 @@
     import PhotoPicker from "../trail/photo_picker.svelte";
     import TrailPicker from "../trail/trail_picker.svelte";
     import type { SummitLog } from "#lib/models/summit_log.ts";
-    import Editor from "../base/editor.svelte";
+    import Editor from "../base/lazy_editor.svelte";
     interface Props {
         children?: Snippet<[any]>;
         onsave?: (summitLog: SummitLog) => void;

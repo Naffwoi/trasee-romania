@@ -9,10 +9,9 @@
     } from "#lib/components/base/search.svelte";
     import EmptyStateFeed from "#lib/components/empty_states/empty_state_feed.svelte";
     import FeedCard from "#lib/components/profile/feed_card.svelte";
-    import Scene from "#lib/components/3D/scene.svelte";
     import TrailCard from "#lib/components/trail/trail_card.svelte";
     import {
-        defaultTrailSearchAttributes,
+        trailCardSearchAttributes,
         type TrailSearchResult,
     } from "#lib/models/trail.ts";
     import { feed_index } from "#lib/stores/feed_store.ts";
@@ -23,12 +22,10 @@
         type LocationSearchResult,
     } from "#lib/stores/search_store.ts";
     import { theme } from "#lib/stores/theme_store.ts";
-    import { getIconForLocation } from "#lib/util/icon_util.ts";
-    import { Canvas } from "@threlte/core";
+    import { getIconForLocation } from "#lib/util/location_icon_util.ts";
     import { marked } from "marked";
-    import { onMount, untrack } from "svelte";
+    import { onMount, untrack, type Component } from "svelte";
     import { _ } from "svelte-i18n";
-    import StarSky from "#lib/components/3D/star_sky.svelte";
     import { fade } from "svelte/transition";
 
     let { data } = $props();
@@ -45,8 +42,26 @@
     let loading: boolean = false;
 
     let about: string = $state("");
+    let DesktopCanvas: Component<any> | null = $state(null);
+    let DesktopScene: Component<any> | null = $state(null);
+    let DesktopStarSky: Component<any> | null = $state(null);
 
     onMount(async () => {
+        if (
+            !page.data.user &&
+            typeof window !== "undefined" &&
+            window.matchMedia("(min-width: 1024px)").matches
+        ) {
+            void Promise.all([
+                import("@threlte/core"),
+                import("#lib/components/3D/scene.svelte"),
+                import("#lib/components/3D/star_sky.svelte"),
+            ]).then(([threlteMod, sceneMod, starSkyMod]) => {
+                DesktopCanvas = threlteMod.Canvas;
+                DesktopScene = sceneMod.default;
+                DesktopStarSky = starSkyMod.default;
+            });
+        }
         try {
             const markdownResponse = await fetch("/md/about.md");
             if (markdownResponse.ok) {
@@ -74,7 +89,7 @@
                 queries: [
                     {
                         indexUid: "trails",
-                        attributesToRetrieve: defaultTrailSearchAttributes,
+                        attributesToRetrieve: trailCardSearchAttributes,
                         q: q,
                         limit: 3,
                     },
@@ -196,13 +211,17 @@
         class="hidden lg:block w-full fixed top-[112px] -z-10"
         style="min-height: calc(100vh - 112px)"
     >
-        <div class="invisible dark:visible">
-            <StarSky></StarSky>
-        </div>
+        {#if DesktopStarSky}
+            <div class="invisible dark:visible">
+                <DesktopStarSky></DesktopStarSky>
+            </div>
+        {/if}
         <div class="absolute h-full w-[60%] left-[40%]">
-            <Canvas toneMapping={0}>
-                <Scene></Scene>
-            </Canvas>
+            {#if DesktopCanvas && DesktopScene}
+                <DesktopCanvas toneMapping={0}>
+                    <DesktopScene></DesktopScene>
+                </DesktopCanvas>
+            {/if}
             {#if $theme === "light"}
                 <enhanced:img
                     class="absolute top-1/2 -translate-y-1/2 left-1/2 -translate-x-1/2 max-h-3/4"

@@ -173,12 +173,27 @@
         return out;
     }
 
+    let cachedReportPtsRef: NavTrackPoint[] | null = null;
+    let cachedReportRev = false;
+    const reportDistanceCache = new Map<string, number | null>();
+
     function resolveReportDistanceAlong(
         report: TrailReportDto,
         pts: NavTrackPoint[],
         isRev: boolean,
         totalDist: number,
     ): number | null {
+        if (pts !== cachedReportPtsRef || isRev !== cachedReportRev) {
+            cachedReportPtsRef = pts;
+            cachedReportRev = isRev;
+            reportDistanceCache.clear();
+        }
+        const cacheKey = `${report.id}:${report.lat.toFixed(5)},${report.lon.toFixed(5)}`;
+        if (reportDistanceCache.has(cacheKey)) {
+            return reportDistanceCache.get(cacheKey) ?? null;
+        }
+
+        let resolved: number | null = null;
         if (pts.length >= 2 && Number.isFinite(report.lat) && Number.isFinite(report.lon)) {
             let bestDistSq = Infinity;
             let bestIdx = -1;
@@ -193,14 +208,15 @@
                 }
             }
             if (bestIdx >= 0 && bestDistSq <= 300 * 300) {
-                return pts[bestIdx].distanceM;
+                resolved = pts[bestIdx].distanceM;
             }
         }
-        if (Number.isFinite(report.alongTrackM) && report.alongTrackM > 0 && totalDist > 0) {
+        if (resolved === null && Number.isFinite(report.alongTrackM) && report.alongTrackM > 0 && totalDist > 0) {
             const d = isRev ? totalDist - report.alongTrackM : report.alongTrackM;
-            return Math.max(0, Math.min(totalDist, d));
+            resolved = Math.max(0, Math.min(totalDist, d));
         }
-        return null;
+        reportDistanceCache.set(cacheKey, resolved);
+        return resolved;
     }
 
     function resolveGroupMemberDistanceAlong(
@@ -357,8 +373,10 @@
         }
 
         const dpr = typeof window !== "undefined" ? Math.min(window.devicePixelRatio || 1, 3) : 1;
-        canvas.width = Math.round(width * dpr);
-        canvas.height = Math.round(height * dpr);
+        const targetW = Math.round(width * dpr);
+        const targetH = Math.round(height * dpr);
+        if (canvas.width !== targetW) canvas.width = targetW;
+        if (canvas.height !== targetH) canvas.height = targetH;
         const ctx = canvas.getContext("2d");
         if (!ctx) return;
 
@@ -515,14 +533,55 @@
             ctx.lineWidth = 3;
             ctx.lineCap = "round";
             ctx.lineJoin = "round";
-            for (let i = 1; i < upcomingSeg.length; i++) {
-                const a = upcomingSeg[i - 1];
-                const b = upcomingSeg[i];
-                ctx.strokeStyle = rescueActive ? "#ef4444" : colorForGrade(b.gradePct);
+            if (rescueActive) {
+                ctx.strokeStyle = "#ef4444";
                 ctx.beginPath();
-                ctx.moveTo(toX(a.distM), toY(a.ele));
-                ctx.lineTo(toX(b.distM), toY(b.ele));
+                ctx.moveTo(toX(upcomingSeg[0].distM), toY(upcomingSeg[0].ele));
+                for (let i = 1; i < upcomingSeg.length; i++) {
+                    ctx.lineTo(toX(upcomingSeg[i].distM), toY(upcomingSeg[i].ele));
+                }
                 ctx.stroke();
+            } else if (typeof Path2D === "function") {
+                const buckets = new Map<string, Path2D>();
+                for (let i = 1; i < upcomingSeg.length; i++) {
+                    const a = upcomingSeg[i - 1];
+                    const b = upcomingSeg[i];
+                    const col = colorForGrade(b.gradePct);
+                    let path = buckets.get(col);
+                    if (!path) {
+                        path = new Path2D();
+                        buckets.set(col, path);
+                    }
+                    path.moveTo(toX(a.distM), toY(a.ele));
+                    path.lineTo(toX(b.distM), toY(b.ele));
+                }
+                for (const [col, path] of buckets) {
+                    ctx.strokeStyle = col;
+                    ctx.stroke(path);
+                }
+            } else {
+                const buckets = new Map<string, Array<[number, number, number, number]>>();
+                for (let i = 1; i < upcomingSeg.length; i++) {
+                    const a = upcomingSeg[i - 1];
+                    const b = upcomingSeg[i];
+                    const col = colorForGrade(b.gradePct);
+                    let list = buckets.get(col);
+                    if (!list) {
+                        list = [];
+                        buckets.set(col, list);
+                    }
+                    list.push([toX(a.distM), toY(a.ele), toX(b.distM), toY(b.ele)]);
+                }
+                for (const [col, segs] of buckets) {
+                    ctx.strokeStyle = col;
+                    ctx.beginPath();
+                    for (let k = 0; k < segs.length; k++) {
+                        const s = segs[k];
+                        ctx.moveTo(s[0], s[1]);
+                        ctx.lineTo(s[2], s[3]);
+                    }
+                    ctx.stroke();
+                }
             }
             ctx.restore();
         }

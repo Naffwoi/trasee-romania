@@ -17,7 +17,7 @@ const testPeaks: PeakEntryDto[] = [
 		name: "Vf. Apropiat",
 		lat: 45.4817,
 		lon: 25.45628,
-		ele: 1950,
+		ele: 1750,
 		prominenceM: 300,
 		kind: "peak",
 	},
@@ -46,7 +46,7 @@ describe("OfflinePeakFinder (DEM Viewshed + k=0.13 Curvature + Decluttering)", (
 		const obsLat = 45.44572;
 		const obsLon = 25.45628;
 		const dem = new DemTileGrid({
-			customSampler: (lat) => (Math.abs(lat - 45.4817) < 0.0025 ? 1950 : 1500),
+			customSampler: (lat) => (Math.abs(lat - 45.4817) < 0.0025 ? 1750 : 1500),
 		});
 
 		const finder = OfflinePeakFinder.fromPeaks(testPeaks.slice(1));

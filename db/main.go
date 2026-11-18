@@ -67,7 +67,7 @@ func main() {
 		os.Exit(pluginsystem.RunPluginWorker(context.Background(), os.Stdin, os.Stdout, os.Stderr))
 	}
 
-	app := pocketbase.New()
+	app := pocketbase.NewWithConfig(newPocketBaseConfig())
 	client := initializeMeilisearch()
 
 	verifySettings()
@@ -320,6 +320,12 @@ func setupCommands(app *pocketbase.PocketBase) {
 
 func onBeforeServeHandler(client meilisearch.ServiceManager) func(se *core.ServeEvent) error {
 	return func(se *core.ServeEvent) error {
+		stopLiveSnapshot := startLiveMemoryLifecycle(se.App, live.DefaultMemoryStore())
+		se.App.OnTerminate().BindFunc(func(te *core.TerminateEvent) error {
+			stopLiveSnapshot()
+			return te.Next()
+		})
+
 		registerRoutes(se, client)
 		registerCronJobs(se.App, client)
 		if err := initData(se.App, client); err != nil {
@@ -483,6 +489,9 @@ func registerCronJobs(app core.App, client meilisearch.ServiceManager) {
 
 	app.Cron().MustAdd("search-repair", repairSchedule, func() {
 		runSearchRepair(app, client)
+	})
+	app.Cron().MustAdd("sqlite-pragma-optimize", "0 */6 * * *", func() {
+		runSQLitePlannerOptimize(app)
 	})
 }
 

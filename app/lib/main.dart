@@ -28,6 +28,7 @@ import 'package:wanderer/services/user_ca_trust.dart';
 import 'package:wanderer/util/image_cache.dart';
 import 'package:wanderer/provider/account_scope_invalidation.dart';
 import 'package:wanderer/store/active_navigation_store.dart' as active_nav;
+import 'package:wanderer/store/breadcrumb_slab_store.dart';
 import 'package:wanderer/store/local_photo_store.dart';
 import 'package:wanderer/store/local_trail_store.dart';
 import 'package:wanderer/actions/launch_navigation.dart';
@@ -75,6 +76,9 @@ void main() async {
   // map surfacing before it lands only misses caching for the first tiles.
   unawaited(_raiseAmbientTileCacheSize());
 
+  final appSupportDir = await getApplicationSupportDirectory();
+  final breadcrumbSlabStore = BreadcrumbSlabStore.forDirectory(appSupportDir);
+
   runApp(
     ProviderScope(
       retry: _providerRetry,
@@ -82,6 +86,7 @@ void main() async {
         objectBoxProvider.overrideWithValue(store),
         tileProxyBaseUrlProvider.overrideWithValue(proxyServer.baseUrl),
         cookieJarProvider.overrideWithValue(jar),
+        breadcrumbSlabStoreProvider.overrideWithValue(breadcrumbSlabStore),
       ],
       child: MainApp(),
     ),
@@ -379,6 +384,7 @@ class _MainAppState extends ConsumerState<MainApp> with WidgetsBindingObserver {
     // it, see above).
     if (row.sessionType != ActiveSessionType.nav || row.trailId == null) {
       active_nav.clear(store);
+      ref.read(breadcrumbSlabStoreProvider)?.clear();
       unawaited(TraceletPositionSource.stopOrphanedTracking());
       return;
     }
@@ -395,6 +401,7 @@ class _MainAppState extends ConsumerState<MainApp> with WidgetsBindingObserver {
       // navResponseJson and the trail was never downloaded, or both copies are
       // corrupt. Silently drop, no dialog.
       active_nav.clear(store);
+      ref.read(breadcrumbSlabStoreProvider)?.clear();
       unawaited(TraceletPositionSource.stopOrphanedTracking());
       return;
     }
@@ -453,6 +460,7 @@ class _MainAppState extends ConsumerState<MainApp> with WidgetsBindingObserver {
         // Declined: drop the row AND the native tracking session that
         // survived termination for it (stopOnTerminate: false).
         active_nav.clear(store);
+        ref.read(breadcrumbSlabStoreProvider)?.clear();
         unawaited(TraceletPositionSource.stopOrphanedTracking());
       }
     });
@@ -529,6 +537,7 @@ class _MainAppState extends ConsumerState<MainApp> with WidgetsBindingObserver {
     await backfillSessionGap(
       row,
       ensureTraceletReady: _readyTraceletForBackfill,
+      slabStore: ref.read(breadcrumbSlabStoreProvider),
     );
     navigatorKey.currentContext?.push(
       '/trail/${row.trailId}/navigate',
@@ -548,6 +557,7 @@ class _MainAppState extends ConsumerState<MainApp> with WidgetsBindingObserver {
     await backfillSessionGap(
       row,
       ensureTraceletReady: _readyTraceletForBackfill,
+      slabStore: ref.read(breadcrumbSlabStoreProvider),
     );
     navigatorKey.currentContext?.push('/record', extra: row);
   }
@@ -614,6 +624,7 @@ class _MainAppState extends ConsumerState<MainApp> with WidgetsBindingObserver {
         // Declined: drop the row AND the native tracking session that
         // survived termination for it (stopOnTerminate: false).
         active_nav.clear(store);
+        ref.read(breadcrumbSlabStoreProvider)?.clear();
         unawaited(TraceletPositionSource.stopOrphanedTracking());
       }
     });

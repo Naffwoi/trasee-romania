@@ -73,7 +73,6 @@ String unit(Ref ref) {
 }
 
 final expeditionBatteryModeProvider = Provider<bool>((ref) {
-  return ref.watch(
-    localSettingsProvider.select((s) => s.expeditionBatteryMode),
-  );
+  final settings = ref.watch(localSettingsProvider);
+  return settings.expeditionBatteryMode;
 });

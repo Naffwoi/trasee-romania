@@ -14,17 +14,13 @@ void main() {
       );
       source.exif.exifIfd['OffsetTimeOriginal'] = img.IfdValueAscii('+02:00');
       source.exif.gpsIfd[0x0001] = img.IfdValueAscii('N');
-      source.exif.gpsIfd[0x0002] = img.IfdValueRational.list([
-        img.Rational(45, 1),
-        img.Rational(26, 1),
-        img.Rational(4488, 100),
-      ]);
+      source.exif.gpsIfd[0x0002] = img.IfdValueRational(45, 1)
+        ..value.add(img.IfdValueRational(26, 1).value.first)
+        ..value.add(img.IfdValueRational(4488, 100).value.first);
       source.exif.gpsIfd[0x0003] = img.IfdValueAscii('E');
-      source.exif.gpsIfd[0x0004] = img.IfdValueRational.list([
-        img.Rational(25, 1),
-        img.Rational(27, 1),
-        img.Rational(2268, 100),
-      ]);
+      source.exif.gpsIfd[0x0004] = img.IfdValueRational(25, 1)
+        ..value.add(img.IfdValueRational(27, 1).value.first)
+        ..value.add(img.IfdValueRational(2268, 100).value.first);
 
       final dirtyJpg = img.encodeJpg(source, quality: 90);
       final preTags = await readExifFromBytes(dirtyJpg);

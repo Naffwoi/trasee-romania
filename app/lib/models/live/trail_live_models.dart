@@ -459,6 +459,7 @@ enum SosReason {
 class SosAlertModel {
   const SosAlertModel({
     required this.id,
+    this.clientSosId,
     this.trailId,
     this.status = 'active',
     this.reason = SosReason.other,
@@ -474,9 +475,17 @@ class SosAlertModel {
     this.amResponding = false,
     this.createdAt,
     this.expiresAt,
+    this.viaBluetooth = false,
+    this.bleHopCount = 0,
+    this.bleAckCount = 0,
+    this.bleServerConfirmed = false,
+    this.bleNearestEtaMin,
+    this.bleNearestDistanceM,
+    this.localClaimSecret,
   });
 
   final String id;
+  final String? clientSosId;
   final String? trailId;
   final String status;
   final SosReason reason;
@@ -492,6 +501,20 @@ class SosAlertModel {
   final bool amResponding;
   final DateTime? createdAt;
   final DateTime? expiresAt;
+  final bool viaBluetooth;
+  final int bleHopCount;
+  final int bleAckCount;
+  final bool bleServerConfirmed;
+  final int? bleNearestEtaMin;
+  final double? bleNearestDistanceM;
+  final String? localClaimSecret;
+
+  String get dedupeKey {
+    final cid = clientSosId;
+    return (cid != null && cid.isNotEmpty) ? 'csos:$cid' : 'id:$id';
+  }
+
+  int get effectiveResponderCount => math.max(responderCount, bleAckCount);
 
   bool isActiveAt(DateTime now) {
     if (status != 'active') return false;
@@ -502,6 +525,7 @@ class SosAlertModel {
 
   SosAlertModel copyWith({
     String? id,
+    String? clientSosId,
     String? trailId,
     String? status,
     SosReason? reason,
@@ -517,9 +541,17 @@ class SosAlertModel {
     bool? amResponding,
     DateTime? createdAt,
     DateTime? expiresAt,
+    bool? viaBluetooth,
+    int? bleHopCount,
+    int? bleAckCount,
+    bool? bleServerConfirmed,
+    int? bleNearestEtaMin,
+    double? bleNearestDistanceM,
+    String? localClaimSecret,
   }) {
     return SosAlertModel(
       id: id ?? this.id,
+      clientSosId: clientSosId ?? this.clientSosId,
       trailId: trailId ?? this.trailId,
       status: status ?? this.status,
       reason: reason ?? this.reason,
@@ -535,6 +567,13 @@ class SosAlertModel {
       amResponding: amResponding ?? this.amResponding,
       createdAt: createdAt ?? this.createdAt,
       expiresAt: expiresAt ?? this.expiresAt,
+      viaBluetooth: viaBluetooth ?? this.viaBluetooth,
+      bleHopCount: bleHopCount ?? this.bleHopCount,
+      bleAckCount: bleAckCount ?? this.bleAckCount,
+      bleServerConfirmed: bleServerConfirmed ?? this.bleServerConfirmed,
+      bleNearestEtaMin: bleNearestEtaMin ?? this.bleNearestEtaMin,
+      bleNearestDistanceM: bleNearestDistanceM ?? this.bleNearestDistanceM,
+      localClaimSecret: localClaimSecret ?? this.localClaimSecret,
     );
   }
 
@@ -545,8 +584,12 @@ class SosAlertModel {
     final rawNearestDist = _parseOptionalDouble(
       json['nearestDistanceM'] ?? json['nearest_distance_m'],
     );
+    final rawClientSosId = _parseOptionalString(
+      json['clientSosId'] ?? json['client_sos_id'],
+    )?.toLowerCase();
     return SosAlertModel(
       id: (json['id'] ?? '').toString(),
+      clientSosId: rawClientSosId,
       trailId: _parseOptionalString(json['trailId'] ?? json['trail_id']),
       status: _parseOptionalString(json['status']) ?? 'active',
       reason: SosReason.fromApi((json['reason'] as Object?)?.toString()),
@@ -570,11 +613,24 @@ class SosAlertModel {
       amResponding: _parseBool(json['amResponding'] ?? json['am_responding']),
       createdAt: _parseOptionalDate(json['createdAt'] ?? json['created']),
       expiresAt: _parseOptionalDate(json['expiresAt'] ?? json['expires_at']),
+      viaBluetooth: _parseBool(json['viaBluetooth'] ?? json['via_bluetooth']),
+      bleHopCount: _parseInt(json['bleHopCount'] ?? json['ble_hop_count'], 0),
+      bleAckCount: _parseInt(json['bleAckCount'] ?? json['ble_ack_count'], 0),
+      bleServerConfirmed: _parseBool(
+        json['bleServerConfirmed'] ?? json['ble_server_confirmed'],
+      ),
+      bleNearestEtaMin: _parseOptionalInt(
+        json['bleNearestEtaMin'] ?? json['ble_nearest_eta_min'],
+      ),
+      bleNearestDistanceM: _parseOptionalDouble(
+        json['bleNearestDistanceM'] ?? json['ble_nearest_distance_m'],
+      ),
     );
   }
 
   Map<String, dynamic> toJson() => <String, dynamic>{
     'id': id,
+    if (clientSosId != null) 'clientSosId': clientSosId,
     'trailId': trailId,
     'status': status,
     'reason': reason.apiValue,
@@ -590,6 +646,13 @@ class SosAlertModel {
     'amResponding': amResponding,
     'createdAt': createdAt?.toUtc().toIso8601String(),
     'expiresAt': expiresAt?.toUtc().toIso8601String(),
+    if (viaBluetooth) 'viaBluetooth': viaBluetooth,
+    if (bleHopCount > 0) 'bleHopCount': bleHopCount,
+    if (bleAckCount > 0) 'bleAckCount': bleAckCount,
+    if (bleServerConfirmed) 'bleServerConfirmed': bleServerConfirmed,
+    if (bleNearestEtaMin != null) 'bleNearestEtaMin': bleNearestEtaMin,
+    if (bleNearestDistanceM != null)
+      'bleNearestDistanceM': bleNearestDistanceM,
   };
 }
 
@@ -641,12 +704,14 @@ class TrailLiveSummary {
 
     final rawSos = json['sosAlerts'] ?? json['activeSosAlerts'];
     final parsedSos = <SosAlertModel>[];
-    final seenSosIds = <String>{};
+    final seenSosKeys = <String>{};
     if (rawSos is List) {
       for (final item in rawSos) {
         if (item is Map) {
           final model = SosAlertModel.fromJson(Map<String, dynamic>.from(item));
-          if (model.id.isNotEmpty && seenSosIds.add(model.id)) {
+          if (model.id.isNotEmpty &&
+              seenSosKeys.add('id:${model.id}') &&
+              seenSosKeys.add(model.dedupeKey)) {
             parsedSos.add(model);
           }
         }
@@ -658,7 +723,9 @@ class TrailLiveSummary {
       final mine = SosAlertModel.fromJson(
         Map<String, dynamic>.from(rawMySos),
       ).copyWith(isMine: true);
-      if (mine.id.isNotEmpty && seenSosIds.add(mine.id)) {
+      if (mine.id.isNotEmpty &&
+          seenSosKeys.add('id:${mine.id}') &&
+          seenSosKeys.add(mine.dedupeKey)) {
         parsedSos.insert(0, mine);
       }
     }
@@ -697,6 +764,8 @@ class GroupMemberModel {
     this.inNavigation = false,
     this.isSelf = false,
     this.updatedAt,
+    this.viaBluetooth = false,
+    this.bleHopCount = 0,
   });
 
   final String memberId;
@@ -712,6 +781,8 @@ class GroupMemberModel {
   final bool inNavigation;
   final bool isSelf;
   final DateTime? updatedAt;
+  final bool viaBluetooth;
+  final int bleHopCount;
 
   String get initials {
     final cleaned = displayName.trim();
@@ -746,6 +817,8 @@ class GroupMemberModel {
     bool? inNavigation,
     bool? isSelf,
     DateTime? updatedAt,
+    bool? viaBluetooth,
+    int? bleHopCount,
   }) {
     return GroupMemberModel(
       memberId: memberId ?? this.memberId,
@@ -761,6 +834,8 @@ class GroupMemberModel {
       inNavigation: inNavigation ?? this.inNavigation,
       isSelf: isSelf ?? this.isSelf,
       updatedAt: updatedAt ?? this.updatedAt,
+      viaBluetooth: viaBluetooth ?? this.viaBluetooth,
+      bleHopCount: bleHopCount ?? this.bleHopCount,
     );
   }
 
@@ -794,6 +869,14 @@ class GroupMemberModel {
             json['lastSeen'] ??
             json['last_seen'],
       ),
+      viaBluetooth: _parseBool(
+        json['viaBluetooth'] ?? json['via_bluetooth'],
+        false,
+      ),
+      bleHopCount: _parseInt(
+        json['bleHopCount'] ?? json['ble_hop_count'],
+        0,
+      ),
     );
   }
 
@@ -811,6 +894,8 @@ class GroupMemberModel {
     'inNavigation': inNavigation,
     'isSelf': isSelf,
     'updatedAt': updatedAt?.toUtc().toIso8601String(),
+    if (viaBluetooth) 'viaBluetooth': viaBluetooth,
+    if (bleHopCount > 0) 'bleHopCount': bleHopCount,
   };
 }
 
@@ -821,6 +906,7 @@ class GroupSessionModel {
     this.expiresAt,
     required this.selfMemberId,
     this.members = const [],
+    this.isOfflineBleGroup = false,
   });
 
   final String code;
@@ -828,6 +914,7 @@ class GroupSessionModel {
   final DateTime? expiresAt;
   final String selfMemberId;
   final List<GroupMemberModel> members;
+  final bool isOfflineBleGroup;
 
   List<GroupMemberModel> get peers => members
       .where((m) => !m.isSelf && m.memberId != selfMemberId)
@@ -839,6 +926,7 @@ class GroupSessionModel {
     DateTime? expiresAt,
     String? selfMemberId,
     List<GroupMemberModel>? members,
+    bool? isOfflineBleGroup,
   }) {
     return GroupSessionModel(
       code: code ?? this.code,
@@ -846,6 +934,7 @@ class GroupSessionModel {
       expiresAt: expiresAt ?? this.expiresAt,
       selfMemberId: selfMemberId ?? this.selfMemberId,
       members: members ?? this.members,
+      isOfflineBleGroup: isOfflineBleGroup ?? this.isOfflineBleGroup,
     );
   }
 
@@ -886,6 +975,10 @@ class GroupSessionModel {
       ),
       selfMemberId: selfId,
       members: parsedMembers,
+      isOfflineBleGroup: _parseBool(
+        source['isOfflineBleGroup'] ?? source['is_offline_ble_group'],
+        false,
+      ),
     );
   }
 
@@ -895,6 +988,7 @@ class GroupSessionModel {
     'expiresAt': expiresAt?.toUtc().toIso8601String(),
     'selfMemberId': selfMemberId,
     'members': members.map((m) => m.toJson()).toList(growable: false),
+    if (isOfflineBleGroup) 'isOfflineBleGroup': isOfflineBleGroup,
   };
 }
 

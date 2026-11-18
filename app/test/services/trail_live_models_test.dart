@@ -820,4 +820,381 @@ void main() {
       await service.leaveGroup('K7M4P9');
     });
   });
+
+  group('Offline BLE SOS & Group Integration (Models, Service & UI)', () {
+    test('SosAlertModel.dedupeKey, BLE fields, relaySos, claim forwarding & BLE->SSE notification dedup', () async {
+      const fixedToken =
+          '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef';
+      final futureExpiry = DateTime.now()
+          .toUtc()
+          .add(const Duration(hours: 5))
+          .toIso8601String();
+
+      final localSos = const SosAlertModel(
+        id: 'local-0123456789abcdef',
+        clientSosId: '0123456789abcdef',
+        lat: 45.4,
+        lon: 25.4,
+        viaBluetooth: true,
+        bleAckCount: 2,
+        bleServerConfirmed: true,
+        bleNearestEtaMin: 12,
+      );
+      expect(localSos.dedupeKey, 'csos:0123456789abcdef');
+      expect(localSos.effectiveResponderCount, 2);
+
+      final serverNoClientId = const SosAlertModel(
+        id: 'pb_sos_1',
+        lat: 45.4,
+        lon: 25.4,
+      );
+      expect(serverNoClientId.dedupeKey, 'id:pb_sos_1');
+
+      // TrailLiveSummary deduplicates alerts sharing clientSosId.
+      final summary = TrailLiveSummary.fromJson(<String, dynamic>{
+        'activeHikers30m': 3,
+        'sosAlerts': <Object?>[
+          <String, Object?>{
+            'id': 'ble-0123456789abcdef',
+            'clientSosId': '0123456789ABCDEF',
+            'status': 'active',
+            'lat': 45.4,
+            'lon': 25.4,
+          },
+          <String, Object?>{
+            'id': 'pb_999',
+            'clientSosId': '0123456789abcdef',
+            'status': 'active',
+            'lat': 45.4,
+            'lon': 25.4,
+          },
+        ],
+      });
+      expect(summary.sosAlerts, hasLength(1));
+      expect(summary.sosAlerts.single.clientSosId, '0123456789abcdef');
+
+      Map<String, dynamic>? capturedCreateSos;
+      Map<String, dynamic>? capturedUpdateSos;
+      Map<String, dynamic>? capturedRelaySos;
+      Map<String, dynamic>? capturedCreateGroup;
+
+      final adapter = _FakeLiveAdapter((options) async {
+        final reqMap = options.data is Map
+            ? Map<String, dynamic>.from(options.data as Map)
+            : <String, dynamic>{};
+        if (options.path == '/live/sos' && options.method == 'POST') {
+          capturedCreateSos = reqMap;
+          return ResponseBody.fromString(
+            jsonEncode(<String, Object?>{
+              'sos': <String, Object?>{
+                'id': 'pb_claimed_1',
+                'clientSosId': reqMap['clientSosId'],
+                'status': 'active',
+                'reason': reqMap['reason'],
+                'lat': reqMap['lat'],
+                'lon': reqMap['lon'],
+                'isMine': true,
+                'expiresAt': futureExpiry,
+              },
+            }),
+            200,
+            headers: <String, List<String>>{
+              Headers.contentTypeHeader: <String>[Headers.jsonContentType],
+            },
+          );
+        }
+        if (options.path == '/live/sos/pb_claimed_1' &&
+            options.method == 'PATCH') {
+          capturedUpdateSos = reqMap;
+          return ResponseBody.fromString(
+            jsonEncode(<String, Object?>{
+              'sos': <String, Object?>{
+                'id': 'pb_claimed_1',
+                'clientSosId': '0123456789abcdef',
+                'status': 'resolved',
+                'lat': 45.4,
+                'lon': 25.4,
+              },
+            }),
+            200,
+            headers: <String, List<String>>{
+              Headers.contentTypeHeader: <String>[Headers.jsonContentType],
+            },
+          );
+        }
+        if (options.path == '/live/sos/relay' && options.method == 'POST') {
+          capturedRelaySos = reqMap;
+          return ResponseBody.fromString(
+            jsonEncode(<String, Object?>{
+              'sos': <String, Object?>{
+                'id': 'pb_relayed_2',
+                'clientSosId': reqMap['clientSosId'],
+                'status': 'active',
+                'reason': 'injury',
+                'lat': 45.41,
+                'lon': 25.42,
+                'isMine': false,
+                'expiresAt': futureExpiry,
+              },
+            }),
+            200,
+            headers: <String, List<String>>{
+              Headers.contentTypeHeader: <String>[Headers.jsonContentType],
+            },
+          );
+        }
+        if (options.path == '/live/groups' && options.method == 'POST') {
+          capturedCreateGroup = reqMap;
+          return ResponseBody.fromString(
+            jsonEncode(<String, Object?>{
+              'code': reqMap['preferredCode'] ?? 'BUCEG7',
+              'selfMemberId': 'a1b2c3d4e5f6',
+              'members': const <Object?>[],
+            }),
+            200,
+            headers: <String, List<String>>{
+              Headers.contentTypeHeader: <String>[Headers.jsonContentType],
+            },
+          );
+        }
+        if (options.path == '/live/stream') {
+          final ssePayload =
+              'event: sos_update\n'
+              'data: ${jsonEncode(<String, Object?>{
+                'sos': <String, Object?>{
+                  'id': 'pb_relayed_2',
+                  'clientSosId': 'fedcba9876543210',
+                  'status': 'active',
+                  'reason': 'injury',
+                  'lat': 45.41,
+                  'lon': 25.42,
+                  'isMine': false,
+                  'expiresAt': futureExpiry,
+                },
+              })}\n\n';
+          return ResponseBody(
+            Stream<Uint8List>.fromIterable(<Uint8List>[
+              Uint8List.fromList(utf8.encode(ssePayload)),
+            ]),
+            200,
+            headers: <String, List<String>>{
+              Headers.contentTypeHeader: <String>['text/event-stream'],
+            },
+          );
+        }
+        return ResponseBody.fromString('{}', 200);
+      });
+
+      final dio = Dio(BaseOptions(baseUrl: 'https://maps.skillfy.ro/api/v1'))
+        ..httpClientAdapter = adapter;
+
+      var notificationCount = 0;
+      final service = TrailLiveService(
+        dio: dio,
+        tokenLoader: () async => fixedToken,
+        onSosNotificationCallback: (_, _) async {
+          notificationCount++;
+        },
+      );
+
+      expect(await service.getDeviceToken(), fixedToken);
+
+      final triggered = await service.triggerSos(
+        reason: SosReason.injury,
+        lat: 45.4,
+        lon: 25.4,
+        clientSosId: '0123456789ABCDEF',
+        sosClaimSecret: '03BA16195DB20CAE6968533B254BA0E5',
+      );
+      expect(triggered.id, 'pb_claimed_1');
+      expect(capturedCreateSos?['clientSosId'], '0123456789abcdef');
+      expect(
+        capturedCreateSos?['sosClaimSecret'],
+        '03ba16195db20cae6968533b254ba0e5',
+      );
+
+      final resolved = await service.updateSosStatus(
+        sosId: 'pb_claimed_1',
+        status: 'resolved',
+        sosClaimSecret: '03ba16195db20cae6968533b254ba0e5',
+      );
+      expect(resolved.status, 'resolved');
+      expect(
+        capturedUpdateSos?['sosClaimSecret'],
+        '03ba16195db20cae6968533b254ba0e5',
+      );
+
+      final relayed = await service.relaySos(<String, dynamic>{
+        'clientSosId': 'fedcba9876543210',
+        'sosClaimHash': '9eb067d1e6b03560',
+        'reason': 'injury',
+        'lat': 45.41,
+        'lon': 25.42,
+        'packetEpochSec': 1795000000,
+      });
+      expect(relayed?.id, 'pb_relayed_2');
+      expect(capturedRelaySos?['clientSosId'], 'fedcba9876543210');
+
+      final upgradedGroup = await service.createGroup(
+        displayName: 'Grigore',
+        preferredCode: 'fagar9',
+      );
+      expect(upgradedGroup.code, 'FAGAR9');
+      expect(capturedCreateGroup?['preferredCode'], 'FAGAR9');
+
+      // Notify on BLE alert first, then receive same clientSosId over SSE -> must notify only once!
+      await service.notifyBleNearbySos(
+        SosAlertModel(
+          id: 'ble-fedcba9876543210',
+          clientSosId: 'fedcba9876543210',
+          status: 'active',
+          reason: SosReason.injury,
+          lat: 45.41,
+          lon: 25.42,
+          viaBluetooth: true,
+        ),
+        userLat: 45.40,
+        userLon: 25.40,
+      );
+      expect(notificationCount, 1);
+
+      await service.connectStream(lat: 45.40, lon: 25.40).toList();
+      expect(notificationCount, 1);
+    });
+
+    testWidgets('Offline SOS banners, battery tip, BLE responder card, and offline LiveGroupSheet render natural Romanian copy', (
+      tester,
+    ) async {
+      var resolveTapped = false;
+      var respondTapped = false;
+
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(
+            body: SingleChildScrollView(
+              child: Column(
+                children: [
+                  MyActiveSosBanner(
+                    sos: const SosAlertModel(
+                      id: 'local-0123456789abcdef',
+                      clientSosId: '0123456789abcdef',
+                      lat: 45.4,
+                      lon: 25.4,
+                      viaBluetooth: true,
+                      bleAckCount: 2,
+                      bleNearestEtaMin: 14,
+                    ),
+                    isOnline: false,
+                    onResolve: () => resolveTapped = true,
+                  ),
+                  NearbySosResponderBanner(
+                    sos: const SosAlertModel(
+                      id: 'ble-fedcba9876543210',
+                      clientSosId: 'fedcba9876543210',
+                      reason: SosReason.injury,
+                      requesterName: 'Mihai',
+                      message: 'Entorsă sub vârf',
+                      lat: 45.41,
+                      lon: 25.42,
+                      viaBluetooth: true,
+                      bleHopCount: 2,
+                    ),
+                    directDistanceMeters: 540,
+                    isOnline: false,
+                    onRespondComing: () => respondTapped = true,
+                    onCancelRespond: () {},
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
+      );
+
+      expect(
+        find.text('📡 SOS fără semnal · trimis prin Bluetooth'),
+        findsOneWidget,
+      );
+      expect(
+        find.text('✓ Preluat prin Bluetooth de 2 drumeți · ~14 min'),
+        findsOneWidget,
+      );
+      expect(
+        find.byKey(const ValueKey('sos-offline-battery-tip')),
+        findsOneWidget,
+      );
+      expect(
+        find.textContaining('Economisire baterie fără semnal'),
+        findsOneWidget,
+      );
+      expect(
+        find.text('🆘 Alertă SOS în apropiere · prin Bluetooth'),
+        findsOneWidget,
+      );
+      expect(find.textContaining('releu 2 salturi'), findsOneWidget);
+
+      await tester.tap(find.byKey(const ValueKey('sos-resolve-mine-btn')));
+      expect(resolveTapped, isTrue);
+
+      await tester.tap(find.byKey(const ValueKey('sos-respond-btn')));
+      expect(respondTapped, isTrue);
+
+      // Offline LiveGroupSheet succeeds when service returns null and displays BLE badges.
+      final offlineGroupNotifier = ValueNotifier<GroupSessionModel?>(null);
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(
+            body: LiveGroupSheet(
+              sessionListenable: offlineGroupNotifier,
+              isOnline: false,
+              isBleAdapterOn: false,
+              initialDisplayName: 'Elena',
+              onCreateGroup: (_) async => null,
+              onJoinGroup: (_, _) async => null,
+              onLeaveGroup: () async {
+                offlineGroupNotifier.value = null;
+              },
+            ),
+          ),
+        ),
+      );
+
+      expect(
+        find.byKey(const ValueKey('group-ble-off-notice')),
+        findsOneWidget,
+      );
+      expect(
+        find.text('Pornește Bluetooth pentru conectare directă fără semnal'),
+        findsOneWidget,
+      );
+
+      await tester.tap(find.byKey(const ValueKey('group-create-btn')));
+      await tester.pumpAndSettle();
+
+      expect(offlineGroupNotifier.value, isNotNull);
+      expect(offlineGroupNotifier.value!.isOfflineBleGroup, isTrue);
+      expect(
+        find.text('Grup prin Bluetooth · fără semnal'),
+        findsOneWidget,
+      );
+
+      // Inject a BLE peer and verify Bluetooth indicator row.
+      offlineGroupNotifier.value = offlineGroupNotifier.value!.copyWith(
+        members: <GroupMemberModel>[
+          ...offlineGroupNotifier.value!.members,
+          const GroupMemberModel(
+            memberId: 'peer11223344',
+            displayName: 'Vlad',
+            lat: 45.41,
+            lon: 25.41,
+            viaBluetooth: true,
+          ),
+        ],
+      );
+      await tester.pumpAndSettle();
+      expect(find.text('Bluetooth'), findsOneWidget);
+
+      offlineGroupNotifier.dispose();
+    });
+  });
 }

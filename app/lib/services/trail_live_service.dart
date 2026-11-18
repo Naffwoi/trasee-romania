@@ -115,7 +115,13 @@ class SosLocalNotificationHelper {
       await _ensureInitialized();
       if (!_initialized) return;
 
-      const title = '🆘 Ajutor solicitat în apropiere!';
+      final title = sos.viaBluetooth
+          ? (isRo
+                ? '🆘 Alertă SOS în apropiere · prin Bluetooth'
+                : '🆘 Nearby SOS Alert · via Bluetooth')
+          : (isRo
+                ? '🆘 Ajutor solicitat în apropiere!'
+                : '🆘 Nearby hiker needs help!');
       final reasonText = sos.reason.label(isRo: isRo);
       final distPart = (distanceMeters != null && distanceMeters.isFinite)
           ? (distanceMeters >= 1000
@@ -186,6 +192,9 @@ class TrailLiveService {
     return host.isNotEmpty && !host.contains(kUnconfiguredApiHost);
   }
 
+  /// Returns the installation's persistent anonymous device token.
+  Future<String> getDeviceToken() => _tokenLoader();
+
   Future<Options> _liveOptions({
     Map<String, dynamic>? extraHeaders,
     ResponseType? responseType,
@@ -212,6 +221,20 @@ class TrailLiveService {
     return const <String, dynamic>{};
   }
 
+  Future<void> notifyBleNearbySos(
+    SosAlertModel sos, {
+    double? userLat,
+    double? userLon,
+    bool isRo = true,
+  }) {
+    return _maybeNotifyNearbySos(
+      sos,
+      userLat: userLat,
+      userLon: userLon,
+      isRo: isRo,
+    );
+  }
+
   Future<void> _maybeNotifyNearbySos(
     SosAlertModel? sos, {
     double? userLat,
@@ -220,7 +243,8 @@ class TrailLiveService {
   }) async {
     if (sos == null || sos.id.isEmpty || sos.isMine) return;
     if (!sos.isActiveAt(DateTime.now())) return;
-    if (!_notifiedSosIds.add(sos.id)) return;
+    if (!_notifiedSosIds.add(sos.dedupeKey)) return;
+    _notifiedSosIds.add('id:${sos.id}');
 
     double? distM;
     if (userLat != null &&
@@ -374,6 +398,8 @@ class TrailLiveService {
     required double lat,
     required double lon,
     double? ele,
+    String? clientSosId,
+    String? sosClaimSecret,
   }) async {
     final options = await _liveOptions();
     final cleanMsg = (message ?? '').trim();
@@ -384,6 +410,8 @@ class TrailLiveService {
     final safeName = cleanName.length > 40
         ? cleanName.substring(0, 40)
         : cleanName;
+    final cleanClientId = clientSosId?.trim().toLowerCase();
+    final cleanSecret = sosClaimSecret?.trim().toLowerCase();
 
     final response = await _dio.post<Object?>(
       '/live/sos',
@@ -395,6 +423,10 @@ class TrailLiveService {
         'lat': lat,
         'lon': lon,
         'ele': (ele != null && ele.isFinite) ? ele : 0.0,
+        if (cleanClientId != null && cleanClientId.isNotEmpty)
+          'clientSosId': cleanClientId,
+        if (cleanSecret != null && cleanSecret.isNotEmpty)
+          'sosClaimSecret': cleanSecret,
       },
       options: options,
     );
@@ -403,7 +435,11 @@ class TrailLiveService {
     final parsed = rawSos is Map
         ? SosAlertModel.fromJson(Map<String, dynamic>.from(rawSos))
         : SosAlertModel.fromJson(body);
-    return parsed.copyWith(isMine: true);
+    return parsed.copyWith(
+      isMine: true,
+      clientSosId: parsed.clientSosId ?? cleanClientId,
+      localClaimSecret: cleanSecret,
+    );
   }
 
   Future<SosAlertModel> updateSos({
@@ -412,8 +448,10 @@ class TrailLiveService {
     double? lat,
     double? lon,
     double? ele,
+    String? sosClaimSecret,
   }) async {
     final options = await _liveOptions();
+    final cleanSecret = sosClaimSecret?.trim().toLowerCase();
     final response = await _dio.patch<Object?>(
       '/live/sos/${Uri.encodeComponent(sosId)}',
       data: <String, Object?>{
@@ -421,6 +459,8 @@ class TrailLiveService {
         if (lat != null && lat.isFinite) 'lat': lat,
         if (lon != null && lon.isFinite) 'lon': lon,
         if (ele != null && ele.isFinite) 'ele': ele,
+        if (cleanSecret != null && cleanSecret.isNotEmpty)
+          'sosClaimSecret': cleanSecret,
       },
       options: options,
     );
@@ -429,6 +469,39 @@ class TrailLiveService {
     return rawSos is Map
         ? SosAlertModel.fromJson(Map<String, dynamic>.from(rawSos))
         : SosAlertModel.fromJson(body);
+  }
+
+  Future<SosAlertModel> updateSosStatus({
+    required String sosId,
+    required String status,
+    String? sosClaimSecret,
+  }) {
+    return updateSos(
+      sosId: sosId,
+      status: status,
+      sosClaimSecret: sosClaimSecret,
+    );
+  }
+
+  /// Uploads a Store-and-Forward BLE SOS packet (`active` or preimage-verified
+  /// `resolved`) to `POST /api/v1/live/sos/relay`.
+  Future<SosAlertModel?> relaySos(Map<String, dynamic> relayPayload) async {
+    if (!isConfigured) return null;
+    final options = await _liveOptions();
+    final response = await _dio.post<Object?>(
+      '/live/sos/relay',
+      data: relayPayload,
+      options: options,
+    );
+    final body = _asMap(response.data);
+    final rawSos = body['sos'];
+    if (rawSos is Map) {
+      return SosAlertModel.fromJson(Map<String, dynamic>.from(rawSos));
+    }
+    if (body['id'] != null) {
+      return SosAlertModel.fromJson(body);
+    }
+    return null;
   }
 
   Future<SosAlertModel> respondToSos({
@@ -472,13 +545,17 @@ class TrailLiveService {
   Future<GroupSessionModel> createGroup({
     String? trailId,
     required String displayName,
+    String? preferredCode,
   }) async {
     final options = await _liveOptions();
+    final cleanPrefCode = preferredCode?.trim();
     final response = await _dio.post<Object?>(
       '/live/groups',
       data: <String, Object?>{
         if (trailId != null && trailId.isNotEmpty) 'trailId': trailId,
         'displayName': _sanitizeDisplayName(displayName),
+        if (cleanPrefCode != null && cleanPrefCode.isNotEmpty)
+          'preferredCode': _normalizeGroupCode(cleanPrefCode),
       },
       options: options,
     );

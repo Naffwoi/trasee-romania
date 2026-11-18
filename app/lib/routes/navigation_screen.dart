@@ -72,6 +72,9 @@ import 'package:wanderer/util/navigation/off_trail_router.dart';
 import 'package:wanderer/util/route/planner_handoff.dart';
 import 'package:wanderer/util/route/track_position_matcher.dart';
 import 'package:wanderer/models/route_travel_bucket.dart';
+import 'package:wanderer/services/ble/ble_mesh_engine.dart';
+import 'package:wanderer/services/ble/ble_mesh_protocol.dart';
+import 'package:wanderer/services/ble/sos_crypto_and_outbox.dart';
 import 'package:wanderer/services/tracelet_position_source.dart';
 import 'package:wanderer/services/trail_live_service.dart';
 import 'package:wanderer/actions/import_trail_file.dart';
@@ -348,6 +351,25 @@ class _NavigationScreenState extends ConsumerState<NavigationScreen>
   DateTime? _lastResponderSyncAt;
   bool _rescueDemPrefetchStarted = false;
 
+  // Offline BLE Multi-Hop Mesh & Store-and-Forward SOS Relay state.
+  late final SosOutboxAndRelayStore _sosOutboxStore;
+  late final BleMeshEngine _bleMeshEngine;
+  final List<StreamSubscription<Object?>> _bleSubscriptions =
+      <StreamSubscription<Object?>>[];
+  final Map<String, GroupMemberModel> _bleGroupPeers =
+      <String, GroupMemberModel>{};
+  final Set<String> _bleAckResponderIds = <String>{};
+  final SosLocalNotificationHelper _fallbackSosNotifier =
+      SosLocalNotificationHelper();
+  final Set<String> _fallbackNotifiedSosKeys = <String>{};
+  Timer? _sosOutboxFlushTimer;
+  bool _sosOutboxFlushInFlight = false;
+  bool _blePermissionsRequestedOnce = false;
+  ml.Geographic? _lastBleGroupBroadcastPos;
+  DateTime? _lastBleGroupBroadcastAt;
+  DateTime? _lastBleResponderAckAt;
+  String _selfGroupDisplayName = 'Drumeț';
+
   bool get _isRo => _localeCode.toLowerCase().startsWith('ro');
 
   /// Short per-fix position tween smoothing the marker/camera between raw GPS
@@ -573,6 +595,26 @@ class _NavigationScreenState extends ConsumerState<NavigationScreen>
       _liveService = next;
     });
 
+    _sosOutboxStore = SosOutboxAndRelayStore();
+    _bleMeshEngine = BleMeshEngine(
+      knownClaimHashLookup: _sosOutboxStore.lookupClaimHash,
+    );
+    _bleSubscriptions.addAll(<StreamSubscription<Object?>>[
+      _bleMeshEngine.onGroupPosReceived.listen(_onBleGroupPosReceived),
+      _bleMeshEngine.onSosAlertReceived.listen(_onBleSosAlertReceived),
+      _bleMeshEngine.onSosAckReceived.listen(_onBleSosAckReceived),
+      _bleMeshEngine.onSosResolvedReceived.listen(_onBleSosResolvedReceived),
+    ]);
+    ref.listenManual(onlineStatusProvider, (prev, next) {
+      if (next && prev == false) {
+        unawaited(_flushSosOutboxAndRelayQueue());
+      }
+    });
+    _sosOutboxFlushTimer = Timer.periodic(
+      const Duration(seconds: 20),
+      (_) => unawaited(_flushSosOutboxAndRelayQueue()),
+    );
+
     if (resumeSession == null) {
       // Fresh session: clear any stale prior-trail row, then write an
       // initial zeroed row for this trail.
@@ -628,6 +670,7 @@ class _NavigationScreenState extends ConsumerState<NavigationScreen>
         notificationText: _notificationText(localizations),
         seed: widget.initialPosition,
       );
+      unawaited(_initBleAndRestoreSosOutbox());
       // The navigating notification names the trail, and the elevation
       // chart's live-position matcher needs the trail's GPX — the trail
       // model can still be loading right here, since a session resumed at
@@ -809,14 +852,15 @@ class _NavigationScreenState extends ConsumerState<NavigationScreen>
     if (peers.isEmpty) return const <PeerGpsObservation>[];
     return <PeerGpsObservation>[
       for (final p in peers)
-        PeerGpsObservation(
-          memberId: p.memberId,
-          lat: p.lat,
-          lon: p.lon,
-          accuracy: p.accuracy,
-          ele: p.ele,
-          updatedAtMs: p.updatedAt?.millisecondsSinceEpoch ?? nowMs,
-        ),
+        if (!p.viaBluetooth || p.bleHopCount == 0)
+          PeerGpsObservation(
+            memberId: p.memberId,
+            lat: p.lat,
+            lon: p.lon,
+            accuracy: p.accuracy,
+            ele: p.ele,
+            updatedAtMs: p.updatedAt?.millisecondsSinceEpoch ?? nowMs,
+          ),
     ];
   }
 
@@ -942,6 +986,7 @@ class _NavigationScreenState extends ConsumerState<NavigationScreen>
     }
 
     if (!_demFallbackPrefetchStarted &&
+        ref.read(onlineStatusProvider) &&
         _demGrid.sampleElevation(fix.lat, fix.lon) == null) {
       _demFallbackPrefetchStarted = true;
       unawaited(
@@ -1187,6 +1232,103 @@ class _NavigationScreenState extends ConsumerState<NavigationScreen>
     );
   }
 
+  Future<String> _resolveDeviceToken() {
+    final service = _liveService;
+    if (service != null) {
+      return service.getDeviceToken();
+    }
+    return LiveDeviceTokenStore.getOrCreateToken();
+  }
+
+  Future<bool> _ensureBlePermissions() async {
+    if (!_bleMeshEngine.isSupportedPlatform) return false;
+    final alreadyGranted = await _bleMeshEngine.checkPermissions();
+    if (alreadyGranted) {
+      unawaited(_bleMeshEngine.getState());
+      return true;
+    }
+    if (_blePermissionsRequestedOnce) {
+      return false;
+    }
+    _blePermissionsRequestedOnce = true;
+    final granted = await _bleMeshEngine.requestPermissions();
+    unawaited(_bleMeshEngine.getState());
+    return granted;
+  }
+
+  void _syncBleRadioMode() {
+    if (!_bleMeshEngine.isSupportedPlatform) return;
+    final targetMode = _myActiveSos.value != null
+        ? BleRadioMode.sosEmergencyActive
+        : (_groupSession.value != null
+              ? BleRadioMode.groupMeshNormal
+              : BleRadioMode.passiveTrailGuard);
+    if (_bleMeshEngine.radioMode != targetMode) {
+      unawaited(_bleMeshEngine.setRadioMode(targetMode));
+    }
+  }
+
+  Future<void> _initBleAndRestoreSosOutbox() async {
+    await _sosOutboxStore.ensureLoaded();
+    if (!mounted) return;
+
+    final pendingMine = _sosOutboxStore.myPendingSos;
+    if (pendingMine != null && pendingMine.isActive) {
+      final serverId = pendingMine.serverSosId;
+      final restored = SosAlertModel(
+        id: (serverId != null && serverId.isNotEmpty)
+            ? serverId
+            : 'local-${pendingMine.clientSosId}',
+        clientSosId: pendingMine.clientSosId,
+        trailId: pendingMine.trailId,
+        status: 'active',
+        reason: pendingMine.reason,
+        message: pendingMine.message,
+        requesterName: pendingMine.requesterName,
+        lat: pendingMine.lat,
+        lon: pendingMine.lon,
+        ele: pendingMine.ele,
+        isMine: true,
+        viaBluetooth: true,
+        bleServerConfirmed: serverId != null && serverId.isNotEmpty,
+        localClaimSecret: pendingMine.sosClaimSecret,
+        createdAt: DateTime.fromMillisecondsSinceEpoch(
+          pendingMine.createdEpochSec * 1000,
+          isUtc: true,
+        ),
+      );
+      _myActiveSos.value = restored;
+      await _ensureBlePermissions();
+      if (!mounted) return;
+      final bleAlert = BleSosAlertPacket(
+        clientSosId: pendingMine.clientSosId,
+        sosClaimHash: pendingMine.sosClaimHash,
+        reason: pendingMine.reason,
+        isStationary: _frozen,
+        lat: pendingMine.lat,
+        lon: pendingMine.lon,
+        eleM: pendingMine.ele.round(),
+        createdEpochSec: pendingMine.createdEpochSec,
+        shortMsg: BleSosAlertPacket.composeShortMsg(
+          requesterName: pendingMine.requesterName,
+          message: pendingMine.message,
+        ),
+      );
+      await _bleMeshEngine.publishLocalSosAlert(
+        bleAlert,
+        activateEmergencyMode: true,
+      );
+    } else {
+      final permitted = await _ensureBlePermissions();
+      if (!mounted) return;
+      if (permitted) {
+        _syncBleRadioMode();
+      }
+    }
+
+    unawaited(_flushSosOutboxAndRelayQueue());
+  }
+
   void _onLiveCommunityFix(ml.Geographic fix, double? usableAlt) {
     if (!_firstHeartbeatSent) {
       _firstHeartbeatSent = true;
@@ -1199,31 +1341,100 @@ class _NavigationScreenState extends ConsumerState<NavigationScreen>
     _refreshNearbyWazePrompt(fix);
 
     final now = DateTime.now();
+    final activeGroup = _groupSession.value;
+    if (activeGroup != null && _bleMeshEngine.isSupportedPlatform) {
+      final lastBlePos = _lastBleGroupBroadcastPos;
+      final lastBleAt = _lastBleGroupBroadcastAt;
+      final movedBleM = lastBlePos == null
+          ? double.infinity
+          : ml.SphericalGreatCircle(lastBlePos).distanceTo(fix);
+      final elapsedBleMs = lastBleAt == null
+          ? 999999
+          : now.difference(lastBleAt).inMilliseconds;
+      if ((movedBleM >= 5.0 && elapsedBleMs >= 3000) ||
+          elapsedBleMs >= 15000) {
+        _lastBleGroupBroadcastPos = fix;
+        _lastBleGroupBroadcastAt = now;
+        final rawSelf = _lastRawSelfFix;
+        final accM = (rawSelf?.accuracy ?? 15.0).round().clamp(1, 255);
+        final eleM = (usableAlt ?? _lastKnownAltitudeM ?? 0.0).round();
+        final pkt = BleGroupPosPacket(
+          memberIdHex: activeGroup.selfMemberId,
+          lat: fix.lat,
+          lon: fix.lon,
+          eleM: eleM,
+          accuracyM: accM,
+          inNavigation: true,
+          headingDeg: _lastRawHeading ?? _smoothedHeading,
+          speedMps: _lastRawSpeed,
+          displayName: _selfGroupDisplayName,
+          timestampSec: now.toUtc().millisecondsSinceEpoch ~/ 1000,
+        );
+        unawaited(_bleMeshEngine.publishLocalGroupPosition(pkt));
+      }
+    }
+
     final mySos = _myActiveSos.value;
     if (mySos != null) {
-      final movedM = _lastSosBroadcastPos == null
+      final lastSosPos = _lastSosBroadcastPos;
+      final lastSosAt = _lastSosBroadcastAt;
+      final movedM = lastSosPos == null
           ? double.infinity
-          : ml.SphericalGreatCircle(_lastSosBroadcastPos!).distanceTo(fix);
-      final elapsedSec = _lastSosBroadcastAt == null
+          : ml.SphericalGreatCircle(lastSosPos).distanceTo(fix);
+      final elapsedSec = lastSosAt == null
           ? 999
-          : now.difference(_lastSosBroadcastAt!).inSeconds;
-      if (movedM >= 25.0 && elapsedSec >= 12) {
+          : now.difference(lastSosAt).inSeconds;
+      if (movedM >= 15.0 && elapsedSec >= 60) {
         _lastSosBroadcastPos = fix;
         _lastSosBroadcastAt = now;
+        final curEle = usableAlt ?? _lastKnownAltitudeM ?? mySos.ele;
+        final nowEpochSec = now.toUtc().millisecondsSinceEpoch ~/ 1000;
+
+        final cid = mySos.clientSosId;
+        final claimHash = cid != null
+            ? _sosOutboxStore.lookupClaimHash(cid)
+            : null;
+        if (cid != null && claimHash != null) {
+          final updatedBleAlert = BleSosAlertPacket(
+            clientSosId: cid,
+            sosClaimHash: claimHash,
+            reason: mySos.reason,
+            isStationary: _frozen,
+            lat: fix.lat,
+            lon: fix.lon,
+            eleM: curEle.round(),
+            createdEpochSec: nowEpochSec,
+            shortMsg: BleSosAlertPacket.composeShortMsg(
+              requesterName: mySos.requesterName,
+              message: mySos.message,
+            ),
+          );
+          unawaited(
+            _bleMeshEngine.publishLocalSosAlert(
+              updatedBleAlert,
+              activateEmergencyMode: true,
+            ),
+          );
+        }
+
         final service = _liveService;
-        if (service != null && service.isConfigured) {
+        if (service != null &&
+            service.isConfigured &&
+            !mySos.id.startsWith('local-')) {
           unawaited(
             service
                 .updateSos(
                   sosId: mySos.id,
                   lat: fix.lat,
                   lon: fix.lon,
-                  ele: usableAlt ?? _lastKnownAltitudeM,
+                  ele: curEle,
+                  sosClaimSecret: mySos.localClaimSecret,
                 )
                 .then((updated) {
                   if (!mounted) return;
-                  if (updated.isActiveAt(DateTime.now())) {
-                    _myActiveSos.value = updated.copyWith(isMine: true);
+                  final cur = _myActiveSos.value;
+                  if (cur != null && updated.isActiveAt(DateTime.now())) {
+                    _myActiveSos.value = _mergeIntoMyActiveSos(cur, updated);
                   }
                 })
                 .catchError((Object _) {}),
@@ -1234,12 +1445,14 @@ class _NavigationScreenState extends ConsumerState<NavigationScreen>
 
     final respondingSos = _activeRespondingSos();
     if (respondingSos != null) {
-      final movedM = _lastRescueCalcPos == null
+      final lastCalcPos = _lastRescueCalcPos;
+      final lastCalcAt = _lastRescueCalcAt;
+      final movedM = lastCalcPos == null
           ? double.infinity
-          : ml.SphericalGreatCircle(_lastRescueCalcPos!).distanceTo(fix);
-      final elapsedSec = _lastRescueCalcAt == null
+          : ml.SphericalGreatCircle(lastCalcPos).distanceTo(fix);
+      final elapsedSec = lastCalcAt == null
           ? 999
-          : now.difference(_lastRescueCalcAt!).inSeconds;
+          : now.difference(lastCalcAt).inSeconds;
       if (_rescueRouteNotifier.value == null ||
           movedM >= 20.0 ||
           elapsedSec >= 12) {
@@ -1249,6 +1462,37 @@ class _NavigationScreenState extends ConsumerState<NavigationScreen>
       _rescueRouteNotifier.value = null;
       _pushRescueSource(null);
     }
+  }
+
+  SosAlertModel _mergeIntoMyActiveSos(
+    SosAlertModel local,
+    SosAlertModel server,
+  ) {
+    return server.copyWith(
+      isMine: true,
+      clientSosId: server.clientSosId ?? local.clientSosId,
+      viaBluetooth: local.viaBluetooth || server.viaBluetooth,
+      bleAckCount: local.bleAckCount,
+      bleServerConfirmed: true,
+      bleNearestEtaMin: local.bleNearestEtaMin,
+      bleNearestDistanceM: local.bleNearestDistanceM,
+      localClaimSecret: local.localClaimSecret,
+    );
+  }
+
+  SosAlertModel _mergeNearbySos(SosAlertModel existing, SosAlertModel incoming) {
+    final preferIncomingId =
+        !incoming.id.startsWith('ble-') || existing.id.startsWith('ble-');
+    return incoming.copyWith(
+      id: preferIncomingId ? incoming.id : existing.id,
+      clientSosId: incoming.clientSosId ?? existing.clientSosId,
+      amResponding: existing.amResponding || incoming.amResponding,
+      responderCount: max(existing.responderCount, incoming.responderCount),
+      viaBluetooth: existing.viaBluetooth || incoming.viaBluetooth,
+      bleHopCount: incoming.viaBluetooth
+          ? incoming.bleHopCount
+          : existing.bleHopCount,
+    );
   }
 
   SosAlertModel? _activeRespondingSos() {
@@ -1279,6 +1523,7 @@ class _NavigationScreenState extends ConsumerState<NavigationScreen>
           .then((summary) {
             if (!mounted || summary == null) return;
             _applyLiveSummary(summary);
+            unawaited(_flushSosOutboxAndRelayQueue());
           })
           .catchError((Object _) {}),
     );
@@ -1288,6 +1533,7 @@ class _NavigationScreenState extends ConsumerState<NavigationScreen>
     final service = _liveService;
     if (service == null || !service.isConfigured || !_uiVisible) return;
     _disconnectLiveSse();
+    unawaited(_flushSosOutboxAndRelayQueue());
     final cancelToken = CancelToken();
     _liveSseCancelToken = cancelToken;
     _liveSseSub = service
@@ -1335,27 +1581,61 @@ class _NavigationScreenState extends ConsumerState<NavigationScreen>
     _activeHikers30m.value = summary.activeHikers30m;
     _liveReports.value = summary.visibleReports(now: now);
 
+    final currentMine = _myActiveSos.value;
     final serverMine = summary.myActiveSos(now: now);
     if (serverMine != null) {
-      _myActiveSos.value = serverMine;
-    } else if (_myActiveSos.value != null &&
-        !_myActiveSos.value!.isActiveAt(now)) {
-      _myActiveSos.value = null;
+      _myActiveSos.value = currentMine != null
+          ? _mergeIntoMyActiveSos(currentMine, serverMine)
+          : serverMine;
+      _syncBleRadioMode();
+    } else if (currentMine != null) {
+      // Check if a nearby hiker relayed our offline SOS (`device_hash == ""` -> `!isMine` until claimed).
+      final myCid = currentMine.clientSosId;
+      final relayedMatch = (myCid != null && myCid.isNotEmpty)
+          ? summary.sosAlerts.firstWhereOrNull((s) => s.clientSosId == myCid)
+          : null;
+      if (relayedMatch != null) {
+        if (relayedMatch.isActiveAt(now)) {
+          _myActiveSos.value = _mergeIntoMyActiveSos(currentMine, relayedMatch);
+          unawaited(_flushSosOutboxAndRelayQueue());
+        } else {
+          _myActiveSos.value = null;
+          _syncBleRadioMode();
+        }
+      } else if (!currentMine.id.startsWith('local-') &&
+          !currentMine.isActiveAt(now)) {
+        _myActiveSos.value = null;
+        _syncBleRadioMode();
+      }
     }
 
-    final prevRespondingIds = <String>{
-      for (final s in _nearbySosAlerts.value)
-        if (s.amResponding) s.id,
+    final myCid = _myActiveSos.value?.clientSosId;
+    final existingByKey = <String, SosAlertModel>{
+      for (final s in _nearbySosAlerts.value) s.dedupeKey: s,
     };
-    final nextNearby = summary
-        .nearbyActiveSos(now: now)
-        .map(
-          (s) => prevRespondingIds.contains(s.id) && !s.amResponding
-              ? s.copyWith(amResponding: true)
-              : s,
-        )
-        .toList(growable: false);
-    _nearbySosAlerts.value = nextNearby;
+    final mergedNearby = <SosAlertModel>[];
+    final seenKeys = <String>{};
+
+    for (final s in summary.nearbyActiveSos(now: now)) {
+      if (myCid != null && myCid.isNotEmpty && s.clientSosId == myCid) {
+        continue;
+      }
+      final prev = existingByKey[s.dedupeKey];
+      final combined = prev != null ? _mergeNearbySos(prev, s) : s;
+      if (seenKeys.add(combined.dedupeKey)) {
+        mergedNearby.add(combined);
+      }
+    }
+
+    // Retain BLE-discovered alerts that have not yet reached the server.
+    for (final prev in _nearbySosAlerts.value) {
+      if (prev.viaBluetooth &&
+          prev.isActiveAt(now) &&
+          seenKeys.add(prev.dedupeKey)) {
+        mergedNearby.add(prev);
+      }
+    }
+    _nearbySosAlerts.value = mergedNearby;
 
     final fix = _currentGeoFix();
     if (fix != null) {
@@ -1373,44 +1653,65 @@ class _NavigationScreenState extends ConsumerState<NavigationScreen>
   void _handleLiveSseEvent(TrailLiveSseEvent event) {
     if (!mounted) return;
     final now = DateTime.now();
-    if (event.report != null) {
-      final incoming = event.report!;
+    final incomingReport = event.report;
+    if (incomingReport != null) {
       final next = List<TrailReportModel>.of(_liveReports.value);
-      final idx = next.indexWhere((r) => r.id == incoming.id);
-      if (!incoming.isVisibleAt(now)) {
+      final idx = next.indexWhere((r) => r.id == incomingReport.id);
+      if (!incomingReport.isVisibleAt(now)) {
         if (idx >= 0) next.removeAt(idx);
       } else if (idx >= 0) {
-        next[idx] = incoming;
+        next[idx] = incomingReport;
       } else {
-        next.insert(0, incoming);
+        next.insert(0, incomingReport);
       }
       _liveReports.value = next;
       final fix = _currentGeoFix();
       if (fix != null) _refreshNearbyWazePrompt(fix);
     }
 
-    if (event.sos != null) {
-      final incoming = event.sos!;
+    final incomingSos = event.sos;
+    if (incomingSos != null) {
       final currentMine = _myActiveSos.value;
-      if (incoming.isMine ||
-          (currentMine != null && currentMine.id == incoming.id)) {
-        _myActiveSos.value = incoming.isActiveAt(now)
-            ? incoming.copyWith(isMine: true)
-            : null;
+      final isSameAsMine =
+          currentMine != null &&
+          (currentMine.id == incomingSos.id ||
+              (currentMine.clientSosId != null &&
+                  currentMine.clientSosId == incomingSos.clientSosId));
+      if (incomingSos.isMine || isSameAsMine) {
+        if (incomingSos.isActiveAt(now)) {
+          _myActiveSos.value = currentMine != null
+              ? _mergeIntoMyActiveSos(currentMine, incomingSos)
+              : incomingSos.copyWith(isMine: true);
+        } else {
+          _myActiveSos.value = null;
+        }
+        _syncBleRadioMode();
         return;
       }
 
       final next = List<SosAlertModel>.of(_nearbySosAlerts.value);
-      final idx = next.indexWhere((s) => s.id == incoming.id);
-      if (!incoming.isActiveAt(now)) {
+      final idx = next.indexWhere(
+        (s) => s.id == incomingSos.id || s.dedupeKey == incomingSos.dedupeKey,
+      );
+      if (!incomingSos.isActiveAt(now)) {
         if (idx >= 0) next.removeAt(idx);
       } else if (idx >= 0) {
-        final keepResponding = next[idx].amResponding || incoming.amResponding;
-        next[idx] = incoming.copyWith(amResponding: keepResponding);
+        next[idx] = _mergeNearbySos(next[idx], incomingSos);
       } else {
-        next.insert(0, incoming);
+        next.insert(0, incomingSos);
       }
       _nearbySosAlerts.value = next;
+
+      final incomingCid = incomingSos.clientSosId;
+      if (incomingCid != null && incomingCid.isNotEmpty) {
+        unawaited(
+          _sosOutboxStore.attachServerSosIdToResponderAction(
+            incomingCid,
+            incomingSos.id,
+          ),
+        );
+      }
+
       final fix = _currentGeoFix();
       final responding = _activeRespondingSos();
       if (fix != null && responding != null) {
@@ -1421,24 +1722,25 @@ class _NavigationScreenState extends ConsumerState<NavigationScreen>
       }
     }
 
+    final sseMember = event.groupMember;
     if (event.type == TrailLiveSseEvent.groupMemberUpdate &&
-        event.groupMember != null) {
+        sseMember != null) {
       final session = _groupSession.value;
       if (session != null &&
           (event.groupCode == null || event.groupCode == session.code)) {
-        final incoming = event.groupMember!.copyWith(
-          isSelf: event.groupMember!.memberId == session.selfMemberId,
-          updatedAt: event.groupMember!.updatedAt ?? now.toUtc(),
+        final incoming = sseMember.copyWith(
+          isSelf: sseMember.memberId == session.selfMemberId,
+          updatedAt: sseMember.updatedAt ?? now.toUtc(),
         );
-        final nextMembers = List<GroupMemberModel>.of(session.members);
-        final idx = nextMembers.indexWhere(
-          (m) => m.memberId == incoming.memberId,
+        final nextMembers = _mergeGroupMembersWithBle(
+          serverMembers: <GroupMemberModel>[
+            for (final m in session.members)
+              if (m.memberId == incoming.memberId) incoming else m,
+            if (!session.members.any((m) => m.memberId == incoming.memberId))
+              incoming,
+          ],
+          selfMemberId: session.selfMemberId,
         );
-        if (idx >= 0) {
-          nextMembers[idx] = incoming;
-        } else {
-          nextMembers.add(incoming);
-        }
         _groupSession.value = session.copyWith(members: nextMembers);
         if (_selectedGroupMember.value?.memberId == incoming.memberId) {
           _selectedGroupMember.value = incoming;
@@ -1446,24 +1748,102 @@ class _NavigationScreenState extends ConsumerState<NavigationScreen>
       }
     } else if (event.type == TrailLiveSseEvent.groupMemberLeft &&
         event.leftMemberId != null) {
+      final leftId = event.leftMemberId!;
       final session = _groupSession.value;
       if (session != null &&
           (event.groupCode == null || event.groupCode == session.code)) {
+        _bleGroupPeers.remove(leftId);
         final nextMembers = session.members
-            .where((m) => m.memberId != event.leftMemberId)
+            .where((m) => m.memberId != leftId)
             .toList(growable: false);
         _groupSession.value = session.copyWith(members: nextMembers);
-        if (_selectedGroupMember.value?.memberId == event.leftMemberId) {
+        if (_selectedGroupMember.value?.memberId == leftId) {
           _selectedGroupMember.value = null;
         }
       }
     }
   }
 
+  List<GroupMemberModel> _mergeGroupMembersWithBle({
+    required List<GroupMemberModel> serverMembers,
+    required String selfMemberId,
+  }) {
+    final nowUtc = DateTime.now().toUtc();
+    _bleGroupPeers.removeWhere((_, peer) {
+      final ts = peer.updatedAt;
+      return ts != null && nowUtc.difference(ts).inSeconds > 120;
+    });
+
+    final byId = <String, GroupMemberModel>{};
+    for (final m in serverMembers) {
+      byId[m.memberId] = m.memberId == selfMemberId ? m.copyWith(isSelf: true) : m;
+    }
+
+    for (final blePeer in _bleGroupPeers.values) {
+      if (blePeer.memberId == selfMemberId) continue;
+      final existing = byId[blePeer.memberId];
+      if (existing == null) {
+        byId[blePeer.memberId] = blePeer;
+      } else {
+        final existingTs = existing.updatedAt;
+        final bleTs = blePeer.updatedAt;
+        final preferBleCoords =
+            bleTs != null && (existingTs == null || bleTs.isAfter(existingTs));
+        byId[blePeer.memberId] = preferBleCoords
+            ? blePeer.copyWith(
+                alongTrackM: blePeer.alongTrackM ?? existing.alongTrackM,
+              )
+            : existing.copyWith(
+                viaBluetooth: true,
+                bleHopCount: blePeer.bleHopCount,
+              );
+      }
+    }
+
+    return byId.values.toList(growable: false);
+  }
+
+  void _configureBleForActiveGroup(GroupSessionModel? session) {
+    if (session == null) {
+      _bleGroupPeers.clear();
+      _bleMeshEngine.configureGroupSession(groupCode: null);
+      _syncBleRadioMode();
+      return;
+    }
+    _bleMeshEngine.configureGroupSession(
+      groupCode: session.code,
+      selfMemberIdHex: session.selfMemberId,
+    );
+    unawaited(
+      _ensureBlePermissions().then((_) {
+        if (!mounted) return;
+        _syncBleRadioMode();
+        final fix = _currentGeoFix();
+        if (fix != null && _groupSession.value?.code == session.code) {
+          final nowSec = DateTime.now().toUtc().millisecondsSinceEpoch ~/ 1000;
+          final pkt = BleGroupPosPacket(
+            memberIdHex: session.selfMemberId,
+            lat: fix.lat,
+            lon: fix.lon,
+            eleM: (_lastKnownAltitudeM ?? 0.0).round(),
+            accuracyM: (_lastRawSelfFix?.accuracy ?? 15.0).round().clamp(1, 255),
+            inNavigation: true,
+            headingDeg: _lastRawHeading ?? _smoothedHeading,
+            speedMps: _lastRawSpeed,
+            displayName: _selfGroupDisplayName,
+            timestampSec: nowSec,
+          );
+          unawaited(_bleMeshEngine.publishLocalGroupPosition(pkt));
+        }
+      }),
+    );
+  }
+
   void _syncGroupPingTimer() {
     _groupPingTimer?.cancel();
     _groupPingTimer = null;
     final session = _groupSession.value;
+    _configureBleForActiveGroup(session);
     if (session != null) {
       _sendGroupPingTick();
       _groupPingTimer = Timer.periodic(
@@ -1484,6 +1864,11 @@ class _NavigationScreenState extends ConsumerState<NavigationScreen>
     final session = _groupSession.value;
     final service = _liveService;
     if (session == null || service == null || !service.isConfigured) return;
+
+    if (session.isOfflineBleGroup) {
+      unawaited(_flushSosOutboxAndRelayQueue());
+      return;
+    }
 
     final rawSelf = _lastRawSelfFix;
     final fallbackPos = _currentGeoFix();
@@ -1509,53 +1894,152 @@ class _NavigationScreenState extends ConsumerState<NavigationScreen>
             if (!mounted) return;
             final cur = _groupSession.value;
             if (cur == null || cur.code != updated.code) return;
+            final nextSelfId = updated.selfMemberId.isNotEmpty
+                ? updated.selfMemberId
+                : cur.selfMemberId;
             _groupSession.value = cur.copyWith(
-              selfMemberId: updated.selfMemberId.isNotEmpty
-                  ? updated.selfMemberId
-                  : cur.selfMemberId,
+              selfMemberId: nextSelfId,
               expiresAt: updated.expiresAt ?? cur.expiresAt,
-              members: updated.members,
+              members: _mergeGroupMembersWithBle(
+                serverMembers: updated.members,
+                selfMemberId: nextSelfId,
+              ),
             );
           })
           .catchError((Object _) {}),
     );
   }
 
-  Future<GroupSessionModel?> _handleCreateGroup(String displayName) async {
-    final service = _liveService;
-    if (service == null || !service.isConfigured) return null;
-    final created = await service.createGroup(
-      trailId: widget.isRecording || widget.id.isEmpty ? null : widget.id,
-      displayName: displayName,
+  Future<GroupSessionModel> _buildOfflineBleGroupSession({
+    required String code,
+    required String displayName,
+  }) async {
+    final token = await _resolveDeviceToken();
+    final normCode = code.trim().toUpperCase();
+    final selfId = deriveOfflineGroupMemberId(
+      groupCode: normCode,
+      deviceToken: token,
     );
-    if (!mounted) return created;
-    _groupSession.value = created;
+    final fix = _currentGeoFix();
+    final selfMember = GroupMemberModel(
+      memberId: selfId,
+      displayName: displayName,
+      colorHex: deriveBleMemberColor(selfId),
+      lat: fix?.lat ?? 0.0,
+      lon: fix?.lon ?? 0.0,
+      ele: _lastKnownAltitudeM ?? 0.0,
+      accuracy: _lastRawSelfFix?.accuracy ?? 15.0,
+      alongTrackM: _lastMatchedAlongTrackM,
+      inNavigation: true,
+      isSelf: true,
+      viaBluetooth: true,
+      updatedAt: DateTime.now().toUtc(),
+    );
+    return GroupSessionModel(
+      code: normCode,
+      trailId: widget.isRecording || widget.id.isEmpty ? null : widget.id,
+      selfMemberId: selfId,
+      isOfflineBleGroup: true,
+      members: <GroupMemberModel>[selfMember],
+    );
+  }
+
+  Future<GroupSessionModel?> _handleCreateGroup(String displayName) async {
+    _selfGroupDisplayName = displayName.trim().isNotEmpty
+        ? displayName.trim()
+        : (_isRo ? 'Drumeț' : 'Hiker');
+    final service = _liveService;
+    GroupSessionModel session;
+    if (service != null &&
+        service.isConfigured &&
+        ref.read(onlineStatusProvider)) {
+      try {
+        session = await service.createGroup(
+          trailId: widget.isRecording || widget.id.isEmpty ? null : widget.id,
+          displayName: _selfGroupDisplayName,
+        );
+      } catch (_) {
+        session = await _buildOfflineBleGroupSession(
+          code: generateOfflineGroupCode(),
+          displayName: _selfGroupDisplayName,
+        );
+      }
+    } else {
+      session = await _buildOfflineBleGroupSession(
+        code: generateOfflineGroupCode(),
+        displayName: _selfGroupDisplayName,
+      );
+    }
+    if (!mounted) return session;
+    _bleGroupPeers.clear();
+    _groupSession.value = session;
     _syncGroupPingTimer();
-    return created;
+    return session;
   }
 
   Future<GroupSessionModel?> _handleJoinGroup(
     String code,
     String displayName,
   ) async {
+    _selfGroupDisplayName = displayName.trim().isNotEmpty
+        ? displayName.trim()
+        : (_isRo ? 'Drumeț' : 'Hiker');
+    final normCode = code.trim().toUpperCase();
     final service = _liveService;
-    if (service == null || !service.isConfigured) return null;
-    final joined = await service.joinGroup(
-      code: code,
-      displayName: displayName,
-    );
-    if (!mounted) return joined;
-    _groupSession.value = joined;
+    GroupSessionModel session;
+    if (service != null &&
+        service.isConfigured &&
+        ref.read(onlineStatusProvider)) {
+      try {
+        session = await service.joinGroup(
+          code: normCode,
+          displayName: _selfGroupDisplayName,
+        );
+      } catch (_) {
+        // Offline or joining a group created offline on the mountain over BLE.
+        session = await _buildOfflineBleGroupSession(
+          code: normCode,
+          displayName: _selfGroupDisplayName,
+        );
+      }
+    } else {
+      session = await _buildOfflineBleGroupSession(
+        code: normCode,
+        displayName: _selfGroupDisplayName,
+      );
+    }
+    if (!mounted) return session;
+    _bleGroupPeers.clear();
+    _groupSession.value = session;
     _syncGroupPingTimer();
-    return joined;
+    return session;
   }
 
   Future<void> _handleLeaveGroup() async {
     final session = _groupSession.value;
+    if (session != null && _bleMeshEngine.isSupportedPlatform) {
+      final fix = _currentGeoFix();
+      if (fix != null) {
+        final leavePkt = BleGroupPosPacket(
+          memberIdHex: session.selfMemberId,
+          lat: fix.lat,
+          lon: fix.lon,
+          memberLeft: true,
+          displayName: _selfGroupDisplayName,
+          timestampSec: DateTime.now().toUtc().millisecondsSinceEpoch ~/ 1000,
+        );
+        await _bleMeshEngine.publishLocalGroupPosition(leavePkt);
+      }
+    }
     _groupSession.value = null;
     _syncGroupPingTimer();
     final service = _liveService;
-    if (session == null || service == null || !service.isConfigured) return;
+    if (session == null ||
+        session.isOfflineBleGroup ||
+        service == null ||
+        !service.isConfigured) {
+      return;
+    }
     try {
       await service.leaveGroup(session.code);
     } catch (_) {}
@@ -1571,6 +2055,7 @@ class _NavigationScreenState extends ConsumerState<NavigationScreen>
   }
 
   Future<void> _openLiveGroupSheet(BuildContext context) async {
+    unawaited(_bleMeshEngine.getState());
     final currentUser = ref.read(authProvider).value;
     final prefName = currentUser?.preferredUsername.trim() ?? '';
     final initialName = prefName.isNotEmpty
@@ -1585,10 +2070,15 @@ class _NavigationScreenState extends ConsumerState<NavigationScreen>
         ? '$cleanServer/trail/${widget.id}'
         : null;
 
+    if (!context.mounted) return;
     await showLiveGroupSheet(
       context,
       sessionListenable: _groupSession,
       busyListenable: _liveActionBusy,
+      bleAdapterOnListenable: _bleMeshEngine.isSupportedPlatform
+          ? _bleMeshEngine.adapterOnListenable
+          : null,
+      isOnline: ref.read(onlineStatusProvider),
       initialDisplayName: initialName,
       userAlongTrackM: _lastMatchedAlongTrackM,
       userPosition: _currentGeoFix(),
@@ -1773,51 +2263,202 @@ class _NavigationScreenState extends ConsumerState<NavigationScreen>
     final initialName = prefName.isNotEmpty
         ? prefName
         : (currentUser?.username.trim() ?? '');
+    final isOnline = ref.read(onlineStatusProvider);
     final submission = await showSosTriggerDialog(
       context,
       initialName: initialName,
+      isOnline: isOnline,
       isRo: _isRo,
     );
     if (submission == null || !mounted) return;
 
-    final service = _liveService;
-    if (service == null || !service.isConfigured) return;
+    // 1. Offline-first: mint Lamport credentials and start BLE emergency broadcast BEFORE network await!
+    final deviceToken = await _resolveDeviceToken();
+    if (!mounted) return;
+    final creds = SosOriginCredentials.mint(deviceToken);
+    final nowUtc = DateTime.now().toUtc();
+    final nowEpochSec = nowUtc.millisecondsSinceEpoch ~/ 1000;
+    final trailId = widget.isRecording || widget.id.isEmpty ? null : widget.id;
+    final ele = _lastKnownAltitudeM ?? 0.0;
 
-    _liveActionBusy.value = true;
-    try {
-      final sos = await service.triggerSos(
-        trailId: widget.isRecording || widget.id.isEmpty ? null : widget.id,
+    _bleAckResponderIds.clear();
+    final localSos = SosAlertModel(
+      id: 'local-${creds.clientSosId}',
+      clientSosId: creds.clientSosId,
+      trailId: trailId,
+      status: 'active',
+      reason: submission.reason,
+      message: submission.message,
+      requesterName: submission.requesterName,
+      lat: pos.lat,
+      lon: pos.lon,
+      ele: ele,
+      isMine: true,
+      viaBluetooth: true,
+      localClaimSecret: creds.sosClaimSecret,
+      createdAt: nowUtc,
+    );
+    _myActiveSos.value = localSos;
+    _lastSosBroadcastPos = pos;
+    _lastSosBroadcastAt = DateTime.now();
+
+    await _sosOutboxStore.setMyPendingSos(
+      PendingMySosEntry(
+        clientSosId: creds.clientSosId,
+        sosClaimSecret: creds.sosClaimSecret,
+        sosClaimHash: creds.sosClaimHash,
+        trailId: trailId,
+        status: 'active',
         reason: submission.reason,
         message: submission.message,
         requesterName: submission.requesterName,
         lat: pos.lat,
         lon: pos.lon,
-        ele: _lastKnownAltitudeM,
+        ele: ele,
+        createdEpochSec: nowEpochSec,
+      ),
+    );
+
+    final bleAlert = BleSosAlertPacket(
+      clientSosId: creds.clientSosId,
+      sosClaimHash: creds.sosClaimHash,
+      reason: submission.reason,
+      isStationary: _frozen,
+      lat: pos.lat,
+      lon: pos.lon,
+      eleM: ele.round(),
+      createdEpochSec: nowEpochSec,
+      shortMsg: BleSosAlertPacket.composeShortMsg(
+        requesterName: submission.requesterName,
+        message: submission.message,
+      ),
+    );
+    unawaited(
+      _ensureBlePermissions().then((_) {
+        if (!mounted) return;
+        unawaited(
+          _bleMeshEngine.publishLocalSosAlert(
+            bleAlert,
+            activateEmergencyMode: true,
+          ),
+        );
+      }),
+    );
+
+    // 2. Attempt online server broadcast / ownership registration in parallel.
+    final service = _liveService;
+    if (service == null || !service.isConfigured) {
+      _showCalmOfflineSosConfirmation();
+      return;
+    }
+
+    _liveActionBusy.value = true;
+    try {
+      final serverSos = await service.triggerSos(
+        trailId: trailId,
+        reason: submission.reason,
+        message: submission.message,
+        requesterName: submission.requesterName,
+        lat: pos.lat,
+        lon: pos.lon,
+        ele: ele,
+        clientSosId: creds.clientSosId,
+        sosClaimSecret: creds.sosClaimSecret,
       );
       if (!mounted) return;
-      _myActiveSos.value = sos.copyWith(isMine: true);
-      _lastSosBroadcastPos = pos;
-      _lastSosBroadcastAt = DateTime.now();
+      await _sosOutboxStore.markMySosSyncedOnline(serverSosId: serverSos.id);
+      final cur = _myActiveSos.value;
+      if (cur != null && cur.clientSosId == creds.clientSosId) {
+        _myActiveSos.value = _mergeIntoMyActiveSos(cur, serverSos);
+      }
+      // Keep BleRadioMode.sosEmergencyActive active so nearby offline hikers still receive SOS!
     } catch (e) {
-      debugPrint('NavigationScreen: triggerSos failed — $e');
+      debugPrint('NavigationScreen: triggerSos offline fallback active — $e');
+      if (mounted) {
+        _showCalmOfflineSosConfirmation();
+      }
     } finally {
       if (mounted) _liveActionBusy.value = false;
     }
   }
 
+  void _showCalmOfflineSosConfirmation() {
+    if (!mounted) return;
+    final messenger = ScaffoldMessenger.maybeOf(context);
+    if (messenger == null) return;
+    messenger.showSnackBar(
+      SnackBar(
+        backgroundColor: AppColors.primaryLight,
+        behavior: SnackBarBehavior.floating,
+        content: Text(
+          _isRo
+              ? 'SOS fără semnal activat · alerta se transmite prin Bluetooth către drumeții din apropiere.'
+              : 'Offline SOS active · broadcasting via Bluetooth to nearby hikers.',
+          style: const TextStyle(color: Colors.white),
+        ),
+      ),
+    );
+  }
+
   Future<void> _handleResolveMySos(SosAlertModel sos) async {
+    final nowEpochSec = DateTime.now().toUtc().millisecondsSinceEpoch ~/ 1000;
+    final pendingMine = _sosOutboxStore.myPendingSos;
+    final cid = sos.clientSosId ?? pendingMine?.clientSosId;
+    final secret = sos.localClaimSecret ?? pendingMine?.sosClaimSecret;
+
+    // 1. Clear UI immediately (works 100% offline!).
+    _myActiveSos.value = null;
+    _bleAckResponderIds.clear();
+
+    final fallbackMode = _groupSession.value != null
+        ? BleRadioMode.groupMeshNormal
+        : BleRadioMode.passiveTrailGuard;
+
+    if (cid != null && secret != null && cid.isNotEmpty && secret.isNotEmpty) {
+      try {
+        final resolvedPkt = BleSosResolvedPacket.fromHexSecret(
+          clientSosId: cid,
+          resolvedEpochSec: nowEpochSec,
+          sosClaimSecretHex: secret,
+        );
+        unawaited(
+          _bleMeshEngine.publishLocalSosResolved(
+            resolvedPkt,
+            fallbackModeAfterBroadcast: fallbackMode,
+          ),
+        );
+      } catch (e) {
+        debugPrint('NavigationScreen: failed to encode BLE SOS_RESOLVED — $e');
+      }
+    }
+    if (_bleMeshEngine.isSupportedPlatform) {
+      unawaited(_bleMeshEngine.setRadioMode(fallbackMode));
+    }
+
+    await _sosOutboxStore.markMySosPendingResolve(
+      status: 'resolved',
+      resolvedEpochSec: nowEpochSec,
+    );
+
     final service = _liveService;
     if (service == null || !service.isConfigured) {
-      _myActiveSos.value = null;
       return;
     }
+
     _liveActionBusy.value = true;
     try {
-      await service.updateSos(sosId: sos.id, status: 'resolved');
-      if (!mounted) return;
-      _myActiveSos.value = null;
+      if (!sos.id.startsWith('local-')) {
+        await service.updateSosStatus(
+          sosId: sos.id,
+          status: 'resolved',
+          sosClaimSecret: secret,
+        );
+        await _sosOutboxStore.clearMyPendingSos();
+      } else {
+        await _flushSosOutboxAndRelayQueue();
+      }
     } catch (e) {
-      debugPrint('NavigationScreen: resolve SOS failed — $e');
+      debugPrint('NavigationScreen: resolve SOS queued for 4G sync — $e');
     } finally {
       if (mounted) _liveActionBusy.value = false;
     }
@@ -1836,11 +2477,63 @@ class _NavigationScreenState extends ConsumerState<NavigationScreen>
     );
     _nearbySosAlerts.value = <SosAlertModel>[
       for (final s in _nearbySosAlerts.value)
-        if (s.id == sos.id) updatedLocal else s.copyWith(amResponding: false),
+        if (s.dedupeKey == sos.dedupeKey)
+          updatedLocal
+        else
+          s.copyWith(amResponding: false),
     ];
 
+    final cid = sos.clientSosId;
+    final nowEpochSec = DateTime.now().toUtc().millisecondsSinceEpoch ~/ 1000;
+    if (cid != null && cid.isNotEmpty) {
+      final token = await _resolveDeviceToken();
+      if (!mounted) return;
+      final respIdHex = deriveBleResponderIdHex(
+        clientSosId: cid,
+        responderDeviceToken: token,
+      );
+      final etaMin = route != null
+          ? max(1, (route.estimatedSeconds / 60.0).round())
+          : null;
+      final distM = route?.distanceM.round();
+      final ackPkt = BleSosAckPacket(
+        clientSosId: cid,
+        responderIdHex: respIdHex,
+        etaMin: etaMin,
+        distM: distM,
+        comingToHelp: true,
+        ackEpochSec: nowEpochSec,
+      );
+      _lastBleResponderAckAt = DateTime.now();
+      unawaited(
+        _ensureBlePermissions().then((_) {
+          if (!mounted) return;
+          unawaited(_bleMeshEngine.publishLocalSosAck(ackPkt));
+        }),
+      );
+      await _sosOutboxStore.setPendingResponderAction(
+        PendingResponderAction(
+          clientSosId: cid,
+          serverSosId: sos.id.startsWith('ble-') ? null : sos.id,
+          status: 'coming',
+          lat: pos.lat,
+          lon: pos.lon,
+          ele: _lastKnownAltitudeM ?? 0.0,
+          distanceM: route?.distanceM,
+          etaSec: route?.estimatedSeconds,
+          createdEpochSec: nowEpochSec,
+        ),
+      );
+    }
+
     final service = _liveService;
-    if (service == null || !service.isConfigured) return;
+    if (service == null ||
+        !service.isConfigured ||
+        sos.id.startsWith('ble-') ||
+        sos.id.startsWith('local-')) {
+      return;
+    }
+
     _liveActionBusy.value = true;
     try {
       final synced = await service.respondToSos(
@@ -1852,14 +2545,18 @@ class _NavigationScreenState extends ConsumerState<NavigationScreen>
         distanceM: route?.distanceM,
         etaSec: route?.estimatedSeconds,
       );
+      await _sosOutboxStore.clearPendingResponderAction();
       if (!mounted) return;
       _lastResponderSyncAt = DateTime.now();
       _nearbySosAlerts.value = <SosAlertModel>[
         for (final s in _nearbySosAlerts.value)
-          if (s.id == synced.id) synced.copyWith(amResponding: true) else s,
+          if (s.dedupeKey == synced.dedupeKey || s.id == synced.id)
+            _mergeNearbySos(s, synced).copyWith(amResponding: true)
+          else
+            s,
       ];
     } catch (e) {
-      debugPrint('NavigationScreen: respondToSos failed — $e');
+      debugPrint('NavigationScreen: respondToSos queued offline — $e');
     } finally {
       if (mounted) _liveActionBusy.value = false;
     }
@@ -1870,12 +2567,54 @@ class _NavigationScreenState extends ConsumerState<NavigationScreen>
     _pushRescueSource(null);
     _nearbySosAlerts.value = <SosAlertModel>[
       for (final s in _nearbySosAlerts.value)
-        if (s.id == sos.id) s.copyWith(amResponding: false) else s,
+        if (s.dedupeKey == sos.dedupeKey)
+          s.copyWith(amResponding: false)
+        else
+          s,
     ];
 
     final pos = _currentGeoFix();
+    final cid = sos.clientSosId;
+    final nowEpochSec = DateTime.now().toUtc().millisecondsSinceEpoch ~/ 1000;
+    if (cid != null && cid.isNotEmpty) {
+      final token = await _resolveDeviceToken();
+      if (!mounted) return;
+      final respIdHex = deriveBleResponderIdHex(
+        clientSosId: cid,
+        responderDeviceToken: token,
+      );
+      final cancelAck = BleSosAckPacket(
+        clientSosId: cid,
+        responderIdHex: respIdHex,
+        cancelled: true,
+        ackEpochSec: nowEpochSec,
+      );
+      unawaited(_bleMeshEngine.publishLocalSosAck(cancelAck));
+      if (pos != null) {
+        await _sosOutboxStore.setPendingResponderAction(
+          PendingResponderAction(
+            clientSosId: cid,
+            serverSosId: sos.id.startsWith('ble-') ? null : sos.id,
+            status: 'cancelled',
+            lat: pos.lat,
+            lon: pos.lon,
+            ele: _lastKnownAltitudeM ?? 0.0,
+            createdEpochSec: nowEpochSec,
+          ),
+        );
+      } else {
+        await _sosOutboxStore.clearPendingResponderAction();
+      }
+    }
+
     final service = _liveService;
-    if (pos == null || service == null || !service.isConfigured) return;
+    if (pos == null ||
+        service == null ||
+        !service.isConfigured ||
+        sos.id.startsWith('ble-') ||
+        sos.id.startsWith('local-')) {
+      return;
+    }
     _liveActionBusy.value = true;
     try {
       final synced = await service.respondToSos(
@@ -1885,15 +2624,411 @@ class _NavigationScreenState extends ConsumerState<NavigationScreen>
         lon: pos.lon,
         ele: _lastKnownAltitudeM,
       );
+      await _sosOutboxStore.clearPendingResponderAction();
       if (!mounted) return;
       _nearbySosAlerts.value = <SosAlertModel>[
         for (final s in _nearbySosAlerts.value)
-          if (s.id == synced.id) synced.copyWith(amResponding: false) else s,
+          if (s.dedupeKey == synced.dedupeKey || s.id == synced.id)
+            _mergeNearbySos(s, synced).copyWith(amResponding: false)
+          else
+            s,
       ];
     } catch (e) {
-      debugPrint('NavigationScreen: cancel respondToSos failed — $e');
+      debugPrint('NavigationScreen: cancel respondToSos queued offline — $e');
     } finally {
       if (mounted) _liveActionBusy.value = false;
+    }
+  }
+
+  void _onBleGroupPosReceived(BleGroupPosPacket pkt) {
+    if (!mounted) return;
+    final session = _groupSession.value;
+    if (session == null) return;
+    if (pkt.memberIdHex == session.selfMemberId) return;
+
+    if (pkt.memberLeft) {
+      _bleGroupPeers.remove(pkt.memberIdHex);
+      final remaining = session.members
+          .where((m) => m.memberId != pkt.memberIdHex)
+          .toList(growable: false);
+      _groupSession.value = session.copyWith(members: remaining);
+      if (_selectedGroupMember.value?.memberId == pkt.memberIdHex) {
+        _selectedGroupMember.value = null;
+      }
+      return;
+    }
+
+    final matcher = _trackMatcher;
+    final matchedAlong = matcher
+        ?.matchDetailed(
+          ml.Geographic(lat: pkt.lat, lon: pkt.lon),
+          accuracy: pkt.accuracyM.toDouble(),
+        )
+        ?.alongTrackMeters;
+
+    // Anchor updatedAt to receiver's current clock so offline phone clock skew
+    // never trips CooperativeGpsFusion's 12s freshness gate!
+    final member = GroupMemberModel(
+      memberId: pkt.memberIdHex,
+      displayName: pkt.displayName.isNotEmpty
+          ? pkt.displayName
+          : (_isRo ? 'Drumeț' : 'Hiker'),
+      colorHex: pkt.colorHex,
+      lat: pkt.lat,
+      lon: pkt.lon,
+      ele: pkt.eleM.toDouble(),
+      accuracy: pkt.accuracyM.toDouble(),
+      heading: pkt.headingDeg,
+      speed: pkt.speedMps,
+      alongTrackM: matchedAlong,
+      inNavigation: pkt.inNavigation,
+      isSelf: false,
+      viaBluetooth: true,
+      bleHopCount: pkt.hopCount,
+      updatedAt: DateTime.now().toUtc(),
+    );
+
+    _bleGroupPeers[member.memberId] = member;
+    final nextMembers = _mergeGroupMembersWithBle(
+      serverMembers: session.members,
+      selfMemberId: session.selfMemberId,
+    );
+    _groupSession.value = session.copyWith(members: nextMembers);
+    if (_selectedGroupMember.value?.memberId == member.memberId) {
+      _selectedGroupMember.value = member;
+    }
+  }
+
+  void _onBleSosAlertReceived(BleSosAlertPacket pkt) {
+    if (!mounted) return;
+    final mySos = _myActiveSos.value;
+    if (mySos != null && mySos.clientSosId == pkt.clientSosId) {
+      return;
+    }
+
+    final split = pkt.splitRequesterAndMessage();
+    final incomingModel = SosAlertModel(
+      id: 'ble-${pkt.clientSosId}',
+      clientSosId: pkt.clientSosId,
+      trailId: widget.isRecording || widget.id.isEmpty ? null : widget.id,
+      status: 'active',
+      reason: pkt.reason,
+      message: split.message,
+      requesterName: split.requesterName,
+      lat: pkt.lat,
+      lon: pkt.lon,
+      ele: pkt.eleM.toDouble(),
+      isMine: false,
+      viaBluetooth: true,
+      bleHopCount: pkt.hopCount,
+      createdAt: DateTime.fromMillisecondsSinceEpoch(
+        pkt.createdEpochSec * 1000,
+        isUtc: true,
+      ),
+    );
+
+    final next = List<SosAlertModel>.of(_nearbySosAlerts.value);
+    final idx = next.indexWhere((s) => s.dedupeKey == incomingModel.dedupeKey);
+    if (idx >= 0) {
+      next[idx] = _mergeNearbySos(next[idx], incomingModel);
+    } else {
+      next.insert(0, incomingModel);
+    }
+    _nearbySosAlerts.value = next;
+
+    final fix = _currentGeoFix();
+    final service = _liveService;
+    if (service != null) {
+      unawaited(
+        service.notifyBleNearbySos(
+          incomingModel,
+          userLat: fix?.lat,
+          userLon: fix?.lon,
+          isRo: _isRo,
+        ),
+      );
+    } else if (_fallbackNotifiedSosKeys.add(incomingModel.dedupeKey)) {
+      final distM = fix != null
+          ? ml.SphericalGreatCircle(
+              fix,
+            ).distanceTo(ml.Geographic(lat: pkt.lat, lon: pkt.lon))
+          : null;
+      unawaited(
+        _fallbackSosNotifier.showNearbySosNotification(
+          sos: incomingModel,
+          distanceMeters: distM,
+          isRo: _isRo,
+        ),
+      );
+    }
+
+    if (fix != null) {
+      final responding = _activeRespondingSos();
+      if (responding != null && responding.clientSosId == pkt.clientSosId) {
+        _recomputeRescueRoute(fix, responding, syncWithServer: false);
+      }
+    }
+
+    unawaited(
+      _sosOutboxStore
+          .upsertRelayedAlert(
+            clientSosId: pkt.clientSosId,
+            sosClaimHash: pkt.sosClaimHash,
+            trailId: widget.isRecording || widget.id.isEmpty ? null : widget.id,
+            reason: pkt.reason,
+            message: split.message,
+            requesterName: split.requesterName,
+            lat: pkt.lat,
+            lon: pkt.lon,
+            ele: pkt.eleM.toDouble(),
+            packetEpochSec: pkt.createdEpochSec,
+            hopCount: pkt.hopCount,
+          )
+          .then((_) => _flushSosOutboxAndRelayQueue()),
+    );
+  }
+
+  void _onBleSosAckReceived(BleSosAckPacket pkt) {
+    if (!mounted) return;
+    final mine = _myActiveSos.value;
+    if (mine == null || mine.clientSosId != pkt.clientSosId) {
+      return;
+    }
+
+    if (pkt.cancelled) {
+      _bleAckResponderIds.remove(pkt.responderIdHex);
+    } else if (pkt.comingToHelp) {
+      _bleAckResponderIds.add(pkt.responderIdHex);
+    }
+
+    final nextAckCount = _bleAckResponderIds.length;
+    final nextServerConfirmed = mine.bleServerConfirmed || pkt.uploadedToServer;
+
+    final curEta = mine.bleNearestEtaMin;
+    final pktEta = pkt.etaMin;
+    final int? nextEta = switch ((curEta, pktEta)) {
+      (final int a, final int b) => min(a, b),
+      (final int a, null) => a,
+      (null, final int b) => b,
+      (null, null) => null,
+    };
+
+    final curDist = mine.bleNearestDistanceM;
+    final pktDist = pkt.distM?.toDouble();
+    final double? nextDist = switch ((curDist, pktDist)) {
+      (final double a, final double b) => min(a, b),
+      (final double a, null) => a,
+      (null, final double b) => b,
+      (null, null) => null,
+    };
+
+    _myActiveSos.value = mine.copyWith(
+      bleAckCount: nextAckCount,
+      bleServerConfirmed: nextServerConfirmed,
+      bleNearestEtaMin: nextEta,
+      bleNearestDistanceM: nextDist,
+    );
+  }
+
+  void _onBleSosResolvedReceived(BleSosResolvedPacket pkt) {
+    if (!mounted) return;
+    _nearbySosAlerts.value = _nearbySosAlerts.value
+        .where((s) => s.clientSosId != pkt.clientSosId)
+        .toList(growable: false);
+
+    if (_activeRespondingSos() == null && _rescueRouteNotifier.value != null) {
+      _rescueRouteNotifier.value = null;
+      _pushRescueSource(null);
+    }
+
+    unawaited(
+      _sosOutboxStore
+          .applyVerifiedResolution(
+            clientSosId: pkt.clientSosId,
+            sosRevealTokenHex: pkt.sosRevealTokenHex,
+            resolvedEpochSec: pkt.resolvedEpochSec,
+          )
+          .then((applied) {
+            if (applied) {
+              return _flushSosOutboxAndRelayQueue();
+            }
+            return Future<void>.value();
+          }),
+    );
+  }
+
+  Future<void> _flushSosOutboxAndRelayQueue() async {
+    if (_sosOutboxFlushInFlight || !mounted) return;
+    final service = _liveService;
+    if (service == null || !service.isConfigured) return;
+
+    _sosOutboxFlushInFlight = true;
+    try {
+      await _sosOutboxStore.ensureLoaded();
+      if (!mounted) return;
+
+      // 1. Flush own pending offline SOS (claim/create or resolve).
+      final mine = _sosOutboxStore.myPendingSos;
+      if (mine != null) {
+        if (mine.needsServerResolve) {
+          final srvId = mine.serverSosId;
+          if (srvId != null && srvId.isNotEmpty) {
+            try {
+              await service.updateSosStatus(
+                sosId: srvId,
+                status: mine.status,
+                sosClaimSecret: mine.sosClaimSecret,
+              );
+              await _sosOutboxStore.clearMyPendingSos();
+            } catch (_) {}
+          } else {
+            try {
+              await service.relaySos(<String, dynamic>{
+                'clientSosId': mine.clientSosId,
+                'sosClaimHash': mine.sosClaimHash,
+                'status': 'resolved',
+                'sosClaimSecret': mine.sosClaimSecret,
+                'packetEpochSec': mine.resolvedEpochSec ?? mine.createdEpochSec,
+              });
+              await _sosOutboxStore.clearMyPendingSos();
+            } catch (_) {
+              // If 404 (never relayed by any mule while active), clear cleanly.
+              await _sosOutboxStore.clearMyPendingSos();
+            }
+          }
+        } else if (mine.needsServerCreateOrClaim && mine.isActive) {
+          try {
+            final claimed = await service.triggerSos(
+              trailId: mine.trailId,
+              reason: mine.reason,
+              message: mine.message,
+              requesterName: mine.requesterName,
+              lat: mine.lat,
+              lon: mine.lon,
+              ele: mine.ele,
+              clientSosId: mine.clientSosId,
+              sosClaimSecret: mine.sosClaimSecret,
+            );
+            await _sosOutboxStore.markMySosSyncedOnline(
+              serverSosId: claimed.id,
+            );
+            if (mounted) {
+              final cur = _myActiveSos.value;
+              if (cur != null && cur.clientSosId == mine.clientSosId) {
+                _myActiveSos.value = _mergeIntoMyActiveSos(cur, claimed);
+              }
+            }
+          } catch (_) {}
+        }
+      }
+
+      // 2. Store-and-Forward Mule flush: upload relayed BLE SOS packets to `/live/sos/relay`.
+      final pendingRelays = _sosOutboxStore.pendingRelayUploads;
+      for (final item in pendingRelays) {
+        if (!mounted) break;
+        try {
+          final relayedSos = await service.relaySos(item.toRelayApiJson());
+          await _sosOutboxStore.markRelayedUploaded(
+            item.clientSosId,
+            serverSosId: relayedSos?.id,
+            resolved: item.isResolved,
+          );
+          if (!mounted) break;
+
+          if (relayedSos != null && !item.isResolved) {
+            // Upgrade BLE-only nearby alert ID to server ID in place.
+            _nearbySosAlerts.value = <SosAlertModel>[
+              for (final s in _nearbySosAlerts.value)
+                if (s.clientSosId == item.clientSosId)
+                  _mergeNearbySos(s, relayedSos)
+                else
+                  s,
+            ];
+
+            // Emit PKT_SOS_ACK(uploadedToServer: true) back over BLE so an offline
+            // victim nearby learns their alert reached the server!
+            if (_bleMeshEngine.isSupportedPlatform) {
+              final token = await _resolveDeviceToken();
+              if (!mounted) break;
+              final respIdHex = deriveBleResponderIdHex(
+                clientSosId: item.clientSosId,
+                responderDeviceToken: token,
+              );
+              final fix = _currentGeoFix();
+              final distM = fix != null
+                  ? ml.SphericalGreatCircle(
+                      fix,
+                    ).distanceTo(ml.Geographic(lat: item.lat, lon: item.lon))
+                  : null;
+              final ack = BleSosAckPacket(
+                clientSosId: item.clientSosId,
+                responderIdHex: respIdHex,
+                distM: (distM != null && distM.isFinite) ? distM.round() : null,
+                uploadedToServer: true,
+                ackEpochSec:
+                    DateTime.now().toUtc().millisecondsSinceEpoch ~/ 1000,
+              );
+              unawaited(_bleMeshEngine.publishLocalSosAck(ack));
+            }
+          }
+        } catch (_) {}
+      }
+
+      // 3. Flush pending offline responder action once serverSosId is known.
+      final pendingResp = _sosOutboxStore.pendingResponderAction;
+      final respServerId = pendingResp?.serverSosId;
+      if (pendingResp != null &&
+          respServerId != null &&
+          respServerId.isNotEmpty) {
+        try {
+          await service.respondToSos(
+            sosId: respServerId,
+            status: pendingResp.status,
+            lat: pendingResp.lat,
+            lon: pendingResp.lon,
+            ele: pendingResp.ele,
+            distanceM: pendingResp.distanceM,
+            etaSec: pendingResp.etaSec,
+          );
+          await _sosOutboxStore.clearPendingResponderAction();
+        } catch (_) {}
+      }
+
+      // 4. Upgrade offline-created BLE group to hybrid Server + BLE using `preferredCode`.
+      final curGroup = _groupSession.value;
+      if (curGroup != null && curGroup.isOfflineBleGroup) {
+        try {
+          final upgraded = await service.createGroup(
+            trailId: curGroup.trailId,
+            displayName: _selfGroupDisplayName,
+            preferredCode: curGroup.code,
+          );
+          if (mounted && _groupSession.value?.code == curGroup.code) {
+            final nextSelfId = upgraded.selfMemberId.isNotEmpty
+                ? upgraded.selfMemberId
+                : curGroup.selfMemberId;
+            final mergedSession = upgraded.copyWith(
+              isOfflineBleGroup: false,
+              selfMemberId: nextSelfId,
+              members: _mergeGroupMembersWithBle(
+                serverMembers: upgraded.members,
+                selfMemberId: nextSelfId,
+              ),
+            );
+            _groupSession.value = mergedSession;
+            _bleMeshEngine.configureGroupSession(
+              groupCode: mergedSession.code,
+              selfMemberIdHex: mergedSession.selfMemberId,
+            );
+            final fix = _currentGeoFix();
+            if (fix != null && _uiVisible) {
+              _connectLiveSse(fix);
+            }
+          }
+        } catch (_) {}
+      }
+    } finally {
+      _sosOutboxFlushInFlight = false;
     }
   }
 
@@ -1904,6 +3039,7 @@ class _NavigationScreenState extends ConsumerState<NavigationScreen>
   }) {
     final targetPos = ml.Geographic(lat: sos.lat, lon: sos.lon);
     if (!_rescueDemPrefetchStarted &&
+        ref.read(onlineStatusProvider) &&
         (_demGrid.sampleElevation(userPos.lat, userPos.lon) == null ||
             _demGrid.sampleElevation(targetPos.lat, targetPos.lon) == null)) {
       _rescueDemPrefetchStarted = true;
@@ -1938,11 +3074,45 @@ class _NavigationScreenState extends ConsumerState<NavigationScreen>
     _pushRescueSource(route);
 
     if (syncWithServer && route != null) {
-      final sinceSync = _lastResponderSyncAt == null
+      // Broadcast updated live BLE responder ETA/distance >= every 30s when offline/BLE.
+      final cid = sos.clientSosId;
+      final lastBleAck = _lastBleResponderAckAt;
+      if (cid != null &&
+          cid.isNotEmpty &&
+          _bleMeshEngine.isSupportedPlatform &&
+          (lastBleAck == null ||
+              now.difference(lastBleAck).inSeconds >= 32)) {
+        _lastBleResponderAckAt = now;
+        unawaited(
+          _resolveDeviceToken().then((token) {
+            if (!mounted) return;
+            final respIdHex = deriveBleResponderIdHex(
+              clientSosId: cid,
+              responderDeviceToken: token,
+            );
+            final ack = BleSosAckPacket(
+              clientSosId: cid,
+              responderIdHex: respIdHex,
+              etaMin: max(1, (route.estimatedSeconds / 60.0).round()),
+              distM: route.distanceM.round(),
+              comingToHelp: true,
+              ackEpochSec: now.toUtc().millisecondsSinceEpoch ~/ 1000,
+            );
+            unawaited(_bleMeshEngine.publishLocalSosAck(ack));
+          }),
+        );
+      }
+
+      final lastSync = _lastResponderSyncAt;
+      final sinceSync = lastSync == null
           ? 999
-          : now.difference(_lastResponderSyncAt!).inSeconds;
+          : now.difference(lastSync).inSeconds;
       final service = _liveService;
-      if (sinceSync >= 20 && service != null && service.isConfigured) {
+      if (sinceSync >= 20 &&
+          service != null &&
+          service.isConfigured &&
+          !sos.id.startsWith('ble-') &&
+          !sos.id.startsWith('local-')) {
         _lastResponderSyncAt = now;
         unawaited(
           service
@@ -2257,13 +3427,19 @@ class _NavigationScreenState extends ConsumerState<NavigationScreen>
     _liveHeartbeatTimer?.cancel();
     _coasterTimer?.cancel();
     _groupPingTimer?.cancel();
+    _sosOutboxFlushTimer?.cancel();
+    for (final s in _bleSubscriptions) {
+      s.cancel();
+    }
+    _bleSubscriptions.clear();
+    unawaited(_bleMeshEngine.dispose());
     _valhallaRerouteCancelToken?.cancel('dispose');
     _disconnectLiveSse();
     if (active_nav.read(_store) == null) {
       final service = _liveService;
       if (service != null && service.isConfigured) {
         final activeGroup = _groupSession.value;
-        if (activeGroup != null) {
+        if (activeGroup != null && !activeGroup.isOfflineBleGroup) {
           unawaited(
             service.leaveGroup(activeGroup.code).catchError((Object _) {}),
           );
@@ -4496,27 +5672,31 @@ class _NavigationScreenState extends ConsumerState<NavigationScreen>
   }
 
   Widget _buildLiveSosOverlays(BuildContext context) {
-    return ValueListenableBuilder<bool>(
-      valueListenable: _liveActionBusy,
-      builder: (context, isBusy, _) {
-        return Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            ValueListenableBuilder<SosAlertModel?>(
-              valueListenable: _myActiveSos,
-              builder: (context, mine, _) {
-                if (mine == null) return const SizedBox.shrink();
-                return Padding(
-                  padding: const EdgeInsets.only(top: 6),
-                  child: MyActiveSosBanner(
-                    sos: mine,
-                    isSubmitting: isBusy,
-                    isRo: _isRo,
-                    onResolve: () => _handleResolveMySos(mine),
-                  ),
-                );
-              },
-            ),
+    return Consumer(
+      builder: (context, ref, _) {
+        final isOnline = ref.watch(onlineStatusProvider);
+        return ValueListenableBuilder<bool>(
+          valueListenable: _liveActionBusy,
+          builder: (context, isBusy, _) {
+            return Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                ValueListenableBuilder<SosAlertModel?>(
+                  valueListenable: _myActiveSos,
+                  builder: (context, mine, _) {
+                    if (mine == null) return const SizedBox.shrink();
+                    return Padding(
+                      padding: const EdgeInsets.only(top: 6),
+                      child: MyActiveSosBanner(
+                        sos: mine,
+                        isOnline: isOnline,
+                        isSubmitting: isBusy,
+                        isRo: _isRo,
+                        onResolve: () => _handleResolveMySos(mine),
+                      ),
+                    );
+                  },
+                ),
             ValueListenableBuilder<List<SosAlertModel>>(
               valueListenable: _nearbySosAlerts,
               builder: (context, alerts, _) {
@@ -4551,6 +5731,7 @@ class _NavigationScreenState extends ConsumerState<NavigationScreen>
                                 : null,
                             userHeadingDeg:
                                 markerPos?.heading ?? _smoothedHeading,
+                            isOnline: isOnline,
                             isSubmitting: isBusy,
                             isRo: _isRo,
                             onRespondComing: () => _handleRespondComing(target),
@@ -4565,6 +5746,8 @@ class _NavigationScreenState extends ConsumerState<NavigationScreen>
             ),
           ],
         );
+      },
+    );
       },
     );
   }

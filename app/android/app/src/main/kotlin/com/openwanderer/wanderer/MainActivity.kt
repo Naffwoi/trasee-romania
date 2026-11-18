@@ -39,6 +39,8 @@ class MainActivity : FlutterActivity() {
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
 
+        flutterEngine.plugins.add(BleProximityPlugin())
+
         MethodChannel(flutterEngine.dartExecutor.binaryMessenger, USER_CA_CHANNEL)
             .setMethodCallHandler { call, result ->
                 if (call.method == "getUserCaCertificates") {

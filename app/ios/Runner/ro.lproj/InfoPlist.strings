@@ -1,3 +1,4 @@
+"NSBluetoothAlwaysUsageDescription" = "Wanderer folosește Bluetooth pentru a partaja poziția în grup și pentru a transmite alerte SOS fără semnal mobil către drumeții din apropiere.";
 "NSCameraUsageDescription" = "Wanderer are nevoie de acces la cameră pentru a putea face o fotografie nouă de profil.";
 "NSLocationAlwaysAndWhenInUseUsageDescription" = "Wanderer are nevoie de acces permanent la locație pentru a continua navigarea și înregistrarea traseului când ecranul este blocat.";
 "NSLocationWhenInUseUsageDescription" = "Locația ta este afișată pe hartă pentru a te ajuta să navighezi pe trasee.";

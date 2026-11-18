@@ -4,6 +4,8 @@ import 'package:flutter/services.dart';
 import 'package:maplibre/maplibre.dart' as ml;
 import 'package:share_plus/share_plus.dart';
 import 'package:wanderer/models/live/trail_live_models.dart';
+import 'package:wanderer/services/ble/sos_crypto_and_outbox.dart'
+    show generateOfflineGroupCode;
 import 'package:wanderer/theme/colors.dart';
 
 Color parseGroupHexColor(String? rawHex) {
@@ -36,11 +38,12 @@ String formatRelativeGroupDistance({
   if (member.isSelf) {
     return isRo ? 'Tu' : 'You';
   }
+  final memberAlong = member.alongTrackM;
   if (userAlongTrackM != null &&
       userAlongTrackM.isFinite &&
-      member.alongTrackM != null &&
-      member.alongTrackM!.isFinite) {
-    final delta = member.alongTrackM! - userAlongTrackM;
+      memberAlong != null &&
+      memberAlong.isFinite) {
+    final delta = memberAlong - userAlongTrackM;
     if (delta.abs() < 15.0) {
       return isRo ? 'Lângă tine' : 'Next to you';
     }
@@ -68,6 +71,9 @@ Future<void> showLiveGroupSheet(
   BuildContext context, {
   required ValueListenable<GroupSessionModel?> sessionListenable,
   ValueListenable<bool>? busyListenable,
+  ValueListenable<bool>? bleAdapterOnListenable,
+  bool isOnline = true,
+  bool isBleAdapterOn = true,
   String initialDisplayName = '',
   double? userAlongTrackM,
   ml.Geographic? userPosition,
@@ -91,6 +97,9 @@ Future<void> showLiveGroupSheet(
     builder: (ctx) => LiveGroupSheet(
       sessionListenable: sessionListenable,
       busyListenable: busyListenable,
+      bleAdapterOnListenable: bleAdapterOnListenable,
+      isOnline: isOnline,
+      isBleAdapterOn: isBleAdapterOn,
       initialDisplayName: initialDisplayName,
       userAlongTrackM: userAlongTrackM,
       userPosition: userPosition,
@@ -109,6 +118,9 @@ class LiveGroupSheet extends StatefulWidget {
     super.key,
     required this.sessionListenable,
     this.busyListenable,
+    this.bleAdapterOnListenable,
+    this.isOnline = true,
+    this.isBleAdapterOn = true,
     this.initialDisplayName = '',
     this.userAlongTrackM,
     this.userPosition,
@@ -122,6 +134,9 @@ class LiveGroupSheet extends StatefulWidget {
 
   final ValueListenable<GroupSessionModel?> sessionListenable;
   final ValueListenable<bool>? busyListenable;
+  final ValueListenable<bool>? bleAdapterOnListenable;
+  final bool isOnline;
+  final bool isBleAdapterOn;
   final String initialDisplayName;
   final double? userAlongTrackM;
   final ml.Geographic? userPosition;
@@ -143,6 +158,7 @@ class _LiveGroupSheetState extends State<LiveGroupSheet> {
   bool _localBusy = false;
   bool _copiedFeedback = false;
   String? _errorText;
+  GroupSessionModel? _localOfflineFallbackSession;
 
   static final RegExp _validGroupCode = RegExp(r'^[A-HJ-NP-Z2-9]{6}$');
 
@@ -168,30 +184,64 @@ class _LiveGroupSheetState extends State<LiveGroupSheet> {
     return widget.isRo ? 'Drumeț' : 'Hiker';
   }
 
+  GroupSessionModel _buildOfflineFallbackSession(String code, String name) {
+    final pos = widget.userPosition;
+    return GroupSessionModel(
+      code: code,
+      selfMemberId: 'ble-self',
+      isOfflineBleGroup: true,
+      members: <GroupMemberModel>[
+        GroupMemberModel(
+          memberId: 'ble-self',
+          displayName: name,
+          colorHex: '#242734',
+          lat: pos?.lat ?? 0.0,
+          lon: pos?.lon ?? 0.0,
+          alongTrackM: widget.userAlongTrackM,
+          inNavigation: true,
+          isSelf: true,
+          viaBluetooth: true,
+          updatedAt: DateTime.now().toUtc(),
+        ),
+      ],
+    );
+  }
+
+  void _assignFallbackSession(GroupSessionModel fallback) {
+    final listenable = widget.sessionListenable;
+    if (listenable is ValueNotifier<GroupSessionModel?>) {
+      listenable.value = fallback;
+    } else {
+      setState(() {
+        _localOfflineFallbackSession = fallback;
+      });
+    }
+  }
+
   Future<void> _handleCreate() async {
     if (_localBusy) return;
+    final name = _effectiveName();
     setState(() {
       _localBusy = true;
       _errorText = null;
     });
     try {
-      final created = await widget.onCreateGroup(_effectiveName());
+      final created = await widget.onCreateGroup(name);
       if (!mounted) return;
       if (created == null) {
-        setState(() {
-          _errorText = widget.isRo
-              ? 'Nu s-a putut crea grupul. Verifică conexiunea.'
-              : 'Could not create group. Check connection.';
-        });
+        final fallback = _buildOfflineFallbackSession(
+          generateOfflineGroupCode(),
+          name,
+        );
+        _assignFallbackSession(fallback);
       }
     } catch (_) {
-      if (mounted) {
-        setState(() {
-          _errorText = widget.isRo
-              ? 'Eroare la crearea grupului.'
-              : 'Failed to create group.';
-        });
-      }
+      if (!mounted) return;
+      final fallback = _buildOfflineFallbackSession(
+        generateOfflineGroupCode(),
+        name,
+      );
+      _assignFallbackSession(fallback);
     } finally {
       if (mounted) setState(() => _localBusy = false);
     }
@@ -208,28 +258,22 @@ class _LiveGroupSheetState extends State<LiveGroupSheet> {
       });
       return;
     }
+    final name = _effectiveName();
     setState(() {
       _localBusy = true;
       _errorText = null;
     });
     try {
-      final joined = await widget.onJoinGroup(code, _effectiveName());
+      final joined = await widget.onJoinGroup(code, name);
       if (!mounted) return;
       if (joined == null) {
-        setState(() {
-          _errorText = widget.isRo
-              ? 'Grupul nu a fost găsit sau a expirat.'
-              : 'Group not found or expired.';
-        });
+        final fallback = _buildOfflineFallbackSession(code, name);
+        _assignFallbackSession(fallback);
       }
     } catch (_) {
-      if (mounted) {
-        setState(() {
-          _errorText = widget.isRo
-              ? 'Cod invalid sau grup expirat.'
-              : 'Invalid code or expired group.';
-        });
-      }
+      if (!mounted) return;
+      final fallback = _buildOfflineFallbackSession(code, name);
+      _assignFallbackSession(fallback);
     } finally {
       if (mounted) setState(() => _localBusy = false);
     }
@@ -240,6 +284,7 @@ class _LiveGroupSheetState extends State<LiveGroupSheet> {
     setState(() {
       _localBusy = true;
       _errorText = null;
+      _localOfflineFallbackSession = null;
     });
     try {
       await widget.onLeaveGroup();
@@ -275,99 +320,159 @@ class _LiveGroupSheetState extends State<LiveGroupSheet> {
     final bottomInset = MediaQuery.viewInsetsOf(context).bottom;
     final busySource =
         widget.busyListenable ?? const _ConstantBoolListenable(false);
+    final bleAdapterSource =
+        widget.bleAdapterOnListenable ??
+        _ConstantBoolListenable(widget.isBleAdapterOn);
 
     return ValueListenableBuilder<GroupSessionModel?>(
       valueListenable: widget.sessionListenable,
-      builder: (context, session, _) {
+      builder: (context, externalSession, _) {
+        final session = externalSession ?? _localOfflineFallbackSession;
         return ValueListenableBuilder<bool>(
           valueListenable: busySource,
           builder: (context, externalBusy, _) {
-            final isBusy = _localBusy || externalBusy;
-            return Padding(
-              padding: EdgeInsets.only(
-                left: 16,
-                right: 16,
-                top: 10,
-                bottom: 18 + bottomInset,
-              ),
-              child: SingleChildScrollView(
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  crossAxisAlignment: CrossAxisAlignment.stretch,
-                  children: [
-                    Center(
-                      child: Container(
-                        width: 36,
-                        height: 4,
-                        decoration: BoxDecoration(
-                          color: theme.colorScheme.onSurface.withValues(
-                            alpha: 0.22,
-                          ),
-                          borderRadius: BorderRadius.circular(2),
-                        ),
-                      ),
-                    ),
-                    const SizedBox(height: 10),
-                    Row(
+            return ValueListenableBuilder<bool>(
+              valueListenable: bleAdapterSource,
+              builder: (context, adapterOn, _) {
+                final isBusy = _localBusy || externalBusy;
+                final isOfflineBleOnly =
+                    session != null &&
+                    (session.isOfflineBleGroup || !widget.isOnline);
+                return Padding(
+                  padding: EdgeInsets.only(
+                    left: 16,
+                    right: 16,
+                    top: 10,
+                    bottom: 18 + bottomInset,
+                  ),
+                  child: SingleChildScrollView(
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      crossAxisAlignment: CrossAxisAlignment.stretch,
                       children: [
-                        Container(
-                          width: 34,
-                          height: 34,
-                          decoration: BoxDecoration(
-                            color: AppColors.primaryLight,
-                            borderRadius: BorderRadius.circular(10),
-                          ),
-                          child: const Icon(
-                            Icons.group_outlined,
-                            color: Colors.white,
-                            size: 19,
+                        Center(
+                          child: Container(
+                            width: 36,
+                            height: 4,
+                            decoration: BoxDecoration(
+                              color: theme.colorScheme.onSurface.withValues(
+                                alpha: 0.22,
+                              ),
+                              borderRadius: BorderRadius.circular(2),
+                            ),
                           ),
                         ),
-                        const SizedBox(width: 10),
-                        Expanded(
-                          child: Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              Text(
-                                isRo
-                                    ? 'Grup live pe traseu'
-                                    : 'Live trail group',
-                                style: theme.textTheme.titleMedium?.copyWith(
-                                  fontWeight: FontWeight.w800,
+                        const SizedBox(height: 10),
+                        Row(
+                          children: [
+                            Container(
+                              width: 34,
+                              height: 34,
+                              decoration: BoxDecoration(
+                                color: AppColors.primaryLight,
+                                borderRadius: BorderRadius.circular(10),
+                              ),
+                              child: const Icon(
+                                Icons.group_outlined,
+                                color: Colors.white,
+                                size: 19,
+                              ),
+                            ),
+                            const SizedBox(width: 10),
+                            Expanded(
+                              child: Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  Text(
+                                    isRo
+                                        ? 'Grup live pe traseu'
+                                        : 'Live trail group',
+                                    style: theme.textTheme.titleMedium
+                                        ?.copyWith(fontWeight: FontWeight.w800),
+                                  ),
+                                  Text(
+                                    !widget.isOnline
+                                        ? (isRo
+                                              ? 'Grup prin Bluetooth · funcționează și fără semnal'
+                                              : 'Bluetooth group · works offline too')
+                                        : (isRo
+                                              ? 'Prieteni pe hartă · GPS cooperativ în pădure'
+                                              : 'Friends on map · Cooperative canopy GPS'),
+                                    style: theme.textTheme.bodySmall?.copyWith(
+                                      color: theme.colorScheme.onSurface
+                                          .withValues(alpha: 0.65),
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ),
+                            IconButton(
+                              visualDensity: VisualDensity.compact,
+                              onPressed: () => Navigator.of(context).pop(),
+                              icon: const Icon(Icons.close, size: 20),
+                            ),
+                          ],
+                        ),
+                        if (!adapterOn) ...[
+                          const SizedBox(height: 10),
+                          Container(
+                            key: const ValueKey('group-ble-off-notice'),
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: 12,
+                              vertical: 9,
+                            ),
+                            decoration: BoxDecoration(
+                              color: AppColors.primaryLight.withValues(
+                                alpha: theme.brightness == Brightness.dark
+                                    ? 0.45
+                                    : 0.08,
+                              ),
+                              borderRadius: BorderRadius.circular(12),
+                              border: Border.all(
+                                color: theme.colorScheme.outline.withValues(
+                                  alpha: 0.55,
                                 ),
                               ),
-                              Text(
-                                isRo
-                                    ? 'Prieteni pe hartă · GPS cooperativ în pădure'
-                                    : 'Friends on map · Cooperative canopy GPS',
-                                style: theme.textTheme.bodySmall?.copyWith(
+                            ),
+                            child: Row(
+                              children: [
+                                Icon(
+                                  Icons.bluetooth_disabled_rounded,
+                                  size: 17,
                                   color: theme.colorScheme.onSurface.withValues(
-                                    alpha: 0.65,
+                                    alpha: 0.85,
                                   ),
                                 ),
-                              ),
-                            ],
+                                const SizedBox(width: 8),
+                                Expanded(
+                                  child: Text(
+                                    isRo
+                                        ? 'Pornește Bluetooth pentru conectare directă fără semnal'
+                                        : 'Turn on Bluetooth for direct offline connection',
+                                    style: theme.textTheme.bodySmall?.copyWith(
+                                      fontWeight: FontWeight.w600,
+                                    ),
+                                  ),
+                                ),
+                              ],
+                            ),
                           ),
-                        ),
-                        IconButton(
-                          visualDensity: VisualDensity.compact,
-                          onPressed: () => Navigator.of(context).pop(),
-                          icon: const Icon(Icons.close, size: 20),
-                        ),
+                        ],
+                        const SizedBox(height: 14),
+                        if (session == null)
+                          _buildCreateOrJoinBody(context, isBusy: isBusy)
+                        else
+                          _buildActiveSessionBody(
+                            context,
+                            session,
+                            isBusy: isBusy,
+                            isOfflineBleOnly: isOfflineBleOnly,
+                          ),
                       ],
                     ),
-                    const SizedBox(height: 14),
-                    if (session == null)
-                      _buildCreateOrJoinBody(context, isBusy: isBusy)
-                    else
-                      _buildActiveSessionBody(
-                        context,
-                        session,
-                        isBusy: isBusy,
-                      ),
-                  ],
-                ),
-              ),
+                  ),
+                );
+              },
             );
           },
         );
@@ -378,6 +483,7 @@ class _LiveGroupSheetState extends State<LiveGroupSheet> {
   Widget _buildCreateOrJoinBody(BuildContext context, {required bool isBusy}) {
     final theme = Theme.of(context);
     final isRo = widget.isRo;
+    final err = _errorText;
 
     return Column(
       mainAxisSize: MainAxisSize.min,
@@ -481,10 +587,10 @@ class _LiveGroupSheetState extends State<LiveGroupSheet> {
             ),
           ],
         ),
-        if (_errorText != null) ...[
+        if (err != null) ...[
           const SizedBox(height: 10),
           Text(
-            _errorText!,
+            err,
             style: theme.textTheme.bodySmall?.copyWith(
               color: const Color(0xFFDC2626),
               fontWeight: FontWeight.w600,
@@ -499,14 +605,54 @@ class _LiveGroupSheetState extends State<LiveGroupSheet> {
     BuildContext context,
     GroupSessionModel session, {
     required bool isBusy,
+    required bool isOfflineBleOnly,
   }) {
     final theme = Theme.of(context);
     final isRo = widget.isRo;
+    final modeBadgeText = isOfflineBleOnly
+        ? (isRo
+              ? 'Grup prin Bluetooth · fără semnal'
+              : 'Bluetooth Group · offline')
+        : (isRo
+              ? 'Grup activ · Server + Bluetooth'
+              : 'Active Group · Server + Bluetooth');
 
     return Column(
       mainAxisSize: MainAxisSize.min,
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
+        Align(
+          alignment: Alignment.centerLeft,
+          child: Container(
+            key: const ValueKey('group-mode-badge'),
+            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+            decoration: BoxDecoration(
+              color: AppColors.primaryLight,
+              borderRadius: BorderRadius.circular(10),
+            ),
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Icon(
+                  isOfflineBleOnly
+                      ? Icons.bluetooth_connected_rounded
+                      : Icons.bluetooth_rounded,
+                  size: 13,
+                  color: Colors.white,
+                ),
+                const SizedBox(width: 6),
+                Text(
+                  modeBadgeText,
+                  style: theme.textTheme.labelSmall?.copyWith(
+                    color: Colors.white,
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+        const SizedBox(height: 10),
         Container(
           padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
           decoration: BoxDecoration(
@@ -608,6 +754,7 @@ class _LiveGroupSheetState extends State<LiveGroupSheet> {
     final theme = Theme.of(context);
     final isRo = widget.isRo;
     final badgeColor = parseGroupHexColor(member.colorHex);
+    final focusCallback = widget.onFocusMember;
     final relText = formatRelativeGroupDistance(
       member: member,
       userAlongTrackM: widget.userAlongTrackM,
@@ -627,9 +774,9 @@ class _LiveGroupSheetState extends State<LiveGroupSheet> {
         borderRadius: BorderRadius.circular(12),
         child: InkWell(
           borderRadius: BorderRadius.circular(12),
-          onTap: (!member.isSelf && widget.onFocusMember != null)
+          onTap: (!member.isSelf && focusCallback != null)
               ? () {
-                  widget.onFocusMember!(member);
+                  focusCallback(member);
                   Navigator.of(context).pop();
                 }
               : null,
@@ -660,15 +807,53 @@ class _LiveGroupSheetState extends State<LiveGroupSheet> {
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      Text(
-                        member.isSelf
-                            ? '${member.displayName} (${isRo ? 'Tu' : 'You'})'
-                            : member.displayName,
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: theme.textTheme.bodyMedium?.copyWith(
-                          fontWeight: FontWeight.w700,
-                        ),
+                      Row(
+                        children: [
+                          Flexible(
+                            child: Text(
+                              member.isSelf
+                                  ? '${member.displayName} (${isRo ? 'Tu' : 'You'})'
+                                  : member.displayName,
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: theme.textTheme.bodyMedium?.copyWith(
+                                fontWeight: FontWeight.w700,
+                              ),
+                            ),
+                          ),
+                          if (member.viaBluetooth && !member.isSelf) ...[
+                            const SizedBox(width: 6),
+                            Container(
+                              padding: const EdgeInsets.symmetric(
+                                horizontal: 6,
+                                vertical: 2,
+                              ),
+                              decoration: BoxDecoration(
+                                color: AppColors.primaryLight,
+                                borderRadius: BorderRadius.circular(8),
+                              ),
+                              child: Row(
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  const Icon(
+                                    Icons.bluetooth_rounded,
+                                    size: 11,
+                                    color: Colors.white,
+                                  ),
+                                  const SizedBox(width: 3),
+                                  Text(
+                                    'Bluetooth',
+                                    style: theme.textTheme.labelSmall?.copyWith(
+                                      color: Colors.white,
+                                      fontSize: 10,
+                                      fontWeight: FontWeight.w700,
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ),
+                          ],
+                        ],
                       ),
                       Text(
                         subtitleParts.join(' · '),
@@ -681,7 +866,7 @@ class _LiveGroupSheetState extends State<LiveGroupSheet> {
                     ],
                   ),
                 ),
-                if (!member.isSelf && widget.onFocusMember != null)
+                if (!member.isSelf && focusCallback != null)
                   Icon(
                     Icons.my_location_rounded,
                     size: 17,

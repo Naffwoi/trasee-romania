@@ -3,6 +3,7 @@ import 'dart:math' as math;
 import 'package:flutter/material.dart';
 import 'package:url_launcher/url_launcher.dart';
 import 'package:wanderer/models/live/trail_live_models.dart';
+import 'package:wanderer/theme/colors.dart';
 import 'package:wanderer/util/map/heading_math.dart' show shortestAngleDelta;
 import 'package:wanderer/util/navigation/off_trail_router.dart';
 
@@ -30,6 +31,7 @@ Future<void> _dialPhoneNumber(String number) async {
 Future<SosTriggerSubmission?> showSosTriggerDialog(
   BuildContext context, {
   String initialName = '',
+  bool isOnline = true,
   bool isRo = true,
 }) {
   return showModalBottomSheet<SosTriggerSubmission>(
@@ -41,6 +43,7 @@ Future<SosTriggerSubmission?> showSosTriggerDialog(
     ),
     builder: (ctx) => SosTriggerDialog(
       initialName: initialName,
+      isOnline: isOnline,
       isRo: isRo,
     ),
   );
@@ -88,10 +91,12 @@ class SosTriggerDialog extends StatefulWidget {
   const SosTriggerDialog({
     super.key,
     this.initialName = '',
+    this.isOnline = true,
     this.isRo = true,
   });
 
   final String initialName;
+  final bool isOnline;
   final bool isRo;
 
   @override
@@ -156,6 +161,44 @@ class _SosTriggerDialogState extends State<SosTriggerDialog> {
               ],
             ),
             const SizedBox(height: 8),
+            Container(
+              key: const ValueKey('sos-ble-info-note'),
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 9),
+              decoration: BoxDecoration(
+                color: AppColors.primaryLight.withValues(
+                  alpha: theme.brightness == Brightness.dark ? 0.45 : 0.08,
+                ),
+                borderRadius: BorderRadius.circular(12),
+                border: Border.all(
+                  color: theme.colorScheme.outline.withValues(alpha: 0.5),
+                ),
+              ),
+              child: Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Icon(
+                    Icons.bluetooth_searching_rounded,
+                    size: 17,
+                    color: theme.colorScheme.onSurface.withValues(alpha: 0.85),
+                  ),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: Text(
+                      isRo
+                          ? 'Dacă nu ai semnal mobil, alerta se trimite automat și prin Bluetooth drumeților din apropiere.'
+                          : 'If you have no mobile signal, your alert is automatically sent via Bluetooth to nearby hikers.',
+                      style: theme.textTheme.bodySmall?.copyWith(
+                        color: theme.colorScheme.onSurface.withValues(
+                          alpha: 0.88,
+                        ),
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            const SizedBox(height: 10),
             Row(
               children: [
                 Expanded(
@@ -241,7 +284,11 @@ class _SosTriggerDialogState extends State<SosTriggerDialog> {
                 );
               },
               child: Text(
-                isRo ? 'Trimite SOS în zonă' : 'Send SOS nearby',
+                widget.isOnline
+                    ? (isRo ? 'Trimite SOS în zonă' : 'Send SOS nearby')
+                    : (isRo
+                          ? 'Trimite SOS fără semnal · Bluetooth'
+                          : 'Send offline SOS · Bluetooth'),
                 style: const TextStyle(fontWeight: FontWeight.bold),
               ),
             ),
@@ -253,58 +300,93 @@ class _SosTriggerDialogState extends State<SosTriggerDialog> {
 }
 
 /// Live comforting status bar displayed to the requester while their own SOS
-/// alert is active (*„X persoane vin spre tine”*).
+/// alert is active (*„X persoane vin spre tine”* / *„SOS fără semnal · trimis prin Bluetooth”*).
 class MyActiveSosBanner extends StatelessWidget {
   const MyActiveSosBanner({
     super.key,
     required this.sos,
     required this.onResolve,
+    this.isOnline = true,
     this.isSubmitting = false,
     this.isRo = true,
   });
 
   final SosAlertModel sos;
   final VoidCallback onResolve;
+  final bool isOnline;
   final bool isSubmitting;
   final bool isRo;
 
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
-    final count = sos.responderCount;
+    final isLocalUnconfirmed =
+        sos.id.startsWith('local-') && !sos.bleServerConfirmed;
+    final showOfflineBatteryTip = !isOnline || isLocalUnconfirmed;
+
     final String responderLine;
-    if (count <= 0) {
+    if (isLocalUnconfirmed) {
       responderLine = isRo
-          ? 'SOS Activ · Alertă trimisă drumeților pe 5 km (0 persoane confirmate încă)'
-          : 'SOS Active · Broadcast to hikers within 5 km (waiting for responders)';
+          ? '📡 SOS fără semnal · trimis prin Bluetooth'
+          : '📡 Offline SOS · sent via Bluetooth';
     } else {
-      final base = isRo
-          ? (count == 1
-                ? 'SOS Activ · 1 persoană vine spre tine'
-                : 'SOS Activ · $count persoane vin spre tine')
-          : (count == 1
-                ? 'SOS Active · 1 hiker is coming to you'
-                : 'SOS Active · $count hikers are coming to you');
-      final distM = sos.nearestDistanceM;
-      final etaSec = sos.nearestEtaSec;
-      final distText = (distM != null && distM > 0)
-          ? (distM >= 1000
-                ? '${(distM / 1000.0).toStringAsFixed(1)} km'
-                : '${distM.round()} m')
-          : null;
-      final etaMin = (etaSec != null && etaSec > 0)
-          ? math.max(1, (etaSec / 60.0).round())
-          : null;
-      if (distText != null && etaMin != null) {
+      final count = sos.effectiveResponderCount;
+      if (count <= 0) {
         responderLine = isRo
-            ? '$base · cel mai aproape la $distText (~$etaMin min)'
-            : '$base · nearest $distText (~$etaMin min)';
-      } else if (distText != null) {
-        responderLine = '$base · $distText';
+            ? 'SOS Activ · Alertă trimisă drumeților pe 5 km (0 persoane confirmate încă)'
+            : 'SOS Active · Broadcast to hikers within 5 km (waiting for responders)';
       } else {
-        responderLine = base;
+        final base = isRo
+            ? (count == 1
+                  ? 'SOS Activ · 1 persoană vine spre tine'
+                  : 'SOS Activ · $count persoane vin spre tine')
+            : (count == 1
+                  ? 'SOS Active · 1 hiker is coming to you'
+                  : 'SOS Active · $count hikers are coming to you');
+        final distM = sos.nearestDistanceM ?? sos.bleNearestDistanceM;
+        final etaSec = sos.nearestEtaSec;
+        final bleEta = sos.bleNearestEtaMin;
+        final distText = (distM != null && distM > 0)
+            ? (distM >= 1000
+                  ? '${(distM / 1000.0).toStringAsFixed(1)} km'
+                  : '${distM.round()} m')
+            : null;
+        final etaMin = (etaSec != null && etaSec > 0)
+            ? math.max(1, (etaSec / 60.0).round())
+            : bleEta;
+        if (distText != null && etaMin != null) {
+          responderLine = isRo
+              ? '$base · cel mai aproape la $distText (~$etaMin min)'
+              : '$base · nearest $distText (~$etaMin min)';
+        } else if (distText != null) {
+          responderLine = '$base · $distText';
+        } else if (etaMin != null) {
+          responderLine = '$base · ~$etaMin min';
+        } else {
+          responderLine = base;
+        }
       }
     }
+
+    final bleAckCount = sos.bleAckCount;
+    final bleEtaMin = sos.bleNearestEtaMin;
+    final String? bleAckStatusLine;
+    if (bleAckCount > 0) {
+      final etaSuffix = bleEtaMin != null ? ' · ~$bleEtaMin min' : '';
+      bleAckStatusLine = isRo
+          ? (bleAckCount == 1
+                ? '✓ Preluat prin Bluetooth de 1 drumeț$etaSuffix'
+                : '✓ Preluat prin Bluetooth de $bleAckCount drumeți$etaSuffix')
+          : '✓ Picked up via Bluetooth by $bleAckCount hiker(s)$etaSuffix';
+    } else {
+      bleAckStatusLine = null;
+    }
+
+    final String? bleServerRelayLine = sos.bleServerConfirmed
+        ? (isRo
+              ? '✓ Alertă ajunsă la server prin drumeț din apropiere'
+              : '✓ Alert reached server via nearby hiker')
+        : null;
 
     return Card(
       key: const ValueKey('my-active-sos-banner'),
@@ -319,8 +401,10 @@ class MyActiveSosBanner extends StatelessWidget {
           children: [
             Row(
               children: [
-                const Text('🆘', style: TextStyle(fontSize: 18)),
-                const SizedBox(width: 8),
+                if (!isLocalUnconfirmed) ...[
+                  const Text('🆘', style: TextStyle(fontSize: 18)),
+                  const SizedBox(width: 8),
+                ],
                 Expanded(
                   child: Text(
                     responderLine,
@@ -332,6 +416,66 @@ class MyActiveSosBanner extends StatelessWidget {
                 ),
               ],
             ),
+            if (isLocalUnconfirmed && bleAckStatusLine == null) ...[
+              const SizedBox(height: 3),
+              Text(
+                isRo
+                    ? 'Alerta se transmite automat către drumeții din apropiere și va fi trimisă online imediat ce apare semnal.'
+                    : 'Alert is automatically broadcast via Bluetooth and will sync online once signal returns.',
+                style: theme.textTheme.bodySmall?.copyWith(
+                  color: Colors.white.withValues(alpha: 0.9),
+                ),
+              ),
+            ],
+            if (bleAckStatusLine != null) ...[
+              const SizedBox(height: 5),
+              Text(
+                bleAckStatusLine,
+                key: const ValueKey('sos-ble-ack-status'),
+                style: theme.textTheme.labelMedium?.copyWith(
+                  color: Colors.white,
+                  fontWeight: FontWeight.w700,
+                ),
+              ),
+            ],
+            if (bleServerRelayLine != null) ...[
+              const SizedBox(height: 4),
+              Text(
+                bleServerRelayLine,
+                key: const ValueKey('sos-ble-server-confirmed'),
+                style: theme.textTheme.labelMedium?.copyWith(
+                  color: Colors.white,
+                  fontWeight: FontWeight.w700,
+                ),
+              ),
+            ],
+            if (showOfflineBatteryTip) ...[
+              const SizedBox(height: 8),
+              Container(
+                key: const ValueKey('sos-offline-battery-tip'),
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 10,
+                  vertical: 7,
+                ),
+                decoration: BoxDecoration(
+                  color: AppColors.primaryLight.withValues(alpha: 0.92),
+                  borderRadius: BorderRadius.circular(11),
+                  border: Border.all(
+                    color: Colors.white.withValues(alpha: 0.24),
+                  ),
+                ),
+                child: Text(
+                  isRo
+                      ? '🔋 Economisire baterie fără semnal: pornește Modul Avion, păstrează Bluetooth și GPS active și blochează ecranul.'
+                      : '🔋 Offline battery saver: turn on Airplane Mode, keep Bluetooth and GPS active, and lock your screen.',
+                  style: theme.textTheme.bodySmall?.copyWith(
+                    color: Colors.white.withValues(alpha: 0.96),
+                    fontWeight: FontWeight.w600,
+                    height: 1.25,
+                  ),
+                ),
+              ),
+            ],
             const SizedBox(height: 8),
             Row(
               children: [
@@ -359,8 +503,8 @@ class MyActiveSosBanner extends StatelessWidget {
                     onPressed: isSubmitting ? null : onResolve,
                     child: Text(
                       isRo
-                          ? 'Sunt în siguranță (Oprește SOS)'
-                          : 'I am safe (Stop SOS)',
+                          ? 'Am rezolvat / Anulează SOS'
+                          : 'Resolved / Cancel SOS',
                       style: const TextStyle(fontWeight: FontWeight.w800),
                       overflow: TextOverflow.ellipsis,
                     ),
@@ -375,8 +519,9 @@ class MyActiveSosBanner extends StatelessWidget {
   }
 }
 
-/// High-priority red rescue banner displayed to nearby hikers within 5 km when
-/// another hiker triggers SOS, offering **„Vin să ajut”** + live DEM A* guidance.
+/// High-priority red rescue banner displayed to nearby hikers within 5 km (or
+/// over offline BLE mesh) when another hiker triggers SOS, offering
+/// **„Vin în ajutor”** + live DEM A* guidance.
 class NearbySosResponderBanner extends StatelessWidget {
   const NearbySosResponderBanner({
     super.key,
@@ -386,6 +531,7 @@ class NearbySosResponderBanner extends StatelessWidget {
     this.userHeadingDeg,
     required this.onRespondComing,
     required this.onCancelRespond,
+    this.isOnline = true,
     this.isSubmitting = false,
     this.isRo = true,
   });
@@ -396,26 +542,34 @@ class NearbySosResponderBanner extends StatelessWidget {
   final double? userHeadingDeg;
   final VoidCallback onRespondComing;
   final VoidCallback onCancelRespond;
+  final bool isOnline;
   final bool isSubmitting;
   final bool isRo;
 
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
-    final effectiveDistM = rescueRoute?.distanceM ?? directDistanceMeters;
+    final route = rescueRoute;
+    final effectiveDistM = route?.distanceM ?? directDistanceMeters;
     final distLabel = (effectiveDistM != null && effectiveDistM.isFinite)
         ? (effectiveDistM >= 1000
               ? '${(effectiveDistM / 1000.0).toStringAsFixed(2)} km'
               : '${effectiveDistM.round()} m')
         : null;
-    final etaMin = rescueRoute != null
-        ? math.max(1, (rescueRoute!.estimatedSeconds / 60.0).round())
+    final etaMin = route != null
+        ? math.max(1, (route.estimatedSeconds / 60.0).round())
         : null;
-    final climbM = rescueRoute?.ascentM.round();
+    final climbM = route?.ascentM.round();
 
     final who = sos.requesterName.trim().isNotEmpty
         ? '${sos.requesterName.trim()} · ${sos.reason.label(isRo: isRo)}'
         : sos.reason.label(isRo: isRo);
+
+    final hopLabel = (sos.viaBluetooth && sos.bleHopCount > 0)
+        ? (isRo
+              ? 'releu ${sos.bleHopCount} ${sos.bleHopCount == 1 ? 'salt' : 'salturi'}'
+              : '${sos.bleHopCount}-hop relay')
+        : null;
 
     return Card(
       key: const ValueKey('nearby-sos-responder-banner'),
@@ -431,7 +585,7 @@ class NearbySosResponderBanner extends StatelessWidget {
             Row(
               crossAxisAlignment: CrossAxisAlignment.center,
               children: [
-                if (sos.amResponding && rescueRoute != null)
+                if (sos.amResponding && route != null)
                   Container(
                     width: 40,
                     height: 40,
@@ -445,7 +599,7 @@ class NearbySosResponderBanner extends StatelessWidget {
                         angle:
                             shortestAngleDelta(
                               userHeadingDeg ?? 0.0,
-                              rescueRoute!.initialBearingDeg,
+                              route.initialBearingDeg,
                             ) *
                             math.pi /
                             180.0,
@@ -467,9 +621,13 @@ class NearbySosResponderBanner extends StatelessWidget {
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
                       Text(
-                        isRo
-                            ? '🆘 Ajutor solicitat în apropiere!'
-                            : '🆘 Nearby hiker needs help!',
+                        sos.viaBluetooth
+                            ? (isRo
+                                  ? '🆘 Alertă SOS în apropiere · prin Bluetooth'
+                                  : '🆘 Nearby SOS Alert · via Bluetooth')
+                            : (isRo
+                                  ? '🆘 Ajutor solicitat în apropiere!'
+                                  : '🆘 Nearby hiker needs help!'),
                         style: theme.textTheme.labelLarge?.copyWith(
                           color: Colors.white,
                           fontWeight: FontWeight.w800,
@@ -482,6 +640,7 @@ class NearbySosResponderBanner extends StatelessWidget {
                           if (distLabel != null) distLabel,
                           if (climbM != null && climbM > 0) '+$climbM m',
                           if (etaMin != null) '~$etaMin min',
+                          if (hopLabel != null) hopLabel,
                         ].join(' · '),
                         style: theme.textTheme.bodySmall?.copyWith(
                           color: Colors.white.withValues(alpha: 0.95),
@@ -505,10 +664,10 @@ class NearbySosResponderBanner extends StatelessWidget {
                 ),
               ),
             ],
-            if (sos.amResponding && rescueRoute != null) ...[
+            if (sos.amResponding && route != null) ...[
               const SizedBox(height: 4),
               Text(
-                '${rescueRoute!.instruction} · ${rescueRoute!.slopeAdvice}',
+                '${route.instruction} · ${route.slopeAdvice}',
                 maxLines: 2,
                 overflow: TextOverflow.ellipsis,
                 style: theme.textTheme.labelSmall?.copyWith(
@@ -532,7 +691,7 @@ class NearbySosResponderBanner extends StatelessWidget {
                       onPressed: isSubmitting ? null : onRespondComing,
                       icon: const Icon(Icons.directions_run, size: 18),
                       label: Text(
-                        isRo ? 'Vin să ajut' : 'I am coming to help',
+                        isRo ? 'Vin în ajutor' : 'I am coming to help',
                         style: const TextStyle(fontWeight: FontWeight.w800),
                       ),
                     ),
@@ -540,9 +699,13 @@ class NearbySosResponderBanner extends StatelessWidget {
                 else ...[
                   Expanded(
                     child: Text(
-                      isRo
-                          ? 'Rută DEM A* activă pe hartă (${sos.responderCount} salvatori)'
-                          : 'DEM A* rescue route active (${sos.responderCount} responders)',
+                      (!isOnline || sos.viaBluetooth)
+                          ? (isRo
+                                ? 'Rută de salvare offline activă pe hartă · confirmare trimisă prin Bluetooth'
+                                : 'Offline rescue route active · confirmation sent via Bluetooth')
+                          : (isRo
+                                ? 'Rută DEM A* activă pe hartă (${sos.effectiveResponderCount} salvatori)'
+                                : 'DEM A* rescue route active (${sos.effectiveResponderCount} responders)'),
                       style: theme.textTheme.labelSmall?.copyWith(
                         color: Colors.white.withValues(alpha: 0.92),
                       ),

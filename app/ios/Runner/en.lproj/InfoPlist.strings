@@ -1,3 +1,4 @@
+"NSBluetoothAlwaysUsageDescription" = "Wanderer uses Bluetooth to share your trail group position offline and relay SOS alerts when there is no mobile signal.";
 "NSCameraUsageDescription" = "Wanderer needs camera access so you can take a new profile photo.";
 "NSLocationAlwaysAndWhenInUseUsageDescription" = "Wanderer needs your location at all times to continue navigation when the screen locks.";
 "NSLocationWhenInUseUsageDescription" = "Your location is shown on the map to help you navigate trails.";

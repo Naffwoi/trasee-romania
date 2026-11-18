@@ -3,8 +3,10 @@
     import {
         getReportCategoryMeta,
         isReportVisibleOnMap,
+        type GroupMemberDto,
         type TrailReportDto,
     } from "#lib/live/live_client.ts";
+    import { getGroupMemberInitials } from "#lib/live/report_markers.ts";
     import type {
         EtaSnapshot,
         NavTrackPoint,
@@ -30,6 +32,15 @@
         onTogglePause?: () => void;
         onReverse?: () => void;
         onExit?: () => void;
+        offTrailMode?: "min-climb" | "shortest-safe";
+        onOffTrailModeChange?: (mode: "min-climb" | "shortest-safe") => void;
+        signalState?: "good" | "cooperative" | "degraded" | "coasting";
+        effectiveAccuracyM?: number | null;
+        isFarPreview?: boolean;
+        farFromTrailDistanceM?: number | null;
+        accessRouteActive?: boolean;
+        onRequestAccessRoute?: () => void;
+        groupMembers?: GroupMemberDto[];
     }
 
     let {
@@ -47,6 +58,15 @@
         onTogglePause,
         onReverse,
         onExit,
+        offTrailMode = "min-climb",
+        onOffTrailModeChange,
+        signalState = "good",
+        effectiveAccuracyM = null,
+        isFarPreview = false,
+        farFromTrailDistanceM = null,
+        accessRouteActive = false,
+        onRequestAccessRoute,
+        groupMembers = [],
     }: Props = $props();
 
     let chartZoom = $state<"2km" | "full">("2km");
@@ -74,6 +94,16 @@
         y: 0,
         visible: false,
     });
+    let groupPinsOverlay = $state<
+        Array<{
+            memberId: string;
+            x: number;
+            y: number;
+            initials: string;
+            label: string;
+            color: string;
+        }>
+    >([]);
 
     export function formatDuration(seconds?: number | null): string {
         if (seconds == null || !Number.isFinite(seconds) || seconds < 0) {
@@ -173,6 +203,52 @@
         return null;
     }
 
+    function resolveGroupMemberDistanceAlong(
+        member: GroupMemberDto,
+        pts: NavTrackPoint[],
+        isRev: boolean,
+        totalDist: number,
+    ): number | null {
+        if (
+            member.alongTrackM !== null &&
+            member.alongTrackM !== undefined &&
+            Number.isFinite(member.alongTrackM) &&
+            member.alongTrackM >= 0 &&
+            totalDist > 0
+        ) {
+            const d = isRev ? totalDist - member.alongTrackM : member.alongTrackM;
+            return Math.max(0, Math.min(totalDist, d));
+        }
+        if (
+            pts.length >= 2 &&
+            Number.isFinite(member.lat) &&
+            Number.isFinite(member.lon) &&
+            (member.lat !== 0 || member.lon !== 0)
+        ) {
+            let bestDistSq = Infinity;
+            let bestIdx = -1;
+            const cosLat = Math.cos((member.lat * Math.PI) / 180);
+            for (let i = 0; i < pts.length; i++) {
+                const dy = (pts[i].lat - member.lat) * 111132;
+                const dx = (pts[i].lon - member.lon) * 111132 * cosLat;
+                const d2 = dx * dx + dy * dy;
+                if (d2 < bestDistSq) {
+                    bestDistSq = d2;
+                    bestIdx = i;
+                }
+            }
+            if (bestIdx >= 0 && bestDistSq <= 300 * 300) {
+                return pts[bestIdx].distanceM;
+            }
+        }
+        return null;
+    }
+
+    function safeMemberColor(colorHex: string | undefined): string {
+        const cleaned = (colorHex ?? "").trim();
+        return /^#[0-9a-fA-F]{3,8}$/.test(cleaned) ? cleaned : "#242734";
+    }
+
     const isRescueMode = $derived(
         Boolean(rescueRoute && rescueRoute.points.length >= 2),
     );
@@ -215,6 +291,27 @@
     );
     const gradeSign = $derived(currentGradePct >= 0.5 ? "+" : "");
 
+    const showOffTrailStrip = $derived(reroute !== null && !isRescueMode);
+    const showFarPreviewStrip = $derived(
+        !showOffTrailStrip && isFarPreview && !isRescueMode,
+    );
+    const gpsStatusLabel = $derived.by(() => {
+        if (signalState === "coasting" || signalState === "degraded") {
+            return "GPS slab · estimat după ritm";
+        }
+        if (signalState === "cooperative") {
+            return effectiveAccuracyM !== null &&
+                Number.isFinite(effectiveAccuracyM) &&
+                effectiveAccuracyM > 0
+                ? `GPS grup · ±${Math.max(1, Math.round(effectiveAccuracyM))} m`
+                : "GPS grup";
+        }
+        return null;
+    });
+    const hasContextStrip = $derived(
+        showOffTrailStrip || showFarPreviewStrip || gpsStatusLabel !== null,
+    );
+
     $effect(() => {
         if (!chartWrapEl) return;
         const el = chartWrapEl;
@@ -244,6 +341,7 @@
         const alongM = rescueActive ? 0 : alongTrackMeters;
         const activeReroute = rescueActive ? null : reroute;
         const activeReports = reports;
+        const activeGroupMembers = groupMembers;
         const isRev = reversed;
         const zoom = chartZoom;
         const { width, height } = canvasSize;
@@ -253,6 +351,7 @@
         if (!canvas || !expanded) {
             markerOverlay = { x: 0, y: 0, visible: false };
             reportPinsOverlay = [];
+            groupPinsOverlay = [];
             rescueTargetOverlay = { x: 0, y: 0, visible: false };
             return;
         }
@@ -270,6 +369,7 @@
         if (pts.length < 2 || chartTotalDist <= 0) {
             markerOverlay = { x: 0, y: 0, visible: false };
             reportPinsOverlay = [];
+            groupPinsOverlay = [];
             rescueTargetOverlay = { x: 0, y: 0, visible: false };
             return;
         }
@@ -427,7 +527,7 @@
             ctx.restore();
         }
 
-        // 3. Off-trail dashed orange (#f97316) lead-in from user's elevation to rejoinEleM
+        // 3. Off-trail dashed warm amber (#b45309) lead-in from user's elevation to rejoinEleM
         if (activeReroute) {
             const clampedAlong = Math.max(minDistM, Math.min(maxDistM, alongM));
             const clampedRejoin = Math.max(minDistM, Math.min(maxDistM, activeReroute.rejoinAlongTrackM));
@@ -438,7 +538,7 @@
 
             ctx.save();
             ctx.setLineDash([6, 4]);
-            ctx.strokeStyle = "#f97316";
+            ctx.strokeStyle = "#b45309";
             ctx.lineWidth = 3;
             ctx.lineCap = "round";
             ctx.lineJoin = "round";
@@ -466,7 +566,7 @@
             // Rejoin ring
             ctx.beginPath();
             ctx.arc(endX, endY, 4.5, 0, Math.PI * 2);
-            ctx.fillStyle = "#f97316";
+            ctx.fillStyle = "#b45309";
             ctx.fill();
             ctx.strokeStyle = "#ffffff";
             ctx.lineWidth = 1.8;
@@ -520,6 +620,57 @@
             }
         }
         reportPinsOverlay = nextReportPins;
+
+        // 3b-group. Live Group Friends along the elevation profile
+        const nextGroupPins: Array<{
+            memberId: string;
+            x: number;
+            y: number;
+            initials: string;
+            label: string;
+            color: string;
+        }> = [];
+        if (!rescueActive && activeGroupMembers.length > 0) {
+            for (const member of activeGroupMembers) {
+                if (member.isSelf) continue;
+                const dAlong = resolveGroupMemberDistanceAlong(
+                    member,
+                    pts,
+                    isRev,
+                    chartTotalDist,
+                );
+                if (dAlong === null || dAlong < minDistM || dAlong > maxDistM) continue;
+                const gx = toX(dAlong);
+                const gEle = interpolateElevationAt(pts, dAlong);
+                const gy = toY(gEle);
+                const pinY = Math.max(11, gy - 14);
+                const color = safeMemberColor(member.colorHex);
+
+                ctx.save();
+                ctx.strokeStyle = color;
+                ctx.lineWidth = 1.4;
+                ctx.beginPath();
+                ctx.moveTo(gx, gy);
+                ctx.lineTo(gx, pinY + 6);
+                ctx.stroke();
+
+                ctx.beginPath();
+                ctx.arc(gx, gy, 3, 0, Math.PI * 2);
+                ctx.fillStyle = color;
+                ctx.fill();
+                ctx.restore();
+
+                nextGroupPins.push({
+                    memberId: member.memberId,
+                    x: gx,
+                    y: pinY,
+                    initials: getGroupMemberInitials(member.displayName),
+                    label: member.displayName,
+                    color,
+                });
+            }
+        }
+        groupPinsOverlay = nextGroupPins;
 
         // 3c. SOS target pin at end of rescue profile
         if (rescueActive) {
@@ -601,7 +752,108 @@
         </div>
     {/if}
 
-    <!-- Google Maps Bottom Trip Bar -->
+    <!-- Subtle Context Strip (Off-Trail Mode Toggle / Far Preview / GPS Fusion Status) -->
+    {#if hasContextStrip}
+        <div
+            class="px-3.5 py-1.5 border-b border-input-border/40 bg-content/[0.03] flex flex-wrap items-center justify-between gap-2"
+        >
+            {#if showOffTrailStrip && reroute !== null}
+                <div class="flex items-center gap-2 min-w-0">
+                    <span
+                        class="w-2 h-2 rounded-full bg-amber-600 dark:bg-amber-400 shrink-0"
+                        aria-hidden="true"
+                    ></span>
+                    <span class="text-xs font-semibold text-content/85 tabular-nums truncate">
+                        Abatere · +{Math.round(reroute.ascentM)} m
+                    </span>
+                </div>
+
+                <div class="flex items-center gap-1.5 flex-wrap">
+                    {#if gpsStatusLabel !== null}
+                        <span
+                            data-testid="nav-gps-status-pill"
+                            class="inline-flex items-center rounded-full bg-content/[0.07] text-content/75 px-2 py-0.5 text-[11px] font-semibold tabular-nums"
+                        >
+                            {gpsStatusLabel}
+                        </span>
+                    {/if}
+                    <div class="inline-flex rounded-full bg-content/[0.07] p-0.5 shrink-0">
+                        <button
+                            type="button"
+                            data-testid="offtrail-mode-min-climb"
+                            aria-pressed={offTrailMode === "min-climb"}
+                            onclick={() => onOffTrailModeChange?.("min-climb")}
+                            class={`px-2.5 py-0.5 rounded-full text-[11px] font-semibold cursor-pointer transition-colors ${
+                                offTrailMode === "min-climb"
+                                    ? "bg-[#242734] text-white shadow-sm"
+                                    : "text-content/70 hover:text-content"
+                            }`}
+                        >
+                            {$_("nav-min-climb", { default: "Urcare minimă" })}
+                        </button>
+                        <button
+                            type="button"
+                            data-testid="offtrail-mode-shortest-safe"
+                            aria-pressed={offTrailMode === "shortest-safe"}
+                            onclick={() => onOffTrailModeChange?.("shortest-safe")}
+                            class={`px-2.5 py-0.5 rounded-full text-[11px] font-semibold cursor-pointer transition-colors ${
+                                offTrailMode === "shortest-safe"
+                                    ? "bg-[#242734] text-white shadow-sm"
+                                    : "text-content/70 hover:text-content"
+                            }`}
+                        >
+                            {$_("nav-shortest-path", { default: "Drum scurt" })}
+                        </button>
+                    </div>
+                </div>
+            {:else if showFarPreviewStrip}
+                <div
+                    data-testid="nav-far-preview-strip"
+                    class="flex flex-1 flex-wrap items-center justify-between gap-2 min-w-0"
+                >
+                    <span class="text-xs font-medium text-content/80 tabular-nums">
+                        La {farFromTrailDistanceM !== null && Number.isFinite(farFromTrailDistanceM)
+                            ? formatDistance(Math.max(0, Math.round(farFromTrailDistanceM)), {
+                                  compact: true,
+                              })
+                            : "distanță"} de start · Mod previzualizare
+                    </span>
+
+                    <div class="flex items-center gap-1.5 shrink-0">
+                        {#if gpsStatusLabel !== null}
+                            <span
+                                data-testid="nav-gps-status-pill"
+                                class="inline-flex items-center rounded-full bg-content/[0.07] text-content/75 px-2 py-0.5 text-[11px] font-semibold tabular-nums"
+                            >
+                                {gpsStatusLabel}
+                            </span>
+                        {/if}
+                        <button
+                            type="button"
+                            data-testid="nav-access-route-btn"
+                            onclick={() => onRequestAccessRoute?.()}
+                            class={`px-2.5 py-1 rounded-full text-[11px] font-bold cursor-pointer transition-colors ${
+                                accessRouteActive
+                                    ? "bg-content/[0.12] text-content"
+                                    : "bg-[#242734] text-white hover:bg-[#242734]/90"
+                            }`}
+                        >
+                            {accessRouteActive ? "Ascunde ruta de acces" : "Rută de acces"}
+                        </button>
+                    </div>
+                </div>
+            {:else if gpsStatusLabel !== null}
+                <span
+                    data-testid="nav-gps-status-pill"
+                    class="inline-flex items-center rounded-full bg-content/[0.07] text-content/75 px-2.5 py-0.5 text-[11px] font-semibold tabular-nums"
+                >
+                    {gpsStatusLabel}
+                </span>
+            {/if}
+        </div>
+    {/if}
+
+    <!-- Unified Slate Bottom Trip Bar -->
     <div class="px-3.5 pt-2.5 pb-2.5 flex items-center justify-between gap-2">
         <div class="min-w-0 flex-1">
             <div class="flex items-baseline gap-2 flex-wrap">
@@ -615,7 +867,7 @@
                     class={`text-xl sm:text-2xl font-extrabold tracking-tight tabular-nums ${
                         isRescueMode
                             ? "text-red-600 dark:text-red-400"
-                            : "text-emerald-600 dark:text-emerald-400"
+                            : "text-content"
                     }`}
                 >
                     {formatDuration(remainingSeconds)}
@@ -663,7 +915,7 @@
                     : $_("nav-pause", { default: "Pause" })}
                 class={`w-9 h-9 rounded-full flex items-center justify-center text-sm cursor-pointer transition-colors ${
                     paused
-                        ? "bg-emerald-600 text-white hover:bg-emerald-700"
+                        ? "bg-[#242734] text-white hover:bg-[#242734]/90"
                         : "bg-content/[0.08] text-content hover:bg-secondary-hover"
                 }`}
             >
@@ -679,7 +931,7 @@
                 title={$_("nav-reverse-direction", { default: "Reverse direction" })}
                 class={`w-9 h-9 rounded-full flex items-center justify-center text-sm cursor-pointer transition-colors ${
                     reversed
-                        ? "bg-blue-600 text-white hover:bg-blue-700"
+                        ? "bg-[#242734] text-white hover:bg-[#242734]/90"
                         : "bg-content/[0.08] text-content hover:bg-secondary-hover"
                 }`}
             >
@@ -711,7 +963,7 @@
                 aria-label={$_("nav-exit", { default: "Exit" })}
                 title={$_("nav-exit", { default: "Exit" })}
                 onclick={() => (confirmingExit = true)}
-                class="w-9 h-9 rounded-full bg-red-600 hover:bg-red-700 text-white flex items-center justify-center text-sm font-bold cursor-pointer shadow-sm transition-colors"
+                class="w-9 h-9 rounded-full bg-content/[0.08] hover:bg-content/15 text-content/75 flex items-center justify-center text-sm font-bold cursor-pointer transition-colors"
             >
                 <i class="fa-solid fa-xmark" aria-hidden="true"></i>
             </button>
@@ -725,7 +977,7 @@
                 <div class="flex flex-wrap items-center gap-1.5 min-w-0">
                     <span
                         data-testid="nav-live-ele-grade"
-                        class="inline-flex items-center gap-1.5 rounded-full bg-blue-600/12 text-blue-700 dark:text-blue-300 px-2.5 py-0.5 text-xs font-bold tabular-nums"
+                        class="inline-flex items-center gap-1.5 rounded-full bg-content/[0.07] text-content px-2.5 py-0.5 text-xs font-bold tabular-nums"
                     >
                         <i class="fa-solid fa-mountain text-[10px]" aria-hidden="true"></i>
                         <span>
@@ -806,6 +1058,18 @@
                         style={`left: ${pin.x}px; top: ${pin.y}px; background: ${pin.color};`}
                     >
                         {pin.emoji}
+                    </div>
+                {/each}
+
+                {#each groupPinsOverlay as pin (pin.memberId)}
+                    <div
+                        data-testid="elevation-group-member"
+                        data-member-id={pin.memberId}
+                        title={pin.label}
+                        class="pointer-events-none absolute -translate-x-1/2 -translate-y-1/2 w-5 h-5 rounded-full flex items-center justify-center text-[9.5px] font-extrabold text-white leading-none shadow-sm"
+                        style={`left: ${pin.x}px; top: ${pin.y}px; background: ${pin.color}; border: 1.5px solid #ffffff;`}
+                    >
+                        {pin.initials}
                     </div>
                 {/each}
 

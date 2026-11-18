@@ -61,18 +61,24 @@ class SosFloatingButton extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final surface = Theme.of(context).colorScheme.surface;
+    final theme = Theme.of(context);
+    final surface = theme.colorScheme.surface.withValues(alpha: 0.94);
     return IconButton(
       key: const ValueKey('nav-sos-btn'),
       tooltip: isRo ? 'SOS Urgență' : 'SOS Emergency',
       onPressed: onPressed,
       icon: Icon(
         Icons.sos_rounded,
-        color: isActive ? Colors.white : const Color(0xFFDC2626),
-        size: 22,
+        color: isActive ? Colors.white : theme.colorScheme.onSurface,
+        size: 21,
       ),
       style: IconButton.styleFrom(
         backgroundColor: isActive ? const Color(0xFFDC2626) : surface,
+        side: BorderSide(
+          color: isActive
+              ? const Color(0xFFDC2626)
+              : theme.colorScheme.outline.withValues(alpha: 0.55),
+        ),
       ),
     );
   }

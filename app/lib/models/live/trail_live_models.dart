@@ -682,17 +682,242 @@ class TrailLiveSummary {
   };
 }
 
+class GroupMemberModel {
+  const GroupMemberModel({
+    required this.memberId,
+    required this.displayName,
+    this.colorHex = '#242734',
+    required this.lat,
+    required this.lon,
+    this.ele = 0.0,
+    this.accuracy = 15.0,
+    this.heading,
+    this.speed,
+    this.alongTrackM,
+    this.inNavigation = false,
+    this.isSelf = false,
+    this.updatedAt,
+  });
+
+  final String memberId;
+  final String displayName;
+  final String colorHex;
+  final double lat;
+  final double lon;
+  final double ele;
+  final double accuracy;
+  final double? heading;
+  final double? speed;
+  final double? alongTrackM;
+  final bool inNavigation;
+  final bool isSelf;
+  final DateTime? updatedAt;
+
+  String get initials {
+    final cleaned = displayName.trim();
+    if (cleaned.isEmpty) return 'DR';
+    final parts = cleaned
+        .split(RegExp(r'\s+'))
+        .where((s) => s.isNotEmpty)
+        .toList(growable: false);
+    if (parts.length >= 2) {
+      final a = String.fromCharCode(parts[0].runes.first).toUpperCase();
+      final b = String.fromCharCode(parts[1].runes.first).toUpperCase();
+      return '$a$b';
+    }
+    final runes = parts.first.runes.toList(growable: false);
+    if (runes.length >= 2) {
+      return String.fromCharCodes(runes.sublist(0, 2)).toUpperCase();
+    }
+    return String.fromCharCodes(runes).toUpperCase();
+  }
+
+  GroupMemberModel copyWith({
+    String? memberId,
+    String? displayName,
+    String? colorHex,
+    double? lat,
+    double? lon,
+    double? ele,
+    double? accuracy,
+    double? heading,
+    double? speed,
+    double? alongTrackM,
+    bool? inNavigation,
+    bool? isSelf,
+    DateTime? updatedAt,
+  }) {
+    return GroupMemberModel(
+      memberId: memberId ?? this.memberId,
+      displayName: displayName ?? this.displayName,
+      colorHex: colorHex ?? this.colorHex,
+      lat: lat ?? this.lat,
+      lon: lon ?? this.lon,
+      ele: ele ?? this.ele,
+      accuracy: accuracy ?? this.accuracy,
+      heading: heading ?? this.heading,
+      speed: speed ?? this.speed,
+      alongTrackM: alongTrackM ?? this.alongTrackM,
+      inNavigation: inNavigation ?? this.inNavigation,
+      isSelf: isSelf ?? this.isSelf,
+      updatedAt: updatedAt ?? this.updatedAt,
+    );
+  }
+
+  factory GroupMemberModel.fromJson(Map<String, dynamic> json) {
+    final rawAcc = _parseDouble(json['accuracy'], 15.0);
+    return GroupMemberModel(
+      memberId: (json['memberId'] ?? json['member_id'] ?? '').toString().trim(),
+      displayName:
+          _parseOptionalString(json['displayName'] ?? json['display_name']) ??
+          'Drumeț',
+      colorHex:
+          _parseOptionalString(json['colorHex'] ?? json['color_hex']) ??
+          '#242734',
+      lat: _parseDouble(json['lat']),
+      lon: _parseDouble(json['lon']),
+      ele: _parseDouble(json['ele']),
+      accuracy: rawAcc > 0.0 ? rawAcc : 15.0,
+      heading: _parseOptionalDouble(json['heading']),
+      speed: _parseOptionalDouble(json['speed']),
+      alongTrackM: _parseOptionalDouble(
+        json['alongTrackM'] ?? json['along_track_m'],
+      ),
+      inNavigation: _parseBool(
+        json['inNavigation'] ?? json['in_navigation'],
+        false,
+      ),
+      isSelf: _parseBool(json['isSelf'] ?? json['is_self'], false),
+      updatedAt: _parseOptionalDate(
+        json['updatedAt'] ??
+            json['updated_at'] ??
+            json['lastSeen'] ??
+            json['last_seen'],
+      ),
+    );
+  }
+
+  Map<String, dynamic> toJson() => <String, dynamic>{
+    'memberId': memberId,
+    'displayName': displayName,
+    'colorHex': colorHex,
+    'lat': lat,
+    'lon': lon,
+    'ele': ele,
+    'accuracy': accuracy,
+    'heading': heading,
+    'speed': speed,
+    'alongTrackM': alongTrackM,
+    'inNavigation': inNavigation,
+    'isSelf': isSelf,
+    'updatedAt': updatedAt?.toUtc().toIso8601String(),
+  };
+}
+
+class GroupSessionModel {
+  const GroupSessionModel({
+    required this.code,
+    this.trailId,
+    this.expiresAt,
+    required this.selfMemberId,
+    this.members = const [],
+  });
+
+  final String code;
+  final String? trailId;
+  final DateTime? expiresAt;
+  final String selfMemberId;
+  final List<GroupMemberModel> members;
+
+  List<GroupMemberModel> get peers => members
+      .where((m) => !m.isSelf && m.memberId != selfMemberId)
+      .toList(growable: false);
+
+  GroupSessionModel copyWith({
+    String? code,
+    String? trailId,
+    DateTime? expiresAt,
+    String? selfMemberId,
+    List<GroupMemberModel>? members,
+  }) {
+    return GroupSessionModel(
+      code: code ?? this.code,
+      trailId: trailId ?? this.trailId,
+      expiresAt: expiresAt ?? this.expiresAt,
+      selfMemberId: selfMemberId ?? this.selfMemberId,
+      members: members ?? this.members,
+    );
+  }
+
+  factory GroupSessionModel.fromJson(Map<String, dynamic> json) {
+    final source = json['group'] is Map
+        ? Map<String, dynamic>.from(json['group'] as Map)
+        : json;
+    final selfId =
+        (source['selfMemberId'] ?? source['self_member_id'] ?? '')
+            .toString()
+            .trim();
+    final rawMembers = source['members'];
+    final parsedMembers = <GroupMemberModel>[];
+    if (rawMembers is List) {
+      for (final item in rawMembers) {
+        if (item is Map) {
+          final member = GroupMemberModel.fromJson(
+            Map<String, dynamic>.from(item),
+          );
+          if (member.memberId.isNotEmpty) {
+            parsedMembers.add(
+              selfId.isNotEmpty && member.memberId == selfId
+                  ? member.copyWith(isSelf: true)
+                  : member,
+            );
+          }
+        }
+      }
+    }
+    return GroupSessionModel(
+      code: (source['code'] ?? source['groupCode'] ?? '')
+          .toString()
+          .trim()
+          .toUpperCase(),
+      trailId: _parseOptionalString(source['trailId'] ?? source['trail_id']),
+      expiresAt: _parseOptionalDate(
+        source['expiresAt'] ?? source['expires_at'],
+      ),
+      selfMemberId: selfId,
+      members: parsedMembers,
+    );
+  }
+
+  Map<String, dynamic> toJson() => <String, dynamic>{
+    'code': code,
+    'trailId': trailId,
+    'expiresAt': expiresAt?.toUtc().toIso8601String(),
+    'selfMemberId': selfMemberId,
+    'members': members.map((m) => m.toJson()).toList(growable: false),
+  };
+}
+
 class TrailLiveSseEvent {
   const TrailLiveSseEvent({
     required this.type,
     this.report,
     this.sos,
+    this.groupMember,
+    this.leftMemberId,
+    this.groupCode,
     this.raw = const {},
   });
+
+  static const String groupMemberUpdate = 'group_member_update';
+  static const String groupMemberLeft = 'group_member_left';
 
   final String type;
   final TrailReportModel? report;
   final SosAlertModel? sos;
+  final GroupMemberModel? groupMember;
+  final String? leftMemberId;
+  final String? groupCode;
   final Map<String, dynamic> raw;
 
   static TrailLiveSseEvent? tryParse({
@@ -712,6 +937,11 @@ class TrailLiveSseEvent {
 
       TrailReportModel? report;
       SosAlertModel? sos;
+      GroupMemberModel? groupMember;
+      String? leftMemberId;
+      final groupCode = _parseOptionalString(
+        map['groupCode'] ?? map['group_code'] ?? map['code'],
+      )?.toUpperCase();
 
       if (map['report'] is Map) {
         report = TrailReportModel.fromJson(
@@ -729,10 +959,27 @@ class TrailLiveSseEvent {
         sos = SosAlertModel.fromJson(map);
       }
 
+      if (effectiveType == groupMemberUpdate) {
+        final rawMember = map['member'] is Map
+            ? Map<String, dynamic>.from(map['member'] as Map)
+            : map;
+        final parsedMember = GroupMemberModel.fromJson(rawMember);
+        if (parsedMember.memberId.isNotEmpty) {
+          groupMember = parsedMember;
+        }
+      } else if (effectiveType == groupMemberLeft) {
+        leftMemberId = _parseOptionalString(
+          map['memberId'] ?? map['member_id'],
+        );
+      }
+
       return TrailLiveSseEvent(
         type: effectiveType,
         report: report,
         sos: sos,
+        groupMember: groupMember,
+        leftMemberId: leftMemberId,
+        groupCode: groupCode,
         raw: map,
       );
     } catch (_) {

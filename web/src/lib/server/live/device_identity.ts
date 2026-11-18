@@ -7,10 +7,15 @@ import { createHmac } from "node:crypto";
 export const FALLBACK_HMAC_SECRET = "wanderer-live-fallback";
 export const DEVICE_TOKEN_MIN_LENGTH = 24;
 export const DEVICE_TOKEN_MAX_LENGTH = 128;
+export const GROUP_CODE_RE = /^[A-HJ-NP-Z2-9]{6}$/;
 
 const ASCII_PRINTABLE_TOKEN_RE = /^[\x21-\x7E]+$/;
 const MAX_TRACKED_DEVICES = 10_000;
 const DEFAULT_UPSTREAM_TIMEOUT_MS = 15_000;
+
+export function isValidGroupCode(rawCode: unknown): rawCode is string {
+	return typeof rawCode === "string" && GROUP_CODE_RE.test(rawCode);
+}
 
 export class InvalidDeviceTokenError extends Error {
 	readonly status = 400;
@@ -231,6 +236,9 @@ export const liveRateLimiters = {
 	sosUpdate: createSlidingWindowRateLimiter(30, 60_000),
 	sosRespond: createSlidingWindowRateLimiter(30, 60_000),
 	pushSubscribe: createSlidingWindowRateLimiter(12, 5 * 60_000),
+	groupCreate: createSlidingWindowRateLimiter(10, 10 * 60_000),
+	groupJoin: createSlidingWindowRateLimiter(15, 5 * 60_000),
+	groupPing: createSlidingWindowRateLimiter(30, 60_000),
 };
 
 export function forwardLiveToDb(

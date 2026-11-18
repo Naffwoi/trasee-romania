@@ -7,6 +7,7 @@ import 'package:flutter_localizations/flutter_localizations.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:maplibre/maplibre.dart';
+import 'package:wanderer/components/navigation/group_sheet.dart';
 import 'package:wanderer/components/navigation/sos_banner_and_dialog.dart';
 import 'package:wanderer/components/navigation/waze_nearby_prompt.dart';
 import 'package:wanderer/components/navigation/waze_report_sheet.dart';
@@ -330,7 +331,7 @@ void main() {
       expect(offlineRescue!.ascentM, closeTo(80.0, 5.0));
       expect(offlineRescue.instruction, contains('Rescue route'));
 
-      // > 5 km off-trail (e.g. 270+ km away) returns O(1) direct geodesic guidance without thousands of DEM samples.
+      // > 3 km off-trail (e.g. 270+ km away) enters Calm Preview Mode (returns null with zero DEM samples).
       var farSamples = 0;
       final farReroute = OffTrailRouter.compute(
         userPos: const Geographic(lat: 47.1584, lon: 27.6014),
@@ -345,9 +346,8 @@ void main() {
           return 200.0;
         },
       );
-      expect(farReroute, isNotNull);
-      expect(farSamples, lessThanOrEqualTo(8));
-      expect(farReroute!.points, hasLength(2));
+      expect(farReroute, isNull);
+      expect(farSamples, 0);
     });
   });
 
@@ -534,5 +534,290 @@ void main() {
         expect(recordedVote, TrailReportVoteType.seasonalDry);
       },
     );
+
+    testWidgets(
+      'SosFloatingButton uses calm onSurface when inactive and red only when active, and LiveGroupSheet creates/leaves group',
+      (tester) async {
+        final sessionNotifier = ValueNotifier<GroupSessionModel?>(null);
+        var leftCalled = false;
+
+        await tester.pumpWidget(
+          MaterialApp(
+            home: Scaffold(
+              body: Builder(
+                builder: (ctx) => Column(
+                  children: [
+                    SosFloatingButton(isActive: false, onPressed: () {}),
+                    SosFloatingButton(
+                      key: const ValueKey('active-sos'),
+                      isActive: true,
+                      onPressed: () {},
+                    ),
+                    ElevatedButton(
+                      key: const ValueKey('open-group'),
+                      onPressed: () {
+                        showLiveGroupSheet(
+                          ctx,
+                          sessionListenable: sessionNotifier,
+                          initialDisplayName: 'Grigore',
+                          userAlongTrackM: 250.0,
+                          onCreateGroup: (name) async {
+                            final created = GroupSessionModel(
+                              code: 'K7M4P9',
+                              selfMemberId: 'mem_self_123',
+                              members: <GroupMemberModel>[
+                                GroupMemberModel(
+                                  memberId: 'mem_self_123',
+                                  displayName: name,
+                                  colorHex: '#242734',
+                                  lat: 45.44,
+                                  lon: 25.55,
+                                  accuracy: 8.0,
+                                  alongTrackM: 250.0,
+                                  isSelf: true,
+                                ),
+                                const GroupMemberModel(
+                                  memberId: 'mem_peer_456',
+                                  displayName: 'Diana Pop',
+                                  colorHex: '#0f766e',
+                                  lat: 45.441,
+                                  lon: 25.55,
+                                  accuracy: 6.0,
+                                  alongTrackM: 345.0,
+                                  isSelf: false,
+                                ),
+                              ],
+                            );
+                            sessionNotifier.value = created;
+                            return created;
+                          },
+                          onJoinGroup: (_, _) async => null,
+                          onLeaveGroup: () async {
+                            leftCalled = true;
+                            sessionNotifier.value = null;
+                          },
+                        );
+                      },
+                      child: const Text('Group'),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ),
+        );
+
+        final icons = tester
+            .widgetList<Icon>(find.byIcon(Icons.sos_rounded))
+            .toList();
+        expect(icons, hasLength(2));
+        expect(icons[0].color, isNot(equals(const Color(0xFFDC2626))));
+        expect(icons[1].color, Colors.white);
+
+        await tester.tap(find.byKey(const ValueKey('open-group')));
+        await tester.pumpAndSettle();
+
+        await tester.tap(find.byKey(const ValueKey('group-create-btn')));
+        await tester.pumpAndSettle();
+
+        expect(find.text('K7M4P9'), findsOneWidget);
+        expect(find.text('DP'), findsOneWidget);
+        expect(find.textContaining('+95 m în față'), findsOneWidget);
+
+        await tester.tap(find.byKey(const ValueKey('group-leave-btn')));
+        await tester.pumpAndSettle();
+        expect(leftCalled, isTrue);
+        sessionNotifier.dispose();
+      },
+    );
+  });
+
+  group('Live Group Models, Service & SSE Events', () {
+    test('creates, joins, pings, leaves group and parses group SSE events', () async {
+      const fixedToken =
+          'abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789';
+      final nowIso = DateTime.utc(2026, 11, 18, 12, 0).toIso8601String();
+      final expIso = DateTime.utc(2026, 11, 19, 0, 0).toIso8601String();
+
+      final sampleSessionJson = <String, Object?>{
+        'code': 'K7M4P9',
+        'trailId': 'trail_bucegi',
+        'expiresAt': expIso,
+        'selfMemberId': 'a1b2c3d4e5f6',
+        'members': <Object?>[
+          <String, Object?>{
+            'memberId': 'a1b2c3d4e5f6',
+            'displayName': 'Grigore',
+            'colorHex': '#242734',
+            'lat': 45.4400,
+            'lon': 25.5500,
+            'ele': 1320.0,
+            'accuracy': 12.0,
+            'alongTrackM': 180.0,
+            'inNavigation': true,
+            'isSelf': true,
+            'updatedAt': nowIso,
+          },
+          <String, Object?>{
+            'memberId': 'f6e5d4c3b2a1',
+            'displayName': 'Diana',
+            'colorHex': '#0f766e',
+            'lat': 45.4403,
+            'lon': 25.5501,
+            'ele': 1325.0,
+            'accuracy': 6.0,
+            'heading': 14.5,
+            'speed': 1.3,
+            'alongTrackM': 215.0,
+            'inNavigation': true,
+            'isSelf': false,
+            'updatedAt': nowIso,
+          },
+        ],
+      };
+
+      final adapter = _FakeLiveAdapter((options) async {
+        if (options.path == '/live/groups' && options.method == 'POST') {
+          return ResponseBody.fromString(
+            jsonEncode(sampleSessionJson),
+            200,
+            headers: <String, List<String>>{
+              Headers.contentTypeHeader: <String>[Headers.jsonContentType],
+            },
+          );
+        }
+        if (options.path == '/live/groups/K7M4P9' && options.method == 'GET') {
+          return ResponseBody.fromString(
+            jsonEncode(sampleSessionJson),
+            200,
+            headers: <String, List<String>>{
+              Headers.contentTypeHeader: <String>[Headers.jsonContentType],
+            },
+          );
+        }
+        if (options.path == '/live/groups/K7M4P9/join' &&
+            options.method == 'POST') {
+          return ResponseBody.fromString(
+            jsonEncode(sampleSessionJson),
+            200,
+            headers: <String, List<String>>{
+              Headers.contentTypeHeader: <String>[Headers.jsonContentType],
+            },
+          );
+        }
+        if (options.path == '/live/groups/K7M4P9/ping' &&
+            options.method == 'POST') {
+          return ResponseBody.fromString(
+            jsonEncode(<String, Object?>{
+              'code': 'K7M4P9',
+              'selfMemberId': 'a1b2c3d4e5f6',
+              'members': sampleSessionJson['members'],
+            }),
+            200,
+            headers: <String, List<String>>{
+              Headers.contentTypeHeader: <String>[Headers.jsonContentType],
+            },
+          );
+        }
+        if (options.path == '/live/groups/K7M4P9/leave' &&
+            options.method == 'POST') {
+          return ResponseBody.fromString(
+            jsonEncode(<String, Object?>{'ok': true}),
+            200,
+            headers: <String, List<String>>{
+              Headers.contentTypeHeader: <String>[Headers.jsonContentType],
+            },
+          );
+        }
+        if (options.path == '/live/stream') {
+          expect(options.queryParameters['groupCode'], 'K7M4P9');
+          final ssePayload =
+              'event: group_member_update\n'
+              'data: ${jsonEncode(<String, Object?>{
+                'memberId': 'f6e5d4c3b2a1',
+                'displayName': 'Diana',
+                'colorHex': '#0f766e',
+                'lat': 45.4410,
+                'lon': 25.5502,
+                'ele': 1330.0,
+                'accuracy': 5.5,
+                'alongTrackM': 260.0,
+                'inNavigation': true,
+                'isSelf': false,
+                'updatedAt': nowIso,
+              })}\n\n'
+              'event: group_member_left\n'
+              'data: ${jsonEncode(<String, Object?>{
+                'groupCode': 'K7M4P9',
+                'memberId': 'f6e5d4c3b2a1',
+              })}\n\n';
+          return ResponseBody(
+            Stream<Uint8List>.fromIterable(<Uint8List>[
+              Uint8List.fromList(utf8.encode(ssePayload)),
+            ]),
+            200,
+            headers: <String, List<String>>{
+              Headers.contentTypeHeader: <String>['text/event-stream'],
+            },
+          );
+        }
+        return ResponseBody.fromString('{}', 200);
+      });
+
+      final dio = Dio(BaseOptions(baseUrl: 'https://maps.skillfy.ro/api/v1'))
+        ..httpClientAdapter = adapter;
+      final service = TrailLiveService(
+        dio: dio,
+        tokenLoader: () async => fixedToken,
+      );
+
+      final created = await service.createGroup(
+        trailId: 'trail_bucegi',
+        displayName: 'Grigore',
+      );
+      expect(created.code, 'K7M4P9');
+      expect(created.selfMemberId, 'a1b2c3d4e5f6');
+      expect(created.members, hasLength(2));
+      expect(created.peers, hasLength(1));
+      expect(created.peers.first.displayName, 'Diana');
+      expect(created.peers.first.initials, 'DI');
+
+      final fetched = await service.getGroup('k7m4p9');
+      expect(fetched.code, 'K7M4P9');
+
+      final joined = await service.joinGroup(
+        code: 'k7m4p9',
+        displayName: 'Grigore',
+      );
+      expect(joined.members, hasLength(2));
+
+      final pinged = await service.pingGroup(
+        code: 'K7M4P9',
+        lat: 45.4405,
+        lon: 25.5500,
+        ele: 1322.0,
+        accuracy: 7.5,
+        alongTrackM: 195.0,
+      );
+      expect(pinged.peers, hasLength(1));
+
+      final events = await service
+          .connectStream(
+            lat: 45.4405,
+            lon: 25.5500,
+            trailId: 'trail_bucegi',
+            groupCode: 'k7m4p9',
+          )
+          .toList();
+      expect(events, hasLength(2));
+      expect(events[0].type, TrailLiveSseEvent.groupMemberUpdate);
+      expect(events[0].groupMember?.memberId, 'f6e5d4c3b2a1');
+      expect(events[0].groupMember?.accuracy, closeTo(5.5, 1e-6));
+      expect(events[1].type, TrailLiveSseEvent.groupMemberLeft);
+      expect(events[1].leftMemberId, 'f6e5d4c3b2a1');
+      expect(events[1].groupCode, 'K7M4P9');
+
+      await service.leaveGroup('K7M4P9');
+    });
   });
 }

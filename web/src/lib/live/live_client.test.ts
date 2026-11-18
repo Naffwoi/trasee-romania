@@ -1,27 +1,75 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+
+vi.mock("maplibre-gl", () => {
+	class MockPopup {
+		domContent: unknown = null;
+		setDOMContent(dom: unknown) {
+			this.domContent = dom;
+			return this;
+		}
+	}
+	class MockMarker {
+		element: unknown;
+		lngLat: [number, number] | null = null;
+		popup: MockPopup | null = null;
+		removed = false;
+		constructor(opts?: { element?: unknown }) {
+			this.element = opts?.element ?? null;
+		}
+		setLngLat(coords: [number, number]) {
+			this.lngLat = coords;
+			return this;
+		}
+		setPopup(popup: MockPopup) {
+			this.popup = popup;
+			return this;
+		}
+		addTo() {
+			return this;
+		}
+		remove() {
+			this.removed = true;
+		}
+	}
+	return { Marker: MockMarker, Popup: MockPopup };
+});
+
 import { computeDirectRescueRoute } from "#lib/navigation/off_trail_router.ts";
 import {
 	clearHeartbeat,
+	clearSavedGroupSession,
 	connectLiveStream,
+	createLiveGroup,
 	createReport,
+	fetchLiveGroup,
 	fetchTrailLiveSummary,
 	formatConfirmedAgo,
 	getOrCreateDeviceToken,
 	getReportCategoryMeta,
+	getSavedGroupSession,
+	GROUP_CODE_RE,
 	hasVotedOnReport,
 	isReportVisibleOnMap,
+	joinLiveGroup,
+	leaveLiveGroup,
+	mergeGroupMemberIntoList,
 	mergeReportIntoList,
 	mergeSosIntoList,
 	normalizeSosDto,
+	pingLiveGroup,
+	removeGroupMemberFromList,
 	REPORT_CATEGORIES,
 	respondToSos,
+	saveGroupSession,
 	sendHeartbeat,
 	subscribeWebPushIfSupported,
 	triggerSos,
 	updateSos,
 	urlBase64ToUint8Array,
 	voteReport,
+	type GroupMemberDto,
 } from "./live_client.ts";
+import { getGroupMemberInitials, syncGroupMapMarkers } from "./report_markers.ts";
 
 const BASE_LAT = 45.45;
 const BASE_LON = 25.55;
@@ -620,5 +668,439 @@ describe("live_client location-based summary & clearHeartbeat", () => {
 			url: "/api/v1/live/heartbeat",
 			method: "DELETE",
 		});
+	});
+});
+
+describe("live_client groups API, SSE group events, localStorage persistence, and syncGroupMapMarkers", () => {
+	const origWindow = globalThis.window;
+	const origDocument = globalThis.document;
+	const origFetch = globalThis.fetch;
+	const origES = globalThis.EventSource;
+	let store: Record<string, string> = {};
+
+	beforeEach(() => {
+		store = {};
+		clearSavedGroupSession();
+		(globalThis as Record<string, unknown>).window = {
+			localStorage: {
+				getItem: (k: string) => store[k] ?? null,
+				setItem: (k: string, v: string) => {
+					store[k] = v;
+				},
+				removeItem: (k: string) => {
+					delete store[k];
+				},
+			},
+		};
+	});
+
+	afterEach(() => {
+		clearSavedGroupSession();
+		(globalThis as Record<string, unknown>).window = origWindow;
+		(globalThis as Record<string, unknown>).document = origDocument;
+		globalThis.fetch = origFetch;
+		(globalThis as Record<string, unknown>).EventSource = origES;
+		vi.restoreAllMocks();
+	});
+
+	it("creates, joins, fetches, pings, and leaves live groups, enforces /^[A-HJ-NP-Z2-9]{6}$/, and persists saved session", async () => {
+		expect(GROUP_CODE_RE.source).toBe("^[A-HJ-NP-Z2-9]{6}$");
+
+		const calls: Array<{ url: string; method: string; body: unknown }> = [];
+		globalThis.fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+			const url = String(input);
+			calls.push({
+				url,
+				method: init?.method ?? "GET",
+				body: init?.body ? JSON.parse(String(init.body)) : null,
+			});
+
+			if (url === "/api/v1/live/groups" && init?.method === "POST") {
+				return new Response(
+					JSON.stringify({
+						code: "K7M9P2",
+						trailId: "trail-g1",
+						expiresAt: "2099-11-18T22:00:00Z",
+						selfMemberId: "self-hex-001",
+						members: [
+							{
+								memberId: "self-hex-001",
+								displayName: "Diana",
+								colorHex: "#242734",
+								lat: 45.45,
+								lon: 25.55,
+								ele: 1200,
+								accuracy: 6,
+								inNavigation: true,
+								isSelf: true,
+								updatedAt: "2026-11-18T10:00:00Z",
+							},
+						],
+					}),
+					{ status: 200, headers: { "content-type": "application/json" } },
+				);
+			}
+			if (url === "/api/v1/live/groups/K7M9P2/join" && init?.method === "POST") {
+				return new Response(
+					JSON.stringify({
+						code: "K7M9P2",
+						trailId: "trail-g1",
+						expiresAt: "2099-11-18T22:00:00Z",
+						selfMemberId: "self-hex-002",
+						members: [
+							{
+								memberId: "self-hex-001",
+								displayName: "Diana",
+								colorHex: "#242734",
+								lat: 45.45,
+								lon: 25.55,
+								ele: 1200,
+								accuracy: 6,
+								alongTrackM: 320,
+								inNavigation: true,
+								isSelf: false,
+								updatedAt: "2026-11-18T10:00:00Z",
+							},
+							{
+								memberId: "self-hex-002",
+								displayName: "Andrei",
+								colorHex: "#0f766e",
+								lat: 45.449,
+								lon: 25.549,
+								ele: 1190,
+								accuracy: 8.5,
+								alongTrackM: 225,
+								inNavigation: true,
+								isSelf: true,
+								updatedAt: "2026-11-18T10:01:00Z",
+							},
+						],
+					}),
+					{ status: 200, headers: { "content-type": "application/json" } },
+				);
+			}
+			if (url === "/api/v1/live/groups/K7M9P2" && (init?.method ?? "GET") === "GET") {
+				return new Response(
+					JSON.stringify({
+						code: "K7M9P2",
+						trailId: "trail-g1",
+						expiresAt: "2099-11-18T22:00:00Z",
+						selfMemberId: "self-hex-002",
+						members: [],
+					}),
+					{ status: 200, headers: { "content-type": "application/json" } },
+				);
+			}
+			if (url === "/api/v1/live/groups/K7M9P2/ping" && init?.method === "POST") {
+				return new Response(
+					JSON.stringify({
+						code: "K7M9P2",
+						selfMemberId: "self-hex-002",
+						members: [
+							{
+								memberId: "self-hex-002",
+								displayName: "Andrei",
+								colorHex: "#0f766e",
+								lat: 45.4505,
+								lon: 25.5502,
+								ele: 1204,
+								accuracy: 5.2,
+								heading: 42,
+								speed: 1.4,
+								alongTrackM: 310,
+								inNavigation: true,
+								isSelf: true,
+								updatedAt: "2026-11-18T10:02:00Z",
+							},
+						],
+					}),
+					{ status: 200, headers: { "content-type": "application/json" } },
+				);
+			}
+			if (url === "/api/v1/live/groups/K7M9P2/leave" && init?.method === "POST") {
+				return new Response(JSON.stringify({ ok: true }), {
+					status: 200,
+					headers: { "content-type": "application/json" },
+				});
+			}
+			return new Response("{}", { status: 404 });
+		}) as unknown as typeof fetch;
+
+		// Reject invalid group codes client-side without hitting network
+		expect(await fetchLiveGroup("AB01IO")).toBeNull();
+		expect(await joinLiveGroup("SHORT", { displayName: "Ana" })).toBeNull();
+		expect(await pingLiveGroup("123456", { lat: 45.4, lon: 25.5 })).toBeNull();
+		expect(await leaveLiveGroup("BAD_12")).toBe(false);
+		expect(calls).toHaveLength(0);
+
+		const created = await createLiveGroup({
+			displayName: "  Diana  ",
+			trailId: "trail-g1",
+			lat: 45.45,
+			lon: 25.55,
+			ele: 1200,
+			accuracy: 6,
+			inNavigation: true,
+		});
+		expect(created?.code).toBe("K7M9P2");
+		expect(created?.selfMemberId).toBe("self-hex-001");
+		expect(getSavedGroupSession("trail-g1")?.code).toBe("K7M9P2");
+		expect(getSavedGroupSession("different-trail")).toBeNull();
+
+		// Lowercase input code is normalized to uppercase K7M9P2
+		const joined = await joinLiveGroup("k7m9p2", {
+			displayName: "Andrei",
+			lat: 45.449,
+			lon: 25.549,
+			accuracy: 8.5,
+			alongTrackM: 225,
+			inNavigation: true,
+		});
+		expect(joined?.members).toHaveLength(2);
+		expect(joined?.selfMemberId).toBe("self-hex-002");
+
+		const fetched = await fetchLiveGroup("k7m9p2");
+		expect(fetched?.code).toBe("K7M9P2");
+
+		const pinged = await pingLiveGroup("K7M9P2", {
+			lat: 45.4505,
+			lon: 25.5502,
+			ele: 1204,
+			accuracy: 5.2,
+			heading: 42,
+			speed: 1.4,
+			alongTrackM: 310,
+			inNavigation: true,
+		});
+		expect(pinged?.members[0].accuracy).toBe(5.2);
+		expect(pinged?.members[0].alongTrackM).toBe(310);
+
+		// List merge & remove helpers + preserving isSelf for known selfMemberId
+		const mergedList = mergeGroupMemberIntoList(joined!.members, {
+			memberId: "self-hex-002",
+			displayName: "Andrei",
+			colorHex: "#0f766e",
+			lat: 45.451,
+			lon: 25.551,
+			ele: 1210,
+			accuracy: 4.8,
+			inNavigation: true,
+			isSelf: false, // SSE broadcast sends isSelf: false; client preserves true!
+			updatedAt: "2026-11-18T10:02:05Z",
+		});
+		expect(mergedList).toHaveLength(2);
+		expect(mergedList.find((m) => m.memberId === "self-hex-002")?.isSelf).toBe(true);
+
+		const afterRemove = removeGroupMemberFromList(mergedList, "self-hex-001");
+		expect(afterRemove.map((m) => m.memberId)).toEqual(["self-hex-002"]);
+
+		// Expired saved group session returns null
+		saveGroupSession({
+			code: "K7M9P2",
+			trailId: "trail-g1",
+			displayName: "Andrei",
+			expiresAt: "2020-01-01T00:00:00Z",
+		});
+		expect(getSavedGroupSession("trail-g1")).toBeNull();
+
+		saveGroupSession({
+			code: "K7M9P2",
+			trailId: "trail-g1",
+			displayName: "Andrei",
+			expiresAt: "2099-01-01T00:00:00Z",
+		});
+		expect(getSavedGroupSession("trail-g1")?.displayName).toBe("Andrei");
+
+		const left = await leaveLiveGroup("K7M9P2");
+		expect(left).toBe(true);
+		expect(getSavedGroupSession("trail-g1")).toBeNull();
+	});
+
+	it("streams groupCode via connectLiveStream, reconnects on updateGroupCode, and parses group_member_update & group_member_left", () => {
+		const instances: Array<{
+			url: string;
+			listeners: Record<string, EventListener>;
+			closed: boolean;
+		}> = [];
+
+		(globalThis as Record<string, unknown>).EventSource = class {
+			url: string;
+			listeners: Record<string, EventListener> = {};
+			onerror: (() => void) | null = null;
+			closed = false;
+			constructor(url: string) {
+				this.url = url;
+				instances.push(this);
+			}
+			addEventListener(type: string, fn: EventListener) {
+				this.listeners[type] = fn;
+			}
+			close() {
+				this.closed = true;
+			}
+		};
+
+		const memberUpdates: GroupMemberDto[] = [];
+		const memberLeftEvents: Array<{ groupCode: string; memberId: string }> = [];
+
+		const handle = connectLiveStream({
+			trailId: "trail-1",
+			lat: 45.45,
+			lon: 25.55,
+			groupCode: "k7m9p2",
+			callbacks: {
+				onGroupMemberUpdate: (m) => memberUpdates.push(m),
+				onGroupMemberLeft: (ev) => memberLeftEvents.push(ev),
+			},
+		});
+
+		expect(instances).toHaveLength(1);
+		expect(instances[0].url).toContain("groupCode=K7M9P2");
+
+		instances[0].listeners.group_member_update({
+			data: JSON.stringify({
+				memberId: "peer-diana",
+				displayName: "Diana",
+				colorHex: "#0f766e",
+				lat: 45.452,
+				lon: 25.553,
+				ele: 1230,
+				accuracy: 5.5,
+				alongTrackM: 415,
+				inNavigation: true,
+				isSelf: false,
+				updatedAt: "2026-11-18T10:03:00Z",
+			}),
+		} as unknown as Event);
+
+		instances[0].listeners.group_member_left({
+			data: JSON.stringify({
+				groupCode: "K7M9P2",
+				memberId: "peer-diana",
+			}),
+		} as unknown as Event);
+
+		expect(memberUpdates).toHaveLength(1);
+		expect(memberUpdates[0]).toMatchObject({
+			memberId: "peer-diana",
+			displayName: "Diana",
+			colorHex: "#0f766e",
+			accuracy: 5.5,
+			alongTrackM: 415,
+			isSelf: false,
+		});
+		expect(memberLeftEvents).toEqual([{ groupCode: "K7M9P2", memberId: "peer-diana" }]);
+
+		// No-op when same code passed
+		handle.updateGroupCode("K7M9P2");
+		expect(instances).toHaveLength(1);
+
+		// Reconnects cleanly when switching or clearing groupCode
+		handle.updateGroupCode("P9Q8R7");
+		expect(instances).toHaveLength(2);
+		expect(instances[0].closed).toBe(true);
+		expect(instances[1].url).toContain("groupCode=P9Q8R7");
+
+		handle.updateGroupCode(null);
+		expect(instances).toHaveLength(3);
+		expect(instances[2].url).not.toContain("groupCode=");
+
+		handle.close();
+		expect(instances[2].closed).toBe(true);
+	});
+
+	it("renders crisp 34x34 Slate/Brand circular avatar pills in syncGroupMapMarkers and skips self", () => {
+		class FakeElement {
+			tagName: string;
+			type = "";
+			textContent = "";
+			title = "";
+			style: { cssText: string } = { cssText: "" };
+			attrs: Record<string, string> = {};
+			children: FakeElement[] = [];
+			listeners: Record<string, Array<(ev: { stopPropagation: () => void }) => void>> = {};
+			constructor(tag: string) {
+				this.tagName = tag.toUpperCase();
+			}
+			setAttribute(k: string, v: string) {
+				this.attrs[k] = v;
+			}
+			getAttribute(k: string) {
+				return this.attrs[k] ?? null;
+			}
+			appendChild(child: FakeElement) {
+				this.children.push(child);
+				return child;
+			}
+			addEventListener(type: string, fn: (ev: { stopPropagation: () => void }) => void) {
+				(this.listeners[type] ??= []).push(fn);
+			}
+		}
+
+		(globalThis as Record<string, unknown>).document = {
+			createElement: (tag: string) => new FakeElement(tag),
+		};
+
+		expect(getGroupMemberInitials("Diana")).toBe("DI");
+		expect(getGroupMemberInitials("Andrei Popescu")).toBe("AP");
+
+		const clicked: string[] = [];
+		const prevMarker = { removed: false, remove() { this.removed = true; } };
+
+		const markers = syncGroupMapMarkers(
+			{} as never,
+			[prevMarker as never],
+			[
+				{
+					memberId: "self-1",
+					displayName: "Eu",
+					colorHex: "#242734",
+					lat: 45.45,
+					lon: 25.55,
+					ele: 1200,
+					accuracy: 6,
+					alongTrackM: 300,
+					inNavigation: true,
+					isSelf: true,
+					updatedAt: "2026-11-18T10:00:00Z",
+				},
+				{
+					memberId: "peer-diana",
+					displayName: "Diana",
+					colorHex: "",
+					lat: 45.451,
+					lon: 25.551,
+					ele: 1212,
+					accuracy: 6.2,
+					alongTrackM: 395,
+					inNavigation: true,
+					isSelf: false,
+					updatedAt: "2026-11-18T10:00:00Z",
+				},
+			],
+			{
+				selfAlongTrackM: 300,
+				onSelectMember: (m) => clicked.push(m.memberId),
+			},
+		);
+
+		expect(prevMarker.removed).toBe(true);
+		expect(markers).toHaveLength(1);
+
+		const markerAny = markers[0] as unknown as {
+			element: FakeElement;
+			lngLat: [number, number];
+		};
+		expect(markerAny.lngLat).toEqual([25.551, 45.451]);
+		expect(markerAny.element.getAttribute("data-testid")).toBe("group-member-marker");
+		expect(markerAny.element.textContent).toBe("DI");
+		expect(markerAny.element.style.cssText).toContain("width:34px");
+		expect(markerAny.element.style.cssText).toContain("height:34px");
+		expect(markerAny.element.style.cssText).toContain("#242734");
+		expect(markerAny.element.style.cssText).toContain("2px solid #ffffff");
+		expect(markerAny.element.title).toContain("+95 m");
+
+		markerAny.element.listeners.click?.[0]?.({ stopPropagation: () => {} });
+		expect(clicked).toEqual(["peer-diana"]);
 	});
 });

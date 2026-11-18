@@ -64,6 +64,50 @@ export interface TrailLiveSummaryDto {
 	sosAlerts: SosAlertDto[];
 }
 
+export interface GroupMemberDto {
+	memberId: string;
+	displayName: string;
+	colorHex: string;
+	lat: number;
+	lon: number;
+	ele: number;
+	accuracy: number;
+	heading?: number | null;
+	speed?: number | null;
+	alongTrackM?: number | null;
+	inNavigation: boolean;
+	isSelf: boolean;
+	updatedAt: string;
+}
+
+export interface GroupSessionDto {
+	code: string;
+	trailId: string;
+	expiresAt: string;
+	selfMemberId: string;
+	members: GroupMemberDto[];
+}
+
+export interface SavedGroupSession {
+	code: string;
+	trailId: string;
+	displayName: string;
+	selfMemberId: string;
+	expiresAt: string;
+}
+
+export const GROUP_CODE_RE = /^[A-HJ-NP-Z2-9]{6}$/;
+
+export function isValidGroupCode(raw: unknown): raw is string {
+	return typeof raw === "string" && GROUP_CODE_RE.test(raw);
+}
+
+export function normalizeGroupCode(raw: string | null | undefined): string | null {
+	if (typeof raw !== "string") return null;
+	const cleaned = raw.trim().toUpperCase();
+	return GROUP_CODE_RE.test(cleaned) ? cleaned : null;
+}
+
 export interface ReportCategoryMeta {
 	category: TrailReportCategory;
 	emoji: string;
@@ -203,11 +247,15 @@ export const SOS_REASON_META: Record<
 
 const DEVICE_TOKEN_KEY = "wanderer_device_token";
 const VOTED_REPORTS_KEY = "wanderer_voted_reports";
+const SAVED_GROUP_SESSION_KEY = "wanderer_live_group_session";
 
 let memoryDeviceToken: string | null = null;
 const memoryVotes = new Map<string, ReportVoteType>();
 const knownMySosIds = new Set<string>();
 const knownRespondingSosIds = new Set<string>();
+const knownSelfMemberByGroup = new Map<string, string>();
+let activeSelfMemberId: string | null = null;
+let memorySavedGroup: SavedGroupSession | null = null;
 
 function bytesToHex(bytes: Uint8Array): string {
 	let hex = "";
@@ -846,13 +894,430 @@ export function mergeSosIntoList(list: SosAlertDto[], incoming: SosAlertDto): So
 	return copy;
 }
 
+export function normalizeGroupMemberDto(
+	raw: Record<string, unknown>,
+	explicitSelfMemberId?: string | null,
+): GroupMemberDto | null {
+	if (!raw || typeof raw.memberId !== "string" || !raw.memberId.trim()) {
+		return null;
+	}
+	const memberId = raw.memberId.trim();
+	const isSelf =
+		explicitSelfMemberId !== undefined && explicitSelfMemberId !== null && explicitSelfMemberId !== ""
+			? Boolean(raw.isSelf) || memberId === explicitSelfMemberId
+			: Boolean(raw.isSelf) || (activeSelfMemberId !== null && memberId === activeSelfMemberId);
+
+	const colorRaw = typeof raw.colorHex === "string" ? raw.colorHex.trim() : "";
+	const colorHex = /^#[0-9a-fA-F]{3,8}$/.test(colorRaw) ? colorRaw : "#242734";
+
+	const optNum = (v: unknown): number | null =>
+		v !== null && v !== undefined && Number.isFinite(Number(v)) ? Number(v) : null;
+
+	return {
+		memberId,
+		displayName: String(raw.displayName ?? "").trim() || "Drumeț",
+		colorHex,
+		lat: Number(raw.lat ?? 0),
+		lon: Number(raw.lon ?? 0),
+		ele: Number(raw.ele ?? 0),
+		accuracy: Math.max(0, Number(raw.accuracy ?? 0)),
+		heading: optNum(raw.heading),
+		speed: optNum(raw.speed),
+		alongTrackM: optNum(raw.alongTrackM),
+		inNavigation: Boolean(raw.inNavigation),
+		isSelf,
+		updatedAt: String(raw.updatedAt ?? ""),
+	};
+}
+
+export function normalizeGroupSessionDto(
+	raw: Record<string, unknown>,
+	fallbackCode = "",
+): GroupSessionDto | null {
+	if (!raw || typeof raw !== "object") return null;
+	const code = normalizeGroupCode(String(raw.code ?? fallbackCode));
+	if (!code) return null;
+
+	const selfMemberId =
+		typeof raw.selfMemberId === "string" && raw.selfMemberId.trim()
+			? raw.selfMemberId.trim()
+			: knownSelfMemberByGroup.get(code) ?? "";
+	if (selfMemberId) {
+		knownSelfMemberByGroup.set(code, selfMemberId);
+		activeSelfMemberId = selfMemberId;
+	}
+
+	const rawMembers = Array.isArray(raw.members) ? raw.members : [];
+	const members = rawMembers
+		.map((item) => normalizeGroupMemberDto(item as Record<string, unknown>, selfMemberId))
+		.filter((item): item is GroupMemberDto => item !== null);
+
+	return {
+		code,
+		trailId: String(raw.trailId ?? ""),
+		expiresAt: String(raw.expiresAt ?? ""),
+		selfMemberId,
+		members,
+	};
+}
+
+export function saveGroupSession(session: {
+	code: string;
+	trailId?: string;
+	displayName?: string;
+	selfMemberId?: string;
+	expiresAt?: string;
+}): void {
+	const code = normalizeGroupCode(session.code);
+	if (!code) return;
+
+	const selfMemberId =
+		session.selfMemberId?.trim() || knownSelfMemberByGroup.get(code) || "";
+	if (selfMemberId) {
+		knownSelfMemberByGroup.set(code, selfMemberId);
+		activeSelfMemberId = selfMemberId;
+	}
+
+	const entry: SavedGroupSession = {
+		code,
+		trailId: (session.trailId ?? memorySavedGroup?.trailId ?? "").trim(),
+		displayName: (session.displayName ?? memorySavedGroup?.displayName ?? "").trim().slice(0, 24),
+		selfMemberId,
+		expiresAt: (session.expiresAt ?? memorySavedGroup?.expiresAt ?? "").trim(),
+	};
+	memorySavedGroup = entry;
+
+	if (typeof window !== "undefined") {
+		try {
+			window.localStorage.setItem(SAVED_GROUP_SESSION_KEY, JSON.stringify(entry));
+		} catch {
+			// Ignore storage quota errors
+		}
+	}
+}
+
+export function clearSavedGroupSession(code?: string): void {
+	const normCode = code ? normalizeGroupCode(code) : null;
+	if (normCode) {
+		knownSelfMemberByGroup.delete(normCode);
+		if (memorySavedGroup && memorySavedGroup.code === normCode) {
+			if (activeSelfMemberId === memorySavedGroup.selfMemberId) {
+				activeSelfMemberId = null;
+			}
+			memorySavedGroup = null;
+		}
+	} else {
+		knownSelfMemberByGroup.clear();
+		activeSelfMemberId = null;
+		memorySavedGroup = null;
+	}
+
+	if (typeof window !== "undefined") {
+		try {
+			if (!normCode) {
+				window.localStorage.removeItem(SAVED_GROUP_SESSION_KEY);
+			} else {
+				const raw = window.localStorage.getItem(SAVED_GROUP_SESSION_KEY);
+				if (raw) {
+					const parsed = JSON.parse(raw) as Partial<SavedGroupSession>;
+					if (!parsed?.code || normalizeGroupCode(parsed.code) === normCode) {
+						window.localStorage.removeItem(SAVED_GROUP_SESSION_KEY);
+					}
+				}
+			}
+		} catch {
+			// Ignore malformed storage
+		}
+	}
+}
+
+export function getSavedGroupSession(trailId?: string): SavedGroupSession | null {
+	let candidate: SavedGroupSession | null = memorySavedGroup;
+	if (typeof window !== "undefined") {
+		try {
+			const raw = window.localStorage.getItem(SAVED_GROUP_SESSION_KEY);
+			if (raw) {
+				const parsed = JSON.parse(raw) as Partial<SavedGroupSession>;
+				const code = normalizeGroupCode(parsed?.code);
+				if (code) {
+					candidate = {
+						code,
+						trailId: String(parsed?.trailId ?? ""),
+						displayName: String(parsed?.displayName ?? ""),
+						selfMemberId: String(parsed?.selfMemberId ?? ""),
+						expiresAt: String(parsed?.expiresAt ?? ""),
+					};
+				} else {
+					candidate = null;
+				}
+			}
+		} catch {
+			// Fall back to in-memory candidate
+		}
+	}
+
+	if (!candidate) return null;
+
+	if (candidate.expiresAt) {
+		const expMs = Date.parse(candidate.expiresAt);
+		if (Number.isFinite(expMs) && expMs <= Date.now()) {
+			clearSavedGroupSession(candidate.code);
+			return null;
+		}
+	}
+
+	const expectedTrail = trailId?.trim() ?? "";
+	if (expectedTrail && candidate.trailId && candidate.trailId !== expectedTrail) {
+		return null;
+	}
+
+	if (candidate.selfMemberId) {
+		knownSelfMemberByGroup.set(candidate.code, candidate.selfMemberId);
+		activeSelfMemberId = candidate.selfMemberId;
+	}
+	memorySavedGroup = candidate;
+	return candidate;
+}
+
+export async function createLiveGroup(params: {
+	displayName: string;
+	trailId?: string;
+	lat?: number | null;
+	lon?: number | null;
+	ele?: number | null;
+	accuracy?: number | null;
+	alongTrackM?: number | null;
+	inNavigation?: boolean;
+}): Promise<GroupSessionDto | null> {
+	const displayName = (params.displayName ?? "").trim().slice(0, 24);
+	if (!displayName) return null;
+
+	const body: Record<string, unknown> = {
+		displayName,
+		trailId: params.trailId ?? "",
+	};
+	if (
+		typeof params.lat === "number" &&
+		Number.isFinite(params.lat) &&
+		typeof params.lon === "number" &&
+		Number.isFinite(params.lon)
+	) {
+		body.lat = params.lat;
+		body.lon = params.lon;
+	}
+	if (typeof params.ele === "number" && Number.isFinite(params.ele)) {
+		body.ele = params.ele;
+	}
+	if (typeof params.accuracy === "number" && Number.isFinite(params.accuracy)) {
+		body.accuracy = params.accuracy;
+	}
+	if (typeof params.alongTrackM === "number" && Number.isFinite(params.alongTrackM)) {
+		body.alongTrackM = params.alongTrackM;
+	}
+	if (typeof params.inNavigation === "boolean") {
+		body.inNavigation = params.inNavigation;
+	}
+
+	const data = await liveJsonFetch<Record<string, unknown>>("/api/v1/live/groups", {
+		method: "POST",
+		body: JSON.stringify(body),
+	});
+	if (!data) return null;
+
+	const normalized = normalizeGroupSessionDto(data);
+	if (normalized) {
+		saveGroupSession({
+			code: normalized.code,
+			trailId: normalized.trailId || params.trailId || "",
+			displayName,
+			selfMemberId: normalized.selfMemberId,
+			expiresAt: normalized.expiresAt,
+		});
+	}
+	return normalized;
+}
+
+export async function fetchLiveGroup(code: string): Promise<GroupSessionDto | null> {
+	const normCode = normalizeGroupCode(code);
+	if (!normCode) return null;
+
+	const data = await liveJsonFetch<Record<string, unknown>>(
+		`/api/v1/live/groups/${encodeURIComponent(normCode)}`,
+		{ method: "GET" },
+	);
+	if (!data) return null;
+	return normalizeGroupSessionDto(data, normCode);
+}
+
+export async function joinLiveGroup(
+	code: string,
+	params: {
+		displayName: string;
+		trailId?: string;
+		lat?: number | null;
+		lon?: number | null;
+		ele?: number | null;
+		accuracy?: number | null;
+		alongTrackM?: number | null;
+		inNavigation?: boolean;
+	},
+): Promise<GroupSessionDto | null> {
+	const normCode = normalizeGroupCode(code);
+	const displayName = (params.displayName ?? "").trim().slice(0, 24);
+	if (!normCode || !displayName) return null;
+
+	const body: Record<string, unknown> = { displayName };
+	if (
+		typeof params.lat === "number" &&
+		Number.isFinite(params.lat) &&
+		typeof params.lon === "number" &&
+		Number.isFinite(params.lon)
+	) {
+		body.lat = params.lat;
+		body.lon = params.lon;
+	}
+	if (typeof params.ele === "number" && Number.isFinite(params.ele)) {
+		body.ele = params.ele;
+	}
+	if (typeof params.accuracy === "number" && Number.isFinite(params.accuracy)) {
+		body.accuracy = params.accuracy;
+	}
+	if (typeof params.alongTrackM === "number" && Number.isFinite(params.alongTrackM)) {
+		body.alongTrackM = params.alongTrackM;
+	}
+	if (typeof params.inNavigation === "boolean") {
+		body.inNavigation = params.inNavigation;
+	}
+
+	const data = await liveJsonFetch<Record<string, unknown>>(
+		`/api/v1/live/groups/${encodeURIComponent(normCode)}/join`,
+		{
+			method: "POST",
+			body: JSON.stringify(body),
+		},
+	);
+	if (!data) return null;
+
+	const normalized = normalizeGroupSessionDto(data, normCode);
+	if (normalized) {
+		saveGroupSession({
+			code: normalized.code,
+			trailId: normalized.trailId || params.trailId || "",
+			displayName,
+			selfMemberId: normalized.selfMemberId,
+			expiresAt: normalized.expiresAt,
+		});
+	}
+	return normalized;
+}
+
+export async function pingLiveGroup(
+	code: string,
+	params: {
+		lat: number;
+		lon: number;
+		ele?: number | null;
+		accuracy?: number | null;
+		heading?: number | null;
+		speed?: number | null;
+		alongTrackM?: number | null;
+		inNavigation?: boolean;
+	},
+): Promise<GroupSessionDto | null> {
+	const normCode = normalizeGroupCode(code);
+	if (!normCode || !Number.isFinite(params.lat) || !Number.isFinite(params.lon)) {
+		return null;
+	}
+
+	const body: Record<string, unknown> = {
+		lat: params.lat,
+		lon: params.lon,
+		inNavigation: Boolean(params.inNavigation),
+	};
+	if (typeof params.ele === "number" && Number.isFinite(params.ele)) {
+		body.ele = params.ele;
+	}
+	if (typeof params.accuracy === "number" && Number.isFinite(params.accuracy)) {
+		body.accuracy = params.accuracy;
+	}
+	if (typeof params.heading === "number" && Number.isFinite(params.heading)) {
+		body.heading = params.heading;
+	}
+	if (typeof params.speed === "number" && Number.isFinite(params.speed)) {
+		body.speed = params.speed;
+	}
+	if (typeof params.alongTrackM === "number" && Number.isFinite(params.alongTrackM)) {
+		body.alongTrackM = params.alongTrackM;
+	}
+
+	const data = await liveJsonFetch<Record<string, unknown>>(
+		`/api/v1/live/groups/${encodeURIComponent(normCode)}/ping`,
+		{
+			method: "POST",
+			body: JSON.stringify(body),
+		},
+	);
+	if (!data) return null;
+	return normalizeGroupSessionDto(data, normCode);
+}
+
+export async function leaveLiveGroup(code: string): Promise<boolean> {
+	const normCode = normalizeGroupCode(code);
+	if (!normCode) return false;
+
+	const data = await liveJsonFetch<Record<string, unknown>>(
+		`/api/v1/live/groups/${encodeURIComponent(normCode)}/leave`,
+		{
+			method: "POST",
+			body: JSON.stringify({}),
+		},
+	);
+	clearSavedGroupSession(normCode);
+	return data !== null;
+}
+
+export function mergeGroupMemberIntoList(
+	list: readonly GroupMemberDto[],
+	incoming: GroupMemberDto,
+): GroupMemberDto[] {
+	if (!incoming || !incoming.memberId) {
+		return list.slice();
+	}
+	const isKnownSelf =
+		incoming.isSelf ||
+		(activeSelfMemberId !== null && incoming.memberId === activeSelfMemberId);
+	const normalized =
+		isKnownSelf !== incoming.isSelf ? { ...incoming, isSelf: isKnownSelf } : incoming;
+
+	const idx = list.findIndex((m) => m.memberId === normalized.memberId);
+	if (idx === -1) {
+		return [...list, normalized];
+	}
+	const copy = list.slice();
+	copy[idx] = normalized;
+	return copy;
+}
+
+export function removeGroupMemberFromList(
+	list: readonly GroupMemberDto[],
+	memberId: string,
+): GroupMemberDto[] {
+	if (!memberId) return list.slice();
+	const idx = list.findIndex((m) => m.memberId === memberId);
+	if (idx === -1) return list.slice();
+	return list.filter((m) => m.memberId !== memberId);
+}
+
 export interface LiveStreamCallbacks {
 	onReportUpdate?: (report: TrailReportDto) => void;
 	onSosUpdate?: (sos: SosAlertDto) => void;
+	onGroupMemberUpdate?: (member: GroupMemberDto) => void;
+	onGroupMemberLeft?: (payload: { groupCode: string; memberId: string }) => void;
 }
 
 export interface LiveStreamHandle {
 	updateCoords: (lat: number, lon: number) => void;
+	updateGroupCode: (code: string | null) => void;
 	close: () => void;
 }
 
@@ -863,6 +1328,7 @@ export function connectLiveStream(params: {
 	trailId?: string;
 	lat?: number | null;
 	lon?: number | null;
+	groupCode?: string | null;
 	callbacks: LiveStreamCallbacks;
 }): LiveStreamHandle {
 	let closed = false;
@@ -871,6 +1337,7 @@ export function connectLiveStream(params: {
 	let backoffMs = 2000;
 	let curLat = params.lat ?? null;
 	let curLon = params.lon ?? null;
+	let curGroupCode: string | null = normalizeGroupCode(params.groupCode);
 	let openedLat = curLat;
 	let openedLon = curLon;
 
@@ -909,6 +1376,41 @@ export function connectLiveStream(params: {
 		}
 	};
 
+	const handleRawGroupMemberUpdate = (e: MessageEvent) => {
+		backoffMs = 2000;
+		try {
+			const parsed = JSON.parse(e.data) as Record<string, unknown>;
+			const selfForGroup = curGroupCode
+				? knownSelfMemberByGroup.get(curGroupCode) ?? activeSelfMemberId
+				: activeSelfMemberId;
+			const member = normalizeGroupMemberDto(
+				(parsed.member ?? parsed) as Record<string, unknown>,
+				selfForGroup,
+			);
+			if (member) {
+				params.callbacks.onGroupMemberUpdate?.(member);
+			}
+		} catch {
+			// Ignore malformed SSE frame
+		}
+	};
+
+	const handleRawGroupMemberLeft = (e: MessageEvent) => {
+		backoffMs = 2000;
+		try {
+			const parsed = JSON.parse(e.data) as Record<string, unknown>;
+			const memberId = typeof parsed.memberId === "string" ? parsed.memberId.trim() : "";
+			const groupCode =
+				normalizeGroupCode(String(parsed.groupCode ?? curGroupCode ?? "")) ??
+				String(parsed.groupCode ?? curGroupCode ?? "");
+			if (memberId) {
+				params.callbacks.onGroupMemberLeft?.({ groupCode, memberId });
+			}
+		} catch {
+			// Ignore malformed SSE frame
+		}
+	};
+
 	const handleGenericMessage = (e: MessageEvent) => {
 		backoffMs = 2000;
 		try {
@@ -922,6 +1424,10 @@ export function connectLiveStream(params: {
 			} else if (type === "sos_update" || type === "sos_alert") {
 				const sos = normalizeSosDto((parsed.sos ?? parsed) as Record<string, unknown>);
 				if (sos) params.callbacks.onSosUpdate?.(sos);
+			} else if (type === "group_member_update") {
+				handleRawGroupMemberUpdate(e);
+			} else if (type === "group_member_left") {
+				handleRawGroupMemberLeft(e);
 			}
 		} catch {
 			// Ignore keepalive or non-JSON frames
@@ -941,6 +1447,7 @@ export function connectLiveStream(params: {
 		if (params.trailId) qs.set("trailId", params.trailId);
 		if (curLat !== null && Number.isFinite(curLat)) qs.set("lat", curLat.toFixed(6));
 		if (curLon !== null && Number.isFinite(curLon)) qs.set("lon", curLon.toFixed(6));
+		if (curGroupCode) qs.set("groupCode", curGroupCode);
 		qs.set("deviceToken", getOrCreateDeviceToken());
 
 		openedLat = curLat;
@@ -956,6 +1463,8 @@ export function connectLiveStream(params: {
 			source.addEventListener("report_change", handleRawReportEvent as EventListener);
 			source.addEventListener("sos_update", handleRawSosEvent as EventListener);
 			source.addEventListener("sos_alert", handleRawSosEvent as EventListener);
+			source.addEventListener("group_member_update", handleRawGroupMemberUpdate as EventListener);
+			source.addEventListener("group_member_left", handleRawGroupMemberLeft as EventListener);
 			source.addEventListener("message", handleGenericMessage as EventListener);
 			source.onerror = () => {
 				try {
@@ -995,6 +1504,15 @@ export function connectLiveStream(params: {
 			const dLat = (lat - openedLat) * 111_132;
 			const dLon = (lon - openedLon) * 111_132 * Math.cos((lat * Math.PI) / 180);
 			if (Math.hypot(dLat, dLon) > 1200) {
+				open();
+			}
+		},
+		updateGroupCode(code: string | null) {
+			const next = normalizeGroupCode(code);
+			if (next === curGroupCode) return;
+			curGroupCode = next;
+			backoffMs = 2000;
+			if (!closed) {
 				open();
 			}
 		},

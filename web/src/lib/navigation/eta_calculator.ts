@@ -119,6 +119,10 @@ export class EtaCalculator {
 	private lastAnchorAlongM: number | null = null;
 	private lastAnchorTsMs: number | null = null;
 
+	getPaceFactor(): number {
+		return this.paceFactor;
+	}
+
 	constructor(points: NavTrackPoint[], options?: EtaCalculatorOptions) {
 		this.points = points;
 		const isCycling = options?.isCycling ?? false;

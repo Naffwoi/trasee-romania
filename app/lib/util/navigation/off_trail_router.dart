@@ -1,7 +1,10 @@
+import 'dart:convert';
 import 'dart:math' as math;
 import 'dart:typed_data';
 
+import 'package:dio/dio.dart';
 import 'package:maplibre/maplibre.dart';
+import 'package:wanderer/util/geo/polyline.dart';
 import 'package:wanderer/util/navigation/eta_calculator.dart';
 
 enum OffTrailMode { minClimb, shortestSafe }
@@ -80,6 +83,22 @@ class _RejoinCandidate {
   final double goalPenalty;
 }
 
+class _ProjectedObstacle {
+  const _ProjectedObstacle({
+    required this.pts,
+    required this.minX,
+    required this.maxX,
+    required this.minY,
+    required this.maxY,
+  });
+
+  final List<({double x, double y})> pts;
+  final double minX;
+  final double maxX;
+  final double minY;
+  final double maxY;
+}
+
 class _IntMinHeap {
   final List<int> _heap = [];
   final Float64List _priority;
@@ -139,13 +158,20 @@ class _IntMinHeap {
 }
 
 /// Computes a terrain-aware 16-neighbor Multi-Target A* off-trail recovery
-/// path back to the trail using DEM elevation tiles (with IDW fallback).
+/// path back to the trail using DEM elevation tiles (with IDW fallback),
+/// Chaikin curved corner-cutting, forward-only rejoin selection, and optional
+/// online Valhalla OSM hybrid routing.
 class OffTrailRouter {
   const OffTrailRouter._();
+
+  /// Beyond 3 km from the trail, automatic off-trail rerouting is suppressed
+  /// (Calm Preview Mode).
+  static const double farPreviewThresholdMeters = 3000.0;
 
   /// Slope ratio corresponding to `atan(0.75) ~= 36.87°` cliff hazard barrier.
   static const double cliffSlopeRatioThreshold = 0.75;
   static const double _steepSlopeRatioThreshold = 0.50;
+  static const double _obstacleHaloMeters = 8.0;
   static const int _maxGridDim = 180;
 
   static const List<(int dc, int dr)> _neighbors16 = [
@@ -176,10 +202,15 @@ class OffTrailRouter {
     OffTrailMode mode = OffTrailMode.minClimb,
     String localeCode = 'ro',
     bool isCycling = false,
+    List<List<Geographic>> obstacles = const [],
   }) {
-    if (trailPoints.length < 2) return null;
+    if (trailPoints.length < 2 ||
+        !userPos.lat.isFinite ||
+        !userPos.lon.isFinite) {
+      return null;
+    }
 
-    final mPerDegLat = 111320.0;
+    const mPerDegLat = 111320.0;
     final mPerDegLon =
         111320.0 * math.max(0.1, math.cos(userPos.lat * math.pi / 180.0));
 
@@ -188,23 +219,13 @@ class OffTrailRouter {
     double toLat(double y) => userPos.lat + y / mPerDegLat;
     double toLon(double x) => userPos.lon + x / mPerDegLon;
 
-    final etaCalc = EtaCalculator.fromPoints(trailPoints, isCycling: isCycling);
-    final totalDistM = etaCalc.totalDistanceM;
-    final totalBaseSec = etaCalc.baseSecondsAt(totalDistM);
-
-    // 1. Collect rejoin candidates in [lastAlongTrackM - 150, lastAlongTrackM + 1500]
-    //    plus the global nearest point on the trail.
-    final windowMin = math.max(0.0, lastAlongTrackM - 150.0);
-    final windowMax = math.min(totalDistM, lastAlongTrackM + 1500.0);
-
+    // 1. Find global nearest cross-track distance first so > 3000 m Preview
+    //    Mode exits immediately with zero DEM sampling.
     var nearestLat = trailPoints.first.lat;
     var nearestLon = trailPoints.first.lon;
     var nearestEle = trailPoints.first.ele;
     var nearestAlongM = trailPoints.first.distanceM;
     var nearestDistSq = double.infinity;
-
-    final denseSamples =
-        <({double lat, double lon, double ele, double alongTrackM})>[];
 
     for (var i = 0; i < trailPoints.length - 1; i++) {
       final a = trailPoints[i];
@@ -231,9 +252,38 @@ class OffTrailRouter {
         nearestEle = a.ele + tProj * (b.ele - a.ele);
         nearestAlongM = a.distanceM + tProj * segLen;
       }
+    }
 
+    final nearestCrossM = SphericalGreatCircle(
+      userPos,
+    ).distanceTo(Geographic(lat: nearestLat, lon: nearestLon));
+    if (!nearestCrossM.isFinite || nearestCrossM > farPreviewThresholdMeters) {
+      return null;
+    }
+
+    final etaCalc = EtaCalculator.fromPoints(trailPoints, isCycling: isCycling);
+    final totalDistM = etaCalc.totalDistanceM;
+    final totalBaseSec = etaCalc.baseSecondsAt(totalDistM);
+
+    // 2. Sample rejoin candidates strictly forward in:
+    //    [max(0, lastAlongTrackM - 10), min(totalDistM, max(nearestAlongM, lastAlongTrackM) + max(600, 3 * nearestCrossM))]
+    final clampedLastAlong = lastAlongTrackM.clamp(0.0, totalDistM);
+    final windowMin = math.max(0.0, clampedLastAlong - 10.0);
+    final windowMax = math.min(
+      totalDistM,
+      math.max(nearestAlongM, clampedLastAlong) +
+          math.max(600.0, 3.0 * nearestCrossM),
+    );
+
+    final denseSamples =
+        <({double lat, double lon, double ele, double alongTrackM})>[];
+
+    for (var i = 0; i < trailPoints.length - 1; i++) {
+      final a = trailPoints[i];
+      final b = trailPoints[i + 1];
       if (b.distanceM < windowMin || a.distanceM > windowMax) continue;
-      final steps = math.max(1, (segLen / 40.0).ceil());
+      final segLen = math.max(0.0, b.distanceM - a.distanceM);
+      final steps = math.max(1, (segLen / 35.0).ceil());
       for (var s = 0; s < steps; s++) {
         final t = s / steps;
         final dAlong = a.distanceM + t * segLen;
@@ -257,20 +307,23 @@ class OffTrailRouter {
       ));
     }
 
-    // Subsample candidates to <= 35 while always preserving the global nearest
-    // point and window ends.
     final candidates = <_RejoinCandidate>[];
     void addCandidate(double lat, double lon, double ele, double alongM) {
-      final remSec = math.max(0.0, totalBaseSec - etaCalc.baseSecondsAt(alongM));
+      final safeAlong = math.max(windowMin, alongM.clamp(0.0, totalDistM));
+      final remSec = math.max(
+        0.0,
+        totalBaseSec - etaCalc.baseSecondsAt(safeAlong),
+      );
+      final remDist = math.max(0.0, totalDistM - safeAlong);
       final goalPenalty = mode == OffTrailMode.minClimb
-          ? 0.30 * remSec
-          : 0.05 * math.max(0.0, totalDistM - alongM);
+          ? 1.0 * remSec
+          : 0.92 * remDist;
       candidates.add(
         _RejoinCandidate(
           lat: lat,
           lon: lon,
           ele: ele,
-          alongTrackM: alongM,
+          alongTrackM: safeAlong,
           x: toX(lon),
           y: toY(lat),
           goalPenalty: goalPenalty,
@@ -278,10 +331,19 @@ class OffTrailRouter {
       );
     }
 
-    addCandidate(nearestLat, nearestLon, nearestEle, nearestAlongM);
+    if (nearestAlongM >= windowMin) {
+      addCandidate(nearestLat, nearestLon, nearestEle, nearestAlongM);
+    } else {
+      final floorPt = _interpolateTrailAt(trailPoints, windowMin);
+      addCandidate(floorPt.lat, floorPt.lon, floorPt.ele, windowMin);
+    }
+
     if (denseSamples.isNotEmpty) {
       const maxWindowCandidates = 34;
-      final stride = math.max(1, (denseSamples.length / maxWindowCandidates).ceil());
+      final stride = math.max(
+        1,
+        (denseSamples.length / maxWindowCandidates).ceil(),
+      );
       for (var i = 0; i < denseSamples.length; i += stride) {
         final pt = denseSamples[i];
         addCandidate(pt.lat, pt.lon, pt.ele, pt.alongTrackM);
@@ -321,7 +383,7 @@ class OffTrailRouter {
       return denSum > 0.0 ? numSum / denSum : 0.0;
     }
 
-    // 2. Bounding box & adaptive grid sizing (cellSize 15m..35m, max 180x180).
+    // 3. Bounding box & adaptive grid sizing (cellSize 15m..35m, max 180x180).
     var minX = 0.0;
     var maxX = 0.0;
     var minY = 0.0;
@@ -333,64 +395,7 @@ class OffTrailRouter {
       if (c.y > maxY) maxY = c.y;
     }
 
-    final nearestDistM = math.sqrt(nearestDistSq);
-    if (nearestDistM > 5000.0) {
-      final startEle = (userEleM != null && userEleM.isFinite)
-          ? userEleM
-          : sampleWithFallback(userPos.lat, userPos.lon);
-      final endEle = nearestEle.isFinite
-          ? nearestEle
-          : sampleWithFallback(nearestLat, nearestLon);
-      final dEle = endEle - startEle;
-      final slopeRatio = nearestDistM > 0.1 ? dEle / nearestDistM : 0.0;
-      final gradePct = slopeRatio * 100.0;
-      final maxSlopeDeg = math.atan(slopeRatio.abs()) * 180.0 / math.pi;
-      final vMs = 0.6 * toblerSpeedKmh(slopeRatio, isCycling: isCycling) / 3.6;
-      final estSec = (nearestDistM / math.max(0.15, vMs)).round();
-      final bearingDeg = bearingDegrees(
-        userPos.lat,
-        userPos.lon,
-        nearestLat,
-        nearestLon,
-      );
-      final isRo = localeCode.toLowerCase().startsWith('ro');
-      final cardinal = cardinalDirection(bearingDeg, localeCode: localeCode);
-      final distText = '${(nearestDistM / 1000.0).toStringAsFixed(1)} km';
-      return OffTrailRerouteResult(
-        mode: mode,
-        points: <OffTrailPoint>[
-          OffTrailPoint(
-            lat: userPos.lat,
-            lon: userPos.lon,
-            ele: startEle,
-            distanceM: 0.0,
-            gradePct: gradePct,
-          ),
-          OffTrailPoint(
-            lat: nearestLat,
-            lon: nearestLon,
-            ele: endEle,
-            distanceM: nearestDistM,
-            gradePct: gradePct,
-          ),
-        ],
-        rejoinPoint: Geographic(lat: nearestLat, lon: nearestLon),
-        rejoinAlongTrackM: nearestAlongM,
-        rejoinEleM: endEle,
-        distanceM: nearestDistM,
-        estimatedSeconds: estSec,
-        ascentM: math.max(0.0, dEle),
-        descentM: math.max(0.0, -dEle),
-        maxSlopeDeg: maxSlopeDeg,
-        avoidedSteepHazard: false,
-        initialBearingDeg: bearingDeg,
-        instruction: isRo
-            ? 'Îndreaptă-te spre $cardinal ($distText până la potecă)'
-            : 'Head $cardinal ($distText to trail)',
-        slopeAdvice: isRo ? 'Departe de traseu' : 'Far from trail',
-      );
-    }
-    final padM = math.max(250.0, 0.45 * nearestDistM);
+    final padM = math.max(250.0, 0.45 * nearestCrossM);
     minX -= padM;
     maxX += padM;
     minY -= padM;
@@ -417,6 +422,63 @@ class OffTrailRouter {
     final startRow = yToRow(0.0);
     final startIdx = startRow * cols + startCol;
 
+    // Optional obstacle rasterization (building/water polygons + 8m halo).
+    final projectedObstacles = <_ProjectedObstacle>[];
+    for (final poly in obstacles) {
+      if (poly.length < 3) continue;
+      var oMinX = double.infinity;
+      var oMaxX = double.negativeInfinity;
+      var oMinY = double.infinity;
+      var oMaxY = double.negativeInfinity;
+      final xyPts = <({double x, double y})>[];
+      for (final g in poly) {
+        final px = toX(g.lon);
+        final py = toY(g.lat);
+        xyPts.add((x: px, y: py));
+        if (px < oMinX) oMinX = px;
+        if (px > oMaxX) oMaxX = px;
+        if (py < oMinY) oMinY = py;
+        if (py > oMaxY) oMaxY = py;
+      }
+      if (oMaxX + _obstacleHaloMeters < minX ||
+          oMinX - _obstacleHaloMeters > maxX ||
+          oMaxY + _obstacleHaloMeters < minY ||
+          oMinY - _obstacleHaloMeters > maxY) {
+        continue;
+      }
+      projectedObstacles.add(
+        _ProjectedObstacle(
+          pts: xyPts,
+          minX: oMinX - _obstacleHaloMeters,
+          maxX: oMaxX + _obstacleHaloMeters,
+          minY: oMinY - _obstacleHaloMeters,
+          maxY: oMaxY + _obstacleHaloMeters,
+        ),
+      );
+    }
+
+    Uint8List? blockedMask;
+    if (projectedObstacles.isNotEmpty) {
+      blockedMask = Uint8List(totalCells);
+      for (final obs in projectedObstacles) {
+        final c0 = xToCol(obs.minX);
+        final c1 = xToCol(obs.maxX);
+        final r0 = yToRow(obs.minY);
+        final r1 = yToRow(obs.maxY);
+        for (var r = r0; r <= r1; r++) {
+          final cy = rowToY(r);
+          for (var c = c0; c <= c1; c++) {
+            final idx = r * cols + c;
+            if (idx == startIdx) continue; // never trap start cell
+            final cx = colToX(c);
+            if (_pointHitsObstacle(cx, cy, obs)) {
+              blockedMask[idx] = 1;
+            }
+          }
+        }
+      }
+    }
+
     // Cache cell elevations lazily.
     final eleGrid = Float64List(totalCells);
     for (var i = 0; i < totalCells; i++) {
@@ -439,6 +501,7 @@ class OffTrailRouter {
       final gc = xToCol(c.x);
       final gr = yToRow(c.y);
       final gIdx = gr * cols + gc;
+      if (blockedMask != null && blockedMask[gIdx] != 0) continue;
       final prev = goalByCell[gIdx];
       if (prev == null || c.goalPenalty < prev.goalPenalty) {
         goalByCell[gIdx] = c;
@@ -455,8 +518,9 @@ class OffTrailRouter {
 
     final maxOffTrailSpeedMs =
         0.6 * (isCycling ? 32.0 : 7.5) / 3.6; // fastest possible Tobler off-trail
-    final minCostPerMeter =
-        mode == OffTrailMode.minClimb ? (1.0 / maxOffTrailSpeedMs) : 1.0;
+    final minCostPerMeter = mode == OffTrailMode.minClimb
+        ? (1.0 / maxOffTrailSpeedMs)
+        : 1.0;
 
     double heuristic(int col, int row) {
       final cx = colToX(col);
@@ -486,7 +550,8 @@ class OffTrailRouter {
                 ? 4.0
                 : 1.0);
 
-      // For knight moves, ensure the move does not tunnel across a 1-cell cliff.
+      // For knight moves, ensure the move does not tunnel across a 1-cell cliff
+      // or blocked obstacle cell.
       final dc = c1 - c0;
       final dr = r1 - r0;
       if (dc.abs() + dr.abs() == 3) {
@@ -494,6 +559,11 @@ class OffTrailRouter {
         final midR1 = r0 + (dr.abs() == 2 ? dr.sign : 0);
         final midC2 = c0 + dc.sign;
         final midR2 = r0 + dr.sign;
+        if (blockedMask != null &&
+            (blockedMask[midR1 * cols + midC1] != 0 ||
+                blockedMask[midR2 * cols + midC2] != 0)) {
+          return double.infinity;
+        }
         final halfDist = distM * 0.5;
         final sMid1 = ((cellEle(midC1, midR1) - e0) / halfDist).abs();
         final sMid2 = ((cellEle(midC2, midR2) - e0) / halfDist).abs();
@@ -514,7 +584,7 @@ class OffTrailRouter {
       }
     }
 
-    // 3. Run Multi-Target A*.
+    // 4. Run Multi-Target A*.
     final gScore = Float64List(totalCells);
     final fScore = Float64List(totalCells);
     final cameFrom = Int32List(totalCells);
@@ -556,9 +626,12 @@ class OffTrailRouter {
         if (nc < 0 || nc >= cols || nr < 0 || nr >= rows) continue;
         final nIdx = nr * cols + nc;
         if (closed[nIdx] != 0) continue;
+        if (blockedMask != null && blockedMask[nIdx] != 0) continue;
 
         final stepDist = math.sqrt(dc * dc + dr * dr) * cellSize;
-        final tentativeG = gScore[curr] + edgeCost(cc, cr, nc, nr, stepDist);
+        final stepCost = edgeCost(cc, cr, nc, nr, stepDist);
+        if (!stepCost.isFinite) continue;
+        final tentativeG = gScore[curr] + stepCost;
         if (tentativeG < gScore[nIdx]) {
           cameFrom[nIdx] = curr;
           gScore[nIdx] = tentativeG;
@@ -568,7 +641,6 @@ class OffTrailRouter {
       }
     }
 
-    // Fallback to nearest candidate if start already equals target or A* failed.
     final chosenTarget = goalByCell[bestGoalIdx] ?? candidates.first;
     final rawCoords = <({double x, double y})>[];
     if (bestGoalIdx != -1) {
@@ -593,16 +665,46 @@ class OffTrailRouter {
       if (rawCoords.length == 1) {
         rawCoords.add((x: chosenTarget.x, y: chosenTarget.y));
       } else {
-        rawCoords[rawCoords.length - 1] = (x: chosenTarget.x, y: chosenTarget.y);
+        rawCoords[rawCoords.length - 1] = (
+          x: chosenTarget.x,
+          y: chosenTarget.y,
+        );
       }
     }
 
-    // 4. Safe string-pulling smoothing (never cuts across >36.8° cliffs or adds climb).
-    final smoothedCoords = _smoothPathSafely(
+    // 5. Safe string-pulling + optional tangent approach + 2 passes of
+    //    slope- & obstacle-safe Chaikin corner-cutting (0.75 / 0.25).
+    var smoothedCoords = _smoothPathSafely(
       rawCoords,
       cellSize: cellSize,
       mode: mode,
       eleAtXY: (x, y) => sampleWithFallback(toLat(y), toLon(x)),
+      obstacles: projectedObstacles,
+    );
+
+    if (smoothedCoords.length == 2) {
+      final tangentInserted = _maybeInsertTangentControlPoint(
+        smoothedCoords.first,
+        smoothedCoords.last,
+        trailPoints: trailPoints,
+        rejoinAlongM: chosenTarget.alongTrackM,
+        toX: toX,
+        toY: toY,
+        stepM: math.max(8.0, cellSize * 0.5),
+        eleAtXY: (x, y) => sampleWithFallback(toLat(y), toLon(x)),
+        obstacles: projectedObstacles,
+      );
+      if (tangentInserted != null) {
+        smoothedCoords = tangentInserted;
+      }
+    }
+
+    final curvedCoords = _chaikinSmoothSafely(
+      smoothedCoords,
+      passes: 2,
+      stepM: math.max(6.0, cellSize * 0.4),
+      eleAtXY: (x, y) => sampleWithFallback(toLat(y), toLon(x)),
+      obstacles: projectedObstacles,
     );
 
     // Check whether the direct straight-line chord to the nearest trail point
@@ -620,7 +722,379 @@ class OffTrailRouter {
       eleAtXY: (x, y) => sampleWithFallback(toLat(y), toLon(x)),
     );
 
-    // 5. Build final OffTrailPoint list & route summary metrics.
+    // 6. Build final OffTrailPoint list & route summary metrics.
+    final geos = <Geographic>[
+      for (var i = 0; i < curvedCoords.length; i++)
+        i == 0
+            ? userPos
+            : (i == curvedCoords.length - 1
+                  ? Geographic(lat: chosenTarget.lat, lon: chosenTarget.lon)
+                  : Geographic(
+                      lat: toLat(curvedCoords[i].y),
+                      lon: toLon(curvedCoords[i].x),
+                    )),
+    ];
+
+    return _buildResultFromGeographics(
+      geos: geos,
+      mode: mode,
+      rejoinPoint: Geographic(lat: chosenTarget.lat, lon: chosenTarget.lon),
+      rejoinAlongTrackM: chosenTarget.alongTrackM,
+      userEleM: userEleM,
+      sampler: sampler,
+      fallbackSampler: sampleWithFallback,
+      localeCode: localeCode,
+      isCycling: isCycling,
+      directHitCliff: directHitCliff,
+    );
+  }
+
+  /// Queries `/valhalla/route` via [dio] toward the optimal forward rejoin
+  /// candidate on [trailPoints], decoding the precision-6 OSM polyline and
+  /// stitching local curved DEM connectors whenever start or end gaps exceed
+  /// `25 m`. Gracefully falls back to [OffTrailRouter.compute] when offline or
+  /// on any network/server failure. Returns `null` in `> 3000 m` Preview Mode.
+  static Future<OffTrailRerouteResult?> computeHybridWithValhalla({
+    required Dio? dio,
+    required Geographic userPos,
+    double? userEleM,
+    required List<NavTrackPoint> trailPoints,
+    required double lastAlongTrackM,
+    required ElevationSampler sampler,
+    OffTrailMode mode = OffTrailMode.minClimb,
+    String localeCode = 'ro',
+    bool isCycling = false,
+    List<List<Geographic>> obstacles = const [],
+    CancelToken? cancelToken,
+  }) async {
+    final localResult = compute(
+      userPos: userPos,
+      userEleM: userEleM,
+      trailPoints: trailPoints,
+      lastAlongTrackM: lastAlongTrackM,
+      sampler: sampler,
+      mode: mode,
+      localeCode: localeCode,
+      isCycling: isCycling,
+      obstacles: obstacles,
+    );
+    if (localResult == null || dio == null) {
+      return localResult;
+    }
+
+    final host = Uri.tryParse(dio.options.baseUrl)?.host ?? '';
+    if (host.contains('unconfigured')) {
+      return localResult;
+    }
+
+    try {
+      final target = localResult.rejoinPoint;
+      final costing = isCycling ? 'bicycle' : 'pedestrian';
+      final useHills = mode == OffTrailMode.minClimb ? 0.15 : 0.75;
+      final costingOptions = isCycling
+          ? <String, Object>{
+              'use_hills': useHills,
+              'bicycle_type': 'Mountain',
+            }
+          : <String, Object>{
+              'use_hills': useHills,
+              'walkway_factor': 0.85,
+              'max_hiking_difficulty': 3,
+            };
+
+      final response = await dio.post<Object?>(
+        '/valhalla/route',
+        data: <String, Object?>{
+          'directions_type': 'none',
+          'language': localeCode.toLowerCase().startsWith('ro')
+              ? 'ro-RO'
+              : 'en-US',
+          'locations': <Map<String, double>>[
+            <String, double>{'lat': userPos.lat, 'lon': userPos.lon},
+            <String, double>{'lat': target.lat, 'lon': target.lon},
+          ],
+          'costing': costing,
+          'costing_options': <String, Object>{costing: costingOptions},
+        },
+        cancelToken: cancelToken,
+        options: Options(
+          sendTimeout: const Duration(seconds: 5),
+          receiveTimeout: const Duration(seconds: 6),
+        ),
+      );
+
+      final body = _decodeResponseMap(response.data);
+      final trip = body['trip'];
+      final legs = trip is Map ? trip['legs'] : null;
+      final firstLeg = (legs is List && legs.isNotEmpty) ? legs.first : null;
+      final shape = firstLeg is Map ? firstLeg['shape'] : null;
+      if (shape is! String || shape.isEmpty) {
+        return localResult;
+      }
+
+      final valhallaPts = PolylineUtil.decode(shape, precision: 6);
+      if (valhallaPts.length < 2) {
+        return localResult;
+      }
+
+      final stitched = <Geographic>[];
+      final startGapM = SphericalGreatCircle(
+        userPos,
+      ).distanceTo(valhallaPts.first);
+      if (startGapM > 25.0) {
+        final headConn = computeDirectRescueRoute(
+          userPos: userPos,
+          userEleM: userEleM,
+          targetPos: valhallaPts.first,
+          referencePoints: trailPoints,
+          sampler: sampler,
+          mode: mode,
+          localeCode: localeCode,
+          isCycling: isCycling,
+        );
+        if (headConn != null && headConn.points.length >= 2) {
+          for (var i = 0; i < headConn.points.length - 1; i++) {
+            stitched.add(headConn.points[i].geographic);
+          }
+        } else {
+          stitched.add(userPos);
+        }
+      } else if (startGapM > 0.5) {
+        stitched.add(userPos);
+      }
+
+      stitched.addAll(valhallaPts);
+
+      final endGapM = SphericalGreatCircle(
+        valhallaPts.last,
+      ).distanceTo(target);
+      if (endGapM > 25.0) {
+        final tailConn = computeDirectRescueRoute(
+          userPos: valhallaPts.last,
+          targetPos: target,
+          targetEleM: localResult.rejoinEleM,
+          referencePoints: trailPoints,
+          sampler: sampler,
+          mode: mode,
+          localeCode: localeCode,
+          isCycling: isCycling,
+        );
+        if (tailConn != null && tailConn.points.length >= 2) {
+          for (var i = 1; i < tailConn.points.length; i++) {
+            stitched.add(tailConn.points[i].geographic);
+          }
+        } else {
+          stitched.add(target);
+        }
+      } else if (endGapM > 0.5) {
+        stitched.add(target);
+      }
+
+      if (stitched.length < 2) {
+        return localResult;
+      }
+
+      final summary = trip is Map ? trip['summary'] : null;
+      final valhallaTimeSec = summary is Map
+          ? (summary['time'] as num?)?.toDouble()
+          : null;
+
+      const mPerDegLat = 111320.0;
+      final mPerDegLon =
+          111320.0 * math.max(0.1, math.cos(userPos.lat * math.pi / 180.0));
+      double toX(double lon) => (lon - userPos.lon) * mPerDegLon;
+      double toY(double lat) => (lat - userPos.lat) * mPerDegLat;
+
+      final idwRefs = <({double x, double y, double ele})>[];
+      if (userEleM != null && userEleM.isFinite) {
+        idwRefs.add((x: 0.0, y: 0.0, ele: userEleM));
+      }
+      final idwStep = math.max(1, (trailPoints.length / 24).ceil());
+      for (var i = 0; i < trailPoints.length; i += idwStep) {
+        final p = trailPoints[i];
+        idwRefs.add((x: toX(p.lon), y: toY(p.lat), ele: p.ele));
+      }
+
+      double sampleFallback(double lat, double lon) {
+        final dem = sampler(lat, lon);
+        if (dem != null && dem.isFinite) return dem;
+        if (idwRefs.isEmpty) return localResult.rejoinEleM;
+        final px = toX(lon);
+        final py = toY(lat);
+        var numSum = 0.0;
+        var denSum = 0.0;
+        for (final ref in idwRefs) {
+          final dx = px - ref.x;
+          final dy = py - ref.y;
+          final dSq = dx * dx + dy * dy;
+          if (dSq < 1.0) return ref.ele;
+          final w = 1.0 / dSq;
+          numSum += w * ref.ele;
+          denSum += w;
+        }
+        return denSum > 0.0 ? numSum / denSum : localResult.rejoinEleM;
+      }
+
+      return _buildResultFromGeographics(
+        geos: stitched,
+        mode: mode,
+        rejoinPoint: target,
+        rejoinAlongTrackM: localResult.rejoinAlongTrackM,
+        userEleM: userEleM,
+        sampler: sampler,
+        fallbackSampler: sampleFallback,
+        localeCode: localeCode,
+        isCycling: isCycling,
+        directHitCliff: localResult.avoidedSteepHazard,
+        valhallaDurationOverrideSec:
+            (valhallaTimeSec != null &&
+                valhallaTimeSec.isFinite &&
+                valhallaTimeSec > 0 &&
+                startGapM <= 25.0 &&
+                endGapM <= 25.0)
+            ? valhallaTimeSec.round()
+            : null,
+      );
+    } catch (_) {
+      return localResult;
+    }
+  }
+
+  /// Optional on-demand Valhalla access route to the trail start when the user
+  /// is in `> 3 km` Calm Preview Mode and taps "Rută de acces".
+  static Future<OffTrailRerouteResult?> computeValhallaAccessRoute({
+    required Dio? dio,
+    required Geographic userPos,
+    double? userEleM,
+    required List<NavTrackPoint> trailPoints,
+    required ElevationSampler sampler,
+    String localeCode = 'ro',
+    bool isCycling = false,
+    CancelToken? cancelToken,
+  }) async {
+    if (dio == null || trailPoints.isEmpty) return null;
+    final startPt = trailPoints.first;
+    final target = Geographic(lat: startPt.lat, lon: startPt.lon);
+    final directDistM = SphericalGreatCircle(userPos).distanceTo(target);
+    if (!directDistM.isFinite) return null;
+
+    final costing = directDistM >= 8000.0
+        ? 'auto'
+        : (isCycling ? 'bicycle' : 'pedestrian');
+
+    try {
+      final response = await dio.post<Object?>(
+        '/valhalla/route',
+        data: <String, Object?>{
+          'directions_type': 'none',
+          'language': localeCode.toLowerCase().startsWith('ro')
+              ? 'ro-RO'
+              : 'en-US',
+          'locations': <Map<String, double>>[
+            <String, double>{'lat': userPos.lat, 'lon': userPos.lon},
+            <String, double>{'lat': target.lat, 'lon': target.lon},
+          ],
+          'costing': costing,
+        },
+        cancelToken: cancelToken,
+        options: Options(
+          sendTimeout: const Duration(seconds: 6),
+          receiveTimeout: const Duration(seconds: 8),
+        ),
+      );
+
+      final body = _decodeResponseMap(response.data);
+      final trip = body['trip'];
+      final legs = trip is Map ? trip['legs'] : null;
+      final firstLeg = (legs is List && legs.isNotEmpty) ? legs.first : null;
+      final shape = firstLeg is Map ? firstLeg['shape'] : null;
+      if (shape is! String || shape.isEmpty) return null;
+
+      final pts = PolylineUtil.decode(shape, precision: 6);
+      if (pts.length < 2) return null;
+
+      final summary = trip is Map ? trip['summary'] : null;
+      final valhallaTimeSec = summary is Map
+          ? (summary['time'] as num?)?.toDouble()
+          : null;
+
+      return _buildResultFromGeographics(
+        geos: pts,
+        mode: OffTrailMode.shortestSafe,
+        rejoinPoint: target,
+        rejoinAlongTrackM: 0.0,
+        userEleM: userEleM,
+        sampler: sampler,
+        fallbackSampler: (lat, lon) => sampler(lat, lon) ?? startPt.ele,
+        localeCode: localeCode,
+        isCycling: isCycling,
+        directHitCliff: false,
+        valhallaDurationOverrideSec:
+            (valhallaTimeSec != null && valhallaTimeSec > 0)
+            ? valhallaTimeSec.round()
+            : null,
+      );
+    } catch (_) {
+      return null;
+    }
+  }
+
+  static Map<String, dynamic> _decodeResponseMap(Object? data) {
+    if (data is Map<String, dynamic>) return data;
+    if (data is Map) return Map<String, dynamic>.from(data);
+    if (data is String && data.trim().isNotEmpty) {
+      final decoded = jsonDecode(data);
+      if (decoded is Map) return Map<String, dynamic>.from(decoded);
+    }
+    return const <String, dynamic>{};
+  }
+
+  static ({double lat, double lon, double ele}) _interpolateTrailAt(
+    List<NavTrackPoint> trailPoints,
+    double alongM,
+  ) {
+    if (alongM <= trailPoints.first.distanceM) {
+      final f = trailPoints.first;
+      return (lat: f.lat, lon: f.lon, ele: f.ele);
+    }
+    if (alongM >= trailPoints.last.distanceM) {
+      final l = trailPoints.last;
+      return (lat: l.lat, lon: l.lon, ele: l.ele);
+    }
+    var lo = 0;
+    var hi = trailPoints.length - 1;
+    while (hi - lo > 1) {
+      final mid = (lo + hi) >> 1;
+      if (trailPoints[mid].distanceM <= alongM) {
+        lo = mid;
+      } else {
+        hi = mid;
+      }
+    }
+    final a = trailPoints[lo];
+    final b = trailPoints[hi];
+    final span = b.distanceM - a.distanceM;
+    final t = span > 0.0 ? ((alongM - a.distanceM) / span).clamp(0.0, 1.0) : 0.0;
+    return (
+      lat: a.lat + (b.lat - a.lat) * t,
+      lon: a.lon + (b.lon - a.lon) * t,
+      ele: a.ele + (b.ele - a.ele) * t,
+    );
+  }
+
+  static OffTrailRerouteResult _buildResultFromGeographics({
+    required List<Geographic> geos,
+    required OffTrailMode mode,
+    required Geographic rejoinPoint,
+    required double rejoinAlongTrackM,
+    required double? userEleM,
+    required ElevationSampler sampler,
+    required double Function(double lat, double lon) fallbackSampler,
+    required String localeCode,
+    required bool isCycling,
+    required bool directHitCliff,
+    int? valhallaDurationOverrideSec,
+  }) {
     final outPoints = <OffTrailPoint>[];
     var cumDist = 0.0;
     var ascent = 0.0;
@@ -628,35 +1102,21 @@ class OffTrailRouter {
     var estSec = 0.0;
     var maxAbsSlopeRatio = 0.0;
 
-    final eles = <double>[
-      for (var i = 0; i < smoothedCoords.length; i++)
-        i == 0 && userEleM != null && userEleM.isFinite && sampler(userPos.lat, userPos.lon) == null
-            ? userEleM
-            : sampleWithFallback(
-                toLat(smoothedCoords[i].y),
-                toLon(smoothedCoords[i].x),
-              ),
-    ];
-
-    for (var i = 0; i < smoothedCoords.length; i++) {
-      final lat = i == 0
-          ? userPos.lat
-          : (i == smoothedCoords.length - 1
-                ? chosenTarget.lat
-                : toLat(smoothedCoords[i].y));
-      final lon = i == 0
-          ? userPos.lon
-          : (i == smoothedCoords.length - 1
-                ? chosenTarget.lon
-                : toLon(smoothedCoords[i].x));
-      final ele = eles[i];
+    for (var i = 0; i < geos.length; i++) {
+      final g = geos[i];
+      final ele = (i == 0 &&
+              userEleM != null &&
+              userEleM.isFinite &&
+              sampler(g.lat, g.lon) == null)
+          ? userEleM
+          : fallbackSampler(g.lat, g.lon);
       var gradePct = 0.0;
 
       if (i > 0) {
         final prev = outPoints[i - 1];
         final d = SphericalGreatCircle(
           Geographic(lat: prev.lat, lon: prev.lon),
-        ).distanceTo(Geographic(lat: lat, lon: lon));
+        ).distanceTo(g);
         final segDist = d.isFinite ? d : 0.0;
         cumDist += segDist;
         final dEle = ele - prev.ele;
@@ -677,8 +1137,8 @@ class OffTrailRouter {
 
       outPoints.add(
         OffTrailPoint(
-          lat: lat,
-          lon: lon,
+          lat: g.lat,
+          lon: g.lon,
           ele: ele,
           distanceM: cumDist,
           gradePct: gradePct,
@@ -690,7 +1150,6 @@ class OffTrailRouter {
     final avoidedSteepHazard =
         directHitCliff && maxAbsSlopeRatio <= cliffSlopeRatioThreshold + 0.05;
 
-    // Initial bearing ~35m ahead along the computed reroute path.
     var guideIdx = outPoints.length - 1;
     for (var i = 1; i < outPoints.length; i++) {
       if (outPoints[i].distanceM >= 35.0) {
@@ -739,11 +1198,11 @@ class OffTrailRouter {
     return OffTrailRerouteResult(
       mode: mode,
       points: outPoints,
-      rejoinPoint: Geographic(lat: chosenTarget.lat, lon: chosenTarget.lon),
-      rejoinAlongTrackM: chosenTarget.alongTrackM,
+      rejoinPoint: rejoinPoint,
+      rejoinAlongTrackM: rejoinAlongTrackM,
       rejoinEleM: outPoints.last.ele,
       distanceM: cumDist,
-      estimatedSeconds: estSec.round(),
+      estimatedSeconds: valhallaDurationOverrideSec ?? estSec.round(),
       ascentM: ascent,
       descentM: descent,
       maxSlopeDeg: maxSlopeDeg,
@@ -752,6 +1211,216 @@ class OffTrailRouter {
       instruction: instruction,
       slopeAdvice: slopeAdvice,
     );
+  }
+
+  static bool _pointInPolygon(
+    double px,
+    double py,
+    List<({double x, double y})> poly,
+  ) {
+    var inside = false;
+    for (var i = 0, j = poly.length - 1; i < poly.length; j = i++) {
+      final xi = poly[i].x;
+      final yi = poly[i].y;
+      final xj = poly[j].x;
+      final yj = poly[j].y;
+      final intersect =
+          ((yi > py) != (yj > py)) &&
+          (px < (xj - xi) * (py - yi) / ((yj - yi) == 0.0 ? 1e-12 : (yj - yi)) + xi);
+      if (intersect) inside = !inside;
+    }
+    return inside;
+  }
+
+  static double _pointToSegmentDistSq(
+    double px,
+    double py,
+    double ax,
+    double ay,
+    double bx,
+    double by,
+  ) {
+    final dx = bx - ax;
+    final dy = by - ay;
+    final lenSq = dx * dx + dy * dy;
+    final t = lenSq <= 0.0
+        ? 0.0
+        : (((px - ax) * dx + (py - ay) * dy) / lenSq).clamp(0.0, 1.0);
+    final fx = px - (ax + t * dx);
+    final fy = py - (ay + t * dy);
+    return fx * fx + fy * fy;
+  }
+
+  static bool _pointHitsObstacle(
+    double px,
+    double py,
+    _ProjectedObstacle obs, {
+    double haloM = _obstacleHaloMeters,
+  }) {
+    if (px < obs.minX || px > obs.maxX || py < obs.minY || py > obs.maxY) {
+      return false;
+    }
+    if (_pointInPolygon(px, py, obs.pts)) return true;
+    if (haloM <= 0.0) return false;
+    final haloSq = haloM * haloM;
+    for (var i = 0; i < obs.pts.length; i++) {
+      final a = obs.pts[i];
+      final b = obs.pts[(i + 1) % obs.pts.length];
+      if (_pointToSegmentDistSq(px, py, a.x, a.y, b.x, b.y) <= haloSq) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  static bool _segmentHitsObstacles(
+    double x0,
+    double y0,
+    double x1,
+    double y1,
+    List<_ProjectedObstacle> obstacles,
+  ) {
+    if (obstacles.isEmpty) return false;
+    final dx = x1 - x0;
+    final dy = y1 - y0;
+    final len = math.sqrt(dx * dx + dy * dy);
+    final steps = math.max(2, (len / 4.0).ceil());
+    for (var s = 1; s <= steps; s++) {
+      final t = s / steps;
+      final px = x0 + dx * t;
+      final py = y0 + dy * t;
+      for (final obs in obstacles) {
+        if (_pointHitsObstacle(px, py, obs, haloM: 2.0)) {
+          return true;
+        }
+      }
+    }
+    return false;
+  }
+
+  static List<({double x, double y})>? _maybeInsertTangentControlPoint(
+    ({double x, double y}) start,
+    ({double x, double y}) end, {
+    required List<NavTrackPoint> trailPoints,
+    required double rejoinAlongM,
+    required double Function(double lon) toX,
+    required double Function(double lat) toY,
+    required double stepM,
+    required double Function(double x, double y) eleAtXY,
+    required List<_ProjectedObstacle> obstacles,
+  }) {
+    final dx = end.x - start.x;
+    final dy = end.y - start.y;
+    final chordLen = math.sqrt(dx * dx + dy * dy);
+    if (chordLen < 35.0 || trailPoints.length < 2) return null;
+
+    final aheadPt = _interpolateTrailAt(
+      trailPoints,
+      math.min(trailPoints.last.distanceM, rejoinAlongM + 35.0),
+    );
+    final behindPt = _interpolateTrailAt(
+      trailPoints,
+      math.max(0.0, rejoinAlongM - 15.0),
+    );
+    final txRaw = toX(aheadPt.lon) - toX(behindPt.lon);
+    final tyRaw = toY(aheadPt.lat) - toY(behindPt.lat);
+    final tLen = math.sqrt(txRaw * txRaw + tyRaw * tyRaw);
+    if (tLen < 1.0) return null;
+
+    final tx = txRaw / tLen;
+    final ty = tyRaw / tLen;
+    final leadDist = math.min(45.0, 0.28 * chordLen);
+    final ctrl = (x: end.x - leadDist * tx, y: end.y - leadDist * ty);
+
+    // Ensure the control point creates a gentle curve (not a sharp kink > 70°).
+    final ux = ctrl.x - start.x;
+    final uy = ctrl.y - start.y;
+    final uLen = math.sqrt(ux * ux + uy * uy);
+    if (uLen < 8.0) return null;
+    final cosTurn = (ux * tx + uy * ty) / uLen;
+    if (cosTurn < 0.35 || cosTurn > 0.996) return null;
+
+    if (_lineHitsSteepHazard(
+          x0: start.x,
+          y0: start.y,
+          x1: ctrl.x,
+          y1: ctrl.y,
+          stepM: stepM,
+          eleAtXY: eleAtXY,
+        ) ||
+        _lineHitsSteepHazard(
+          x0: ctrl.x,
+          y0: ctrl.y,
+          x1: end.x,
+          y1: end.y,
+          stepM: stepM,
+          eleAtXY: eleAtXY,
+        ) ||
+        _segmentHitsObstacles(start.x, start.y, ctrl.x, ctrl.y, obstacles) ||
+        _segmentHitsObstacles(ctrl.x, ctrl.y, end.x, end.y, obstacles)) {
+      return null;
+    }
+
+    return <({double x, double y})>[start, ctrl, end];
+  }
+
+  /// Applies [passes] iterations of pinned-endpoint Chaikin corner-cutting
+  /// (`0.75 / 0.25`), verifying that every cut corner stays free of steep
+  /// cliff hazards and obstacle polygons.
+  static List<({double x, double y})> _chaikinSmoothSafely(
+    List<({double x, double y})> path, {
+    required int passes,
+    required double stepM,
+    required double Function(double x, double y) eleAtXY,
+    required List<_ProjectedObstacle> obstacles,
+  }) {
+    if (path.length < 3 || passes <= 0) return path;
+
+    var current = path;
+    for (var pass = 0; pass < passes; pass++) {
+      if (current.length < 3) break;
+      final next = <({double x, double y})>[current.first];
+      for (var i = 1; i < current.length - 1; i++) {
+        final prev = current[i - 1];
+        final corner = current[i];
+        final after = current[i + 1];
+
+        final rPrev = (
+          x: 0.25 * prev.x + 0.75 * corner.x,
+          y: 0.25 * prev.y + 0.75 * corner.y,
+        );
+        final qNext = (
+          x: 0.75 * corner.x + 0.25 * after.x,
+          y: 0.75 * corner.y + 0.25 * after.y,
+        );
+
+        final safeBevel =
+            !_lineHitsSteepHazard(
+              x0: rPrev.x,
+              y0: rPrev.y,
+              x1: qNext.x,
+              y1: qNext.y,
+              stepM: stepM,
+              eleAtXY: eleAtXY,
+            ) &&
+            !_segmentHitsObstacles(
+              rPrev.x,
+              rPrev.y,
+              qNext.x,
+              qNext.y,
+              obstacles,
+            );
+
+        next.add(rPrev);
+        if (!safeBevel) {
+          next.add(corner);
+        }
+        next.add(qNext);
+      }
+      next.add(current.last);
+      current = next;
+    }
+    return current;
   }
 
   static bool _lineHitsSteepHazard({
@@ -786,6 +1455,7 @@ class OffTrailRouter {
     required double cellSize,
     required OffTrailMode mode,
     required double Function(double x, double y) eleAtXY,
+    List<_ProjectedObstacle> obstacles = const [],
   }) {
     if (path.length <= 2) return path;
 
@@ -802,6 +1472,7 @@ class OffTrailRouter {
           stepM: math.max(8.0, cellSize * 0.5),
           mode: mode,
           eleAtXY: eleAtXY,
+          obstacles: obstacles,
         )) {
           farthest = cand;
           break;
@@ -820,9 +1491,13 @@ class OffTrailRouter {
     required double stepM,
     required OffTrailMode mode,
     required double Function(double x, double y) eleAtXY,
+    List<_ProjectedObstacle> obstacles = const [],
   }) {
     final a = path[fromIdx];
     final b = path[toIdx];
+    if (_segmentHitsObstacles(a.x, a.y, b.x, b.y, obstacles)) {
+      return false;
+    }
     if (_lineHitsSteepHazard(
       x0: a.x,
       y0: a.y,
@@ -1103,11 +1778,17 @@ class OffTrailRouter {
       }
     }
 
-    final smoothedCoords = _smoothPathSafely(
-      rawCoords,
-      cellSize: cellSize,
-      mode: mode,
+    final smoothedCoords = _chaikinSmoothSafely(
+      _smoothPathSafely(
+        rawCoords,
+        cellSize: cellSize,
+        mode: mode,
+        eleAtXY: (x, y) => sampleWithFallback(toLat(y), toLon(x)),
+      ),
+      passes: 2,
+      stepM: math.max(6.0, cellSize * 0.4),
       eleAtXY: (x, y) => sampleWithFallback(toLat(y), toLon(x)),
+      obstacles: const [],
     );
 
     final directHitCliff = _lineHitsSteepHazard(

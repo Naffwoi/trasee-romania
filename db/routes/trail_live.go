@@ -168,6 +168,11 @@ func RegisterTrailLiveRoutes(se *core.ServeEvent, hub *live.TrailLiveHub) {
 	group.POST("/sos/{id}/respond", handler.RespondSos)
 	group.POST("/push/subscribe", handler.PushSubscribe)
 	group.DELETE("/push/subscribe", handler.PushUnsubscribe)
+	group.POST("/groups", handler.CreateGroup)
+	group.GET("/groups/{code}", handler.GetGroup)
+	group.POST("/groups/{code}/join", handler.JoinGroup)
+	group.POST("/groups/{code}/ping", handler.PingGroup)
+	group.POST("/groups/{code}/leave", handler.LeaveGroup)
 	group.GET("/stream", handler.Stream)
 }
 
@@ -1617,7 +1622,14 @@ func (h *TrailLiveHandler) Stream(e *core.RequestEvent) error {
 		hasCoords = true
 	}
 
-	sub, unsubscribe := h.liveHub().Subscribe(lat, lon, hasCoords, trailID, deviceHash)
+	groupCode := ""
+	if rawGroup := strings.TrimSpace(q.Get("groupCode")); rawGroup != "" {
+		if normCode, ok := normalizeAndValidateGroupCode(rawGroup); ok {
+			groupCode = normCode
+		}
+	}
+
+	sub, unsubscribe := h.liveHub().SubscribeWithGroup(lat, lon, hasCoords, trailID, deviceHash, groupCode)
 	defer unsubscribe()
 
 	return h.liveHub().ServeSSE(e.Response, e.Request, sub)
@@ -1699,6 +1711,11 @@ func RunTrailLiveGC(app core.App, hub *live.TrailLiveHub, now time.Time) error {
 				return toSosAlertDto(sosRec, subDeviceHash, respMap)
 			})
 		}
+	}
+
+	// 4. Clean up expired trail_groups (< now) and stale trail_group_members (< now - 2h).
+	if err := cleanTrailGroupsGC(app, now); err != nil {
+		return err
 	}
 
 	return nil

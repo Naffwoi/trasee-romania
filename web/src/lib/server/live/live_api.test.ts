@@ -25,8 +25,10 @@ import {
 	computeDeviceHash,
 	createSlidingWindowRateLimiter,
 	forwardLiveToDb,
+	GROUP_CODE_RE,
 	InvalidDeviceTokenError,
 	isValidDeviceToken,
+	isValidGroupCode,
 	liveRateLimiters,
 	resolveDeviceIdentity,
 } from "./device_identity.ts";
@@ -38,6 +40,11 @@ import {
 	resetVapidKeysCache,
 	VAPID_SUBJECT,
 } from "./vapid_push.ts";
+import { POST as postCreateGroup } from "../../../routes/api/v1/live/groups/+server.ts";
+import { GET as getGroupByCode } from "../../../routes/api/v1/live/groups/[code]/+server.ts";
+import { POST as postJoinGroup } from "../../../routes/api/v1/live/groups/[code]/join/+server.ts";
+import { POST as postLeaveGroup } from "../../../routes/api/v1/live/groups/[code]/leave/+server.ts";
+import { POST as postPingGroup } from "../../../routes/api/v1/live/groups/[code]/ping/+server.ts";
 import { DELETE as deleteHeartbeat, POST as postHeartbeat } from "../../../routes/api/v1/live/heartbeat/+server.ts";
 import { POST as postPushSubscribe } from "../../../routes/api/v1/live/push/subscribe/+server.ts";
 import { GET as getVapidKey } from "../../../routes/api/v1/live/push/vapid-public-key/+server.ts";
@@ -623,5 +630,264 @@ describe("SvelteKit /api/v1/live route handlers", () => {
 			resetVapidKeysCache();
 			fs.rmSync(tmpVapidDir, { recursive: true, force: true });
 		}
+	});
+
+	it("validates 6-char unambiguous group codes (/^[A-HJ-NP-Z2-9]{6}$/) and proxies group create, get, join, ping (30/min limit), leave, and SSE groupCode", async () => {
+		liveRateLimiters.groupCreate.reset();
+		liveRateLimiters.groupJoin.reset();
+		liveRateLimiters.groupPing.reset();
+
+		expect(isRouteProtected(new URL("https://trasee.skillfy.ro/api/v1/live/groups"))).toBe(false);
+		expect(isRouteProtected(new URL("https://trasee.skillfy.ro/api/v1/live/groups/K7M9P2/ping"))).toBe(false);
+
+		// Strict code validation (/^[A-HJ-NP-Z2-9]{6}$/)
+		expect(GROUP_CODE_RE.source).toBe("^[A-HJ-NP-Z2-9]{6}$");
+		expect(isValidGroupCode("K7M9P2")).toBe(true);
+		expect(isValidGroupCode("ABCDEF")).toBe(true);
+		expect(isValidGroupCode("234567")).toBe(true);
+		expect(isValidGroupCode("AB0234")).toBe(false); // 0 is excluded
+		expect(isValidGroupCode("AB1234")).toBe(false); // 1 is excluded
+		expect(isValidGroupCode("ABI234")).toBe(false); // I is excluded
+		expect(isValidGroupCode("ABO234")).toBe(false); // O is excluded
+		expect(isValidGroupCode("k7m9p2")).toBe(false); // lowercase rejected
+		expect(isValidGroupCode("K7M9P")).toBe(false); // too short
+		expect(isValidGroupCode("K7M9P23")).toBe(false); // too long
+
+		const sampleSession = {
+			code: "K7M9P2",
+			trailId: "bucegi-1",
+			expiresAt: "2026-11-18T22:00:00Z",
+			selfMemberId: "a1b2c3d4e5f6",
+			members: [
+				{
+					memberId: "a1b2c3d4e5f6",
+					displayName: "Diana",
+					colorHex: "#242734",
+					lat: 45.44,
+					lon: 25.55,
+					ele: 1200,
+					accuracy: 6.5,
+					inNavigation: true,
+					isSelf: true,
+					updatedAt: "2026-11-18T10:00:00Z",
+				},
+			],
+		};
+
+		const fetchSpy = vi.fn().mockImplementation((url: string, init?: RequestInit) => {
+			if (url.includes("/live/stream")) {
+				const encoder = new TextEncoder();
+				const upstreamBody = new ReadableStream<Uint8Array>({
+					start(controller) {
+						controller.enqueue(
+							encoder.encode(
+								`event: group_member_update\ndata: ${JSON.stringify(sampleSession.members[0])}\n\n`,
+							),
+						);
+						controller.close();
+					},
+				});
+				return Promise.resolve(
+					new Response(upstreamBody, {
+						status: 200,
+						headers: { "Content-Type": "text/event-stream" },
+					}),
+				);
+			}
+			if (url.endsWith("/leave")) {
+				return Promise.resolve(Response.json({ ok: true }));
+			}
+			return Promise.resolve(Response.json(sampleSession));
+		});
+		vi.stubGlobal("fetch", fetchSpy);
+
+		// 1. Create group validation (displayName 1..24 trimmed) + valid POST
+		const emptyNameReq = new Request("https://trasee.skillfy.ro/api/v1/live/groups", {
+			method: "POST",
+			headers: { "Content-Type": "application/json", "X-Device-Token": VALID_TOKEN_A },
+			body: JSON.stringify({ displayName: "   ", trailId: "bucegi-1" }),
+		});
+		expect(
+			(
+				await postCreateGroup({
+					request: emptyNameReq,
+					url: new URL(emptyNameReq.url),
+					locals: {},
+				} as never)
+			).status,
+		).toBe(400);
+
+		const longNameReq = new Request("https://trasee.skillfy.ro/api/v1/live/groups", {
+			method: "POST",
+			headers: { "Content-Type": "application/json", "X-Device-Token": VALID_TOKEN_A },
+			body: JSON.stringify({ displayName: "X".repeat(25), trailId: "bucegi-1" }),
+		});
+		expect(
+			(
+				await postCreateGroup({
+					request: longNameReq,
+					url: new URL(longNameReq.url),
+					locals: {},
+				} as never)
+			).status,
+		).toBe(400);
+
+		const createReq = new Request("https://trasee.skillfy.ro/api/v1/live/groups", {
+			method: "POST",
+			headers: { "Content-Type": "application/json", "X-Device-Token": VALID_TOKEN_A },
+			body: JSON.stringify({
+				displayName: "  Diana  ",
+				trailId: "bucegi-1",
+				lat: 45.44,
+				lon: 25.55,
+				ele: 1200,
+				accuracy: 6.5,
+			}),
+		});
+		const createRes = await postCreateGroup({
+			request: createReq,
+			url: new URL(createReq.url),
+			locals: { user: { actor: "actor-diana" } },
+		} as never);
+		expect(createRes.status).toBe(200);
+		expect(await createRes.json()).toEqual(sampleSession);
+
+		const [createUrl, createInit] = fetchSpy.mock.calls[0] as [string, RequestInit];
+		expect(createUrl).toBe("http://pocketbase.internal:8090/live/groups");
+		expect(JSON.parse(String(createInit.body))).toMatchObject({
+			displayName: "Diana",
+			trailId: "bucegi-1",
+			lat: 45.44,
+			lon: 25.55,
+			ele: 1200,
+			accuracy: 6.5,
+		});
+
+		// 2. Invalid group codes rejected on GET, join, ping, leave before upstream fetch
+		const callsBeforeInvalid = fetchSpy.mock.calls.length;
+		for (const badCode of ["AB01IO", "k7m9p2", "SHORT"]) {
+			const badGetReq = new Request(`https://trasee.skillfy.ro/api/v1/live/groups/${badCode}`, {
+				headers: { "X-Device-Token": VALID_TOKEN_A },
+			});
+			expect(
+				(
+					await getGroupByCode({
+						request: badGetReq,
+						url: new URL(badGetReq.url),
+						params: { code: badCode },
+						locals: {},
+					} as never)
+				).status,
+			).toBe(400);
+		}
+		expect(fetchSpy.mock.calls.length).toBe(callsBeforeInvalid);
+
+		// 3. Valid GET /groups/[code] & POST /groups/[code]/join
+		const getReq = new Request("https://trasee.skillfy.ro/api/v1/live/groups/K7M9P2", {
+			headers: { "X-Device-Token": VALID_TOKEN_A },
+		});
+		const getRes = await getGroupByCode({
+			request: getReq,
+			url: new URL(getReq.url),
+			params: { code: "K7M9P2" },
+			locals: {},
+		} as never);
+		expect(getRes.status).toBe(200);
+
+		const joinReq = new Request("https://trasee.skillfy.ro/api/v1/live/groups/K7M9P2/join", {
+			method: "POST",
+			headers: { "Content-Type": "application/json", "X-Device-Token": VALID_TOKEN_B },
+			body: JSON.stringify({ displayName: "Andrei", lat: 45.441, lon: 25.551, accuracy: 8 }),
+		});
+		const joinRes = await postJoinGroup({
+			request: joinReq,
+			url: new URL(joinReq.url),
+			params: { code: "K7M9P2" },
+			locals: {},
+		} as never);
+		expect(joinRes.status).toBe(200);
+
+		// 4. Ping validates lat/lon & enforces 30 req/min rate limiter
+		const badPingReq = new Request("https://trasee.skillfy.ro/api/v1/live/groups/K7M9P2/ping", {
+			method: "POST",
+			headers: { "Content-Type": "application/json", "X-Device-Token": VALID_TOKEN_A },
+			body: JSON.stringify({ lat: 120, lon: 25.55 }),
+		});
+		expect(
+			(
+				await postPingGroup({
+					request: badPingReq,
+					url: new URL(badPingReq.url),
+					params: { code: "K7M9P2" },
+					locals: {},
+				} as never)
+			).status,
+		).toBe(400);
+
+		liveRateLimiters.groupPing.reset();
+		for (let i = 0; i < 30; i++) {
+			const pingReq = new Request("https://trasee.skillfy.ro/api/v1/live/groups/K7M9P2/ping", {
+				method: "POST",
+				headers: { "Content-Type": "application/json", "X-Device-Token": VALID_TOKEN_A },
+				body: JSON.stringify({
+					lat: 45.44,
+					lon: 25.55,
+					ele: 1210,
+					accuracy: 5.5,
+					alongTrackM: 340,
+					inNavigation: true,
+				}),
+			});
+			const pingRes = await postPingGroup({
+				request: pingReq,
+				url: new URL(pingReq.url),
+				params: { code: "K7M9P2" },
+				locals: {},
+			} as never);
+			expect(pingRes.status).toBe(200);
+		}
+		// 31st ping in same 60s window returns 429
+		const ping31Req = new Request("https://trasee.skillfy.ro/api/v1/live/groups/K7M9P2/ping", {
+			method: "POST",
+			headers: { "Content-Type": "application/json", "X-Device-Token": VALID_TOKEN_A },
+			body: JSON.stringify({ lat: 45.44, lon: 25.55 }),
+		});
+		const ping31Res = await postPingGroup({
+			request: ping31Req,
+			url: new URL(ping31Req.url),
+			params: { code: "K7M9P2" },
+			locals: {},
+		} as never);
+		expect(ping31Res.status).toBe(429);
+
+		// 5. Leave group
+		const leaveReq = new Request("https://trasee.skillfy.ro/api/v1/live/groups/K7M9P2/leave", {
+			method: "POST",
+			headers: { "X-Device-Token": VALID_TOKEN_B },
+		});
+		const leaveRes = await postLeaveGroup({
+			request: leaveReq,
+			url: new URL(leaveReq.url),
+			params: { code: "K7M9P2" },
+			locals: {},
+		} as never);
+		expect(leaveRes.status).toBe(200);
+		expect(await leaveRes.json()).toEqual({ ok: true });
+
+		// 6. Stream forwards valid groupCode alongside lat, lon, trailId
+		const streamUrl = new URL(
+			`https://trasee.skillfy.ro/api/v1/live/stream?lat=45.44&lon=25.55&trailId=bucegi-1&groupCode=K7M9P2&deviceToken=${VALID_TOKEN_A}`,
+		);
+		const streamRes = await getStream({
+			request: new Request(streamUrl),
+			url: streamUrl,
+			locals: {},
+		} as never);
+		expect(streamRes.status).toBe(200);
+		const lastStreamCallUrl = fetchSpy.mock.calls[fetchSpy.mock.calls.length - 1][0] as string;
+		expect(lastStreamCallUrl).toBe(
+			"http://pocketbase.internal:8090/live/stream?lat=45.44&lon=25.55&trailId=bucegi-1&groupCode=K7M9P2",
+		);
+		await streamRes.body?.cancel();
 	});
 });

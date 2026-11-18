@@ -461,25 +461,121 @@ class TrailLiveService {
     return parsed.copyWith(amResponding: status == 'coming');
   }
 
+  String _normalizeGroupCode(String raw) => raw.trim().toUpperCase();
+
+  String _sanitizeDisplayName(String raw) {
+    final trimmed = raw.trim();
+    if (trimmed.isEmpty) return 'Drumeț';
+    return trimmed.length > 24 ? trimmed.substring(0, 24) : trimmed;
+  }
+
+  Future<GroupSessionModel> createGroup({
+    String? trailId,
+    required String displayName,
+  }) async {
+    final options = await _liveOptions();
+    final response = await _dio.post<Object?>(
+      '/live/groups',
+      data: <String, Object?>{
+        if (trailId != null && trailId.isNotEmpty) 'trailId': trailId,
+        'displayName': _sanitizeDisplayName(displayName),
+      },
+      options: options,
+    );
+    return GroupSessionModel.fromJson(_asMap(response.data));
+  }
+
+  Future<GroupSessionModel> getGroup(String code) async {
+    final normalized = _normalizeGroupCode(code);
+    final options = await _liveOptions();
+    final response = await _dio.get<Object?>(
+      '/live/groups/${Uri.encodeComponent(normalized)}',
+      options: options,
+    );
+    return GroupSessionModel.fromJson(_asMap(response.data));
+  }
+
+  Future<GroupSessionModel> joinGroup({
+    required String code,
+    required String displayName,
+  }) async {
+    final normalized = _normalizeGroupCode(code);
+    final options = await _liveOptions();
+    final response = await _dio.post<Object?>(
+      '/live/groups/${Uri.encodeComponent(normalized)}/join',
+      data: <String, Object?>{
+        'displayName': _sanitizeDisplayName(displayName),
+      },
+      options: options,
+    );
+    return GroupSessionModel.fromJson(_asMap(response.data));
+  }
+
+  Future<GroupSessionModel> pingGroup({
+    required String code,
+    required double lat,
+    required double lon,
+    double? ele,
+    required double accuracy,
+    double? heading,
+    double? speed,
+    double? alongTrackM,
+    bool inNavigation = true,
+  }) async {
+    final normalized = _normalizeGroupCode(code);
+    final options = await _liveOptions();
+    final response = await _dio.post<Object?>(
+      '/live/groups/${Uri.encodeComponent(normalized)}/ping',
+      data: <String, Object?>{
+        'lat': lat,
+        'lon': lon,
+        'ele': (ele != null && ele.isFinite) ? ele : 0.0,
+        'accuracy': (accuracy.isFinite && accuracy > 0.0) ? accuracy : 15.0,
+        if (heading != null && heading.isFinite && heading >= 0.0)
+          'heading': heading,
+        if (speed != null && speed.isFinite && speed >= 0.0) 'speed': speed,
+        if (alongTrackM != null && alongTrackM.isFinite)
+          'alongTrackM': alongTrackM,
+        'inNavigation': inNavigation,
+      },
+      options: options,
+    );
+    return GroupSessionModel.fromJson(_asMap(response.data));
+  }
+
+  Future<void> leaveGroup(String code) async {
+    final normalized = _normalizeGroupCode(code);
+    final options = await _liveOptions();
+    await _dio.post<Object?>(
+      '/live/groups/${Uri.encodeComponent(normalized)}/leave',
+      data: const <String, Object?>{},
+      options: options,
+    );
+  }
+
   /// Connects to `/api/v1/live/stream` via Server-Sent Events (`ResponseType.stream`),
-  /// emitting real-time report and SOS updates and firing OS emergency notifications
-  /// whenever a new nearby `!isMine` SOS alert arrives.
+  /// emitting real-time report, SOS, and private group member updates and firing
+  /// OS emergency notifications whenever a new nearby `!isMine` SOS alert arrives.
   Stream<TrailLiveSseEvent> connectStream({
     required double lat,
     required double lon,
     String? trailId,
+    String? groupCode,
     CancelToken? cancelToken,
     bool isRo = true,
   }) async* {
     if (!isConfigured) return;
     final token = await _tokenLoader();
     final effectiveCancel = cancelToken ?? CancelToken();
+    final cleanGroupCode = groupCode?.trim();
     final response = await _dio.get<ResponseBody>(
       '/live/stream',
       queryParameters: <String, Object?>{
         'lat': lat,
         'lon': lon,
         if (trailId != null && trailId.isNotEmpty) 'trailId': trailId,
+        if (cleanGroupCode != null && cleanGroupCode.isNotEmpty)
+          'groupCode': _normalizeGroupCode(cleanGroupCode),
         'deviceToken': token,
       },
       cancelToken: effectiveCancel,

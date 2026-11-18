@@ -4,6 +4,7 @@ import {
 	getReportCategoryMeta,
 	isReportVisibleOnMap,
 	SOS_REASON_META,
+	type GroupMemberDto,
 	type ReportVoteType,
 	type SosAlertDto,
 	type TrailReportDto,
@@ -270,6 +271,198 @@ export function syncSosMapMarkers(
 
 		const marker = new M.Marker({ element: el, anchor: "center" })
 			.setLngLat([sos.lon, sos.lat])
+			.setPopup(popup)
+			.addTo(map);
+		nextMarkers.push(marker);
+	}
+
+	return nextMarkers;
+}
+
+export interface SyncGroupMarkersOptions {
+	selfAlongTrackM?: number | null;
+	selfLat?: number | null;
+	selfLon?: number | null;
+	locale?: string;
+	onSelectMember?: (member: GroupMemberDto) => void;
+}
+
+export function getGroupMemberInitials(displayName: string): string {
+	const cleaned = (displayName ?? "").trim();
+	if (!cleaned) return "DR";
+	const parts = cleaned.split(/\s+/).filter(Boolean);
+	if (parts.length >= 2) {
+		const first = Array.from(parts[0])[0] ?? "";
+		const second = Array.from(parts[1])[0] ?? "";
+		return (first + second).toUpperCase();
+	}
+	return Array.from(cleaned).slice(0, 2).join("").toUpperCase();
+}
+
+function formatCompactDistance(meters: number): string {
+	const absM = Math.abs(Math.round(meters));
+	if (absM >= 1000) {
+		return `${(absM / 1000).toFixed(1)} km`;
+	}
+	return `${absM} m`;
+}
+
+function haversineDistanceM(lat1: number, lon1: number, lat2: number, lon2: number): number {
+	const R = 6_371_000;
+	const dLat = ((lat2 - lat1) * Math.PI) / 180;
+	const dLon = ((lon2 - lon1) * Math.PI) / 180;
+	const a =
+		Math.sin(dLat / 2) ** 2 +
+		Math.cos((lat1 * Math.PI) / 180) *
+			Math.cos((lat2 * Math.PI) / 180) *
+			Math.sin(dLon / 2) ** 2;
+	return 2 * R * Math.atan2(Math.sqrt(a), Math.sqrt(Math.max(0, 1 - a)));
+}
+
+function formatGroupMemberSubtitle(
+	member: GroupMemberDto,
+	options: SyncGroupMarkersOptions,
+): string {
+	const isRo = (options.locale ?? "ro").toLowerCase().startsWith("ro");
+	const parts: string[] = [];
+
+	if (
+		options.selfAlongTrackM !== null &&
+		options.selfAlongTrackM !== undefined &&
+		Number.isFinite(options.selfAlongTrackM) &&
+		member.alongTrackM !== null &&
+		member.alongTrackM !== undefined &&
+		Number.isFinite(member.alongTrackM)
+	) {
+		const deltaM = Math.round(member.alongTrackM - options.selfAlongTrackM);
+		if (Math.abs(deltaM) < 10) {
+			parts.push(isRo ? "Lângă tine" : "Right by you");
+		} else if (deltaM > 0) {
+			parts.push(
+				isRo
+					? `+${formatCompactDistance(deltaM)} în față`
+					: `+${formatCompactDistance(deltaM)} ahead`,
+			);
+		} else {
+			parts.push(
+				isRo
+					? `${formatCompactDistance(deltaM)} în urmă`
+					: `${formatCompactDistance(deltaM)} behind`,
+			);
+		}
+	} else if (
+		options.selfLat !== null &&
+		options.selfLat !== undefined &&
+		Number.isFinite(options.selfLat) &&
+		options.selfLon !== null &&
+		options.selfLon !== undefined &&
+		Number.isFinite(options.selfLon)
+	) {
+		const distM = haversineDistanceM(options.selfLat, options.selfLon, member.lat, member.lon);
+		parts.push(
+			isRo ? `la ${formatCompactDistance(distM)}` : `${formatCompactDistance(distM)} away`,
+		);
+	}
+
+	if (Number.isFinite(member.accuracy) && member.accuracy > 0) {
+		parts.push(`±${Math.max(1, Math.round(member.accuracy))} m`);
+	}
+
+	return parts.join(" · ");
+}
+
+export function syncGroupMapMarkers(
+	map: M.Map | null,
+	prevMarkers: M.Marker[],
+	members: readonly GroupMemberDto[],
+	options: SyncGroupMarkersOptions = {},
+): M.Marker[] {
+	for (const m of prevMarkers) {
+		try {
+			m.remove();
+		} catch {
+			// Ignore marker removal errors
+		}
+	}
+	if (!map) return [];
+
+	const nextMarkers: M.Marker[] = [];
+
+	for (const member of members) {
+		if (member.isSelf) continue;
+		if (!Number.isFinite(member.lat) || !Number.isFinite(member.lon)) continue;
+		if (member.lat === 0 && member.lon === 0) continue;
+
+		const rawColor = (member.colorHex ?? "").trim();
+		const bg = /^#[0-9a-fA-F]{3,8}$/.test(rawColor) ? rawColor : "#242734";
+		const initials = getGroupMemberInitials(member.displayName);
+		const subtitle = formatGroupMemberSubtitle(member, options);
+
+		const el = document.createElement("button");
+		el.type = "button";
+		el.setAttribute("data-testid", "group-member-marker");
+		el.setAttribute("data-member-id", member.memberId);
+		el.setAttribute("aria-label", member.displayName);
+		el.title = subtitle ? `${member.displayName} · ${subtitle}` : member.displayName;
+		el.style.cssText = `
+			width:34px;
+			height:34px;
+			border-radius:9999px;
+			background:${bg};
+			color:#ffffff;
+			border:2px solid #ffffff;
+			box-shadow:0 3px 10px rgba(36,39,52,0.28);
+			display:flex;
+			align-items:center;
+			justify-content:center;
+			font-family:system-ui,-apple-system,sans-serif;
+			font-size:12px;
+			font-weight:800;
+			letter-spacing:0.02em;
+			line-height:1;
+			cursor:pointer;
+			padding:0;
+			user-select:none;
+		`;
+		el.textContent = initials;
+
+		if (options.onSelectMember) {
+			el.addEventListener("click", () => {
+				options.onSelectMember?.(member);
+			});
+		}
+
+		const popupRoot = document.createElement("div");
+		popupRoot.style.cssText =
+			"padding:8px 11px;min-width:140px;max-width:220px;font-family:system-ui,-apple-system,sans-serif;color:#242734;background:#ffffff;";
+
+		const header = document.createElement("div");
+		header.style.cssText = "display:flex;align-items:center;gap:6px;font-weight:700;font-size:13px;color:#242734;";
+
+		const dot = document.createElement("span");
+		dot.style.cssText = `width:8px;height:8px;border-radius:9999px;background:${bg};flex-shrink:0;`;
+		header.appendChild(dot);
+
+		const nameSpan = document.createElement("span");
+		nameSpan.textContent = member.displayName;
+		header.appendChild(nameSpan);
+		popupRoot.appendChild(header);
+
+		if (subtitle) {
+			const subEl = document.createElement("div");
+			subEl.style.cssText = "margin-top:3px;font-size:11.5px;color:#475569;font-weight:500;";
+			subEl.textContent = subtitle;
+			popupRoot.appendChild(subEl);
+		}
+
+		const popup = new M.Popup({
+			offset: 18,
+			closeButton: false,
+			maxWidth: "230px",
+		}).setDOMContent(popupRoot);
+
+		const marker = new M.Marker({ element: el, anchor: "center" })
+			.setLngLat([member.lon, member.lat])
 			.setPopup(popup)
 			.addTo(map);
 		nextMarkers.push(marker);

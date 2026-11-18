@@ -21,6 +21,7 @@ import 'package:objectbox/objectbox.dart';
 import 'package:wanderer/components/base/wanderer_attribution.dart';
 import 'package:wanderer/components/map/location_marker_layer.dart';
 import 'package:wanderer/components/map/trail_layer.dart';
+import 'package:wanderer/components/navigation/group_sheet.dart';
 import 'package:wanderer/components/navigation/sos_banner_and_dialog.dart';
 import 'package:wanderer/components/navigation/waze_nearby_prompt.dart';
 import 'package:wanderer/components/navigation/waze_report_sheet.dart';
@@ -34,6 +35,7 @@ import 'package:wanderer/models/navigate_response.dart';
 import 'package:wanderer/models/trail.dart';
 import 'package:wanderer/models/trail_sync_state.dart';
 import 'package:wanderer/models/waypoint.dart';
+import 'package:wanderer/provider/api_provider.dart';
 import 'package:wanderer/provider/auth_provider.dart';
 import 'package:wanderer/provider/foreground_position_stream_provider.dart';
 import 'package:wanderer/provider/local_settings_provider.dart';
@@ -61,8 +63,11 @@ import 'package:wanderer/util/region/proxy_style_rewriter.dart';
 import 'package:wanderer/util/geo/polyline.dart';
 import 'package:wanderer/util/map/heading_math.dart'
     show normalizeHeading, shortestAngleDelta;
+import 'package:wanderer/theme/colors.dart';
+import 'package:wanderer/util/navigation/cooperative_gps_fusion.dart';
 import 'package:wanderer/util/navigation/dem_tile_grid.dart';
 import 'package:wanderer/util/navigation/eta_calculator.dart';
+import 'package:wanderer/util/navigation/gps_pace_coaster.dart';
 import 'package:wanderer/util/navigation/off_trail_router.dart';
 import 'package:wanderer/util/route/planner_handoff.dart';
 import 'package:wanderer/util/route/track_position_matcher.dart';
@@ -291,8 +296,33 @@ class _NavigationScreenState extends ConsumerState<NavigationScreen>
   bool _demFallbackPrefetchStarted = false;
   String _localeCode = 'ro';
 
-  // Live Waze reports, permanent landmarks, 30-min presence, and 5 km SOS state.
+  // Cooperative GPS fusion, 1 Hz Tobler pace coasting, hybrid Valhalla & preview state.
+  GpsPaceCoaster? _paceCoaster;
+  Timer? _coasterTimer;
+  final ValueNotifier<GpsSignalState> _gpsSignalState =
+      ValueNotifier<GpsSignalState>(GpsSignalState.good);
+  final ValueNotifier<double> _effectiveGpsAccuracy = ValueNotifier<double>(
+    15.0,
+  );
+  final ValueNotifier<double?> _farPreviewDistanceM = ValueNotifier<double?>(
+    null,
+  );
+  final ValueNotifier<bool> _accessRouteLoading = ValueNotifier<bool>(false);
+  bool _showingAccessRoute = false;
+  int _rerouteGeneration = 0;
+  CancelToken? _valhallaRerouteCancelToken;
+  Set<String> _lastCoLocatedPeerIds = <String>{};
+  SelfGpsObservation? _lastRawSelfFix;
+  double? _lastRawSpeed;
+  double? _lastRawHeading;
+
+  // Live Waze reports, permanent landmarks, 30-min presence, 5 km SOS & Live Groups.
   TrailLiveService? _liveService;
+  final ValueNotifier<GroupSessionModel?> _groupSession =
+      ValueNotifier<GroupSessionModel?>(null);
+  final ValueNotifier<GroupMemberModel?> _selectedGroupMember =
+      ValueNotifier<GroupMemberModel?>(null);
+  Timer? _groupPingTimer;
   final ValueNotifier<int?> _activeHikers30m = ValueNotifier<int?>(null);
   final ValueNotifier<List<TrailReportModel>> _liveReports =
       ValueNotifier<List<TrailReportModel>>(const []);
@@ -557,6 +587,12 @@ class _NavigationScreenState extends ConsumerState<NavigationScreen>
       const Duration(seconds: 30),
       (_) => _sendLiveHeartbeatTick(),
     );
+    if (!widget.isRecording) {
+      _coasterTimer = Timer.periodic(
+        const Duration(seconds: 1),
+        (_) => _onCoasterTick(),
+      );
+    }
 
     _positionSource = TraceletPositionSource();
     _positionStream = _positionSource.stream;
@@ -633,9 +669,41 @@ class _NavigationScreenState extends ConsumerState<NavigationScreen>
         // and exported as the saved trail's GPX. Maneuver-advance detection
         // is unrelated bookkeeping and must keep running even while frozen,
         // so it's not gated here — only the breadcrumb append is.
-        final fix = ml.Geographic(lat: pos.latitude, lon: pos.longitude);
+        final nowMs = DateTime.now().millisecondsSinceEpoch;
+        final rawFix = ml.Geographic(lat: pos.latitude, lon: pos.longitude);
         final usableAlt = hasUsableAltitude(pos) ? pos.altitude : null;
         if (usableAlt != null) _lastKnownAltitudeM = usableAlt;
+
+        _lastRawSelfFix = SelfGpsObservation(
+          lat: pos.latitude,
+          lon: pos.longitude,
+          accuracy: pos.accuracy,
+          ele: usableAlt,
+          timestampMs: nowMs,
+        );
+        _lastRawSpeed = pos.speed;
+        _lastRawHeading = pos.heading;
+
+        final fused = widget.isRecording
+            ? null
+            : CooperativeGpsFusion.fuse(
+                selfFix: _lastRawSelfFix,
+                peers: _peerObservations(nowMs),
+                lastCoLocatedPeerIds: _lastCoLocatedPeerIds,
+                nowMs: nowMs,
+              );
+        if (fused != null) {
+          _lastCoLocatedPeerIds = fused.coLocatedPeerIds;
+          _effectiveGpsAccuracy.value = fused.accuracy;
+        } else {
+          _effectiveGpsAccuracy.value = pos.accuracy;
+        }
+
+        final effectiveLat = fused?.lat ?? pos.latitude;
+        final effectiveLon = fused?.lon ?? pos.longitude;
+        final effectiveAcc = fused?.accuracy ?? pos.accuracy;
+        final fix = ml.Geographic(lat: effectiveLat, lon: effectiveLon);
+
         final advanced = _navNotifier.onPosition(
           fix,
           // `null`, never a fabricated 0, when the fix carries no real
@@ -649,19 +717,31 @@ class _NavigationScreenState extends ConsumerState<NavigationScreen>
           heading: pos.heading,
           headingAccuracy: pos.headingAccuracy,
           speed: pos.speed,
-          accuracy: pos.accuracy,
+          accuracy: effectiveAcc,
           recordBreadcrumb: !_frozen,
         );
         _statsNotifier.onPosition(pos);
-        _onFix(pos);
+        _onFix(
+          pos,
+          latOverride: effectiveLat,
+          lonOverride: effectiveLon,
+          accuracyOverride: effectiveAcc,
+        );
         // Same fix that just drove _onFix (the map marker), so the map
         // marker and the elevation chart's marker never disagree. Not
         // gated on _frozen — a paused user's position is still valid.
         final matcher = _trackMatcher;
         if (!widget.isRecording && matcher != null) {
-          _handleNavMatchFix(pos, fix, matcher);
+          _handleNavMatchFix(
+            pos,
+            fix,
+            matcher,
+            effectiveAccuracy: effectiveAcc,
+            fusedSource: fused?.source ?? FusedGpsSource.self,
+            nowMs: nowMs,
+          );
         }
-        _onLiveCommunityFix(fix, usableAlt);
+        _onLiveCommunityFix(rawFix, usableAlt);
         if (advanced) {
           _persistNow();
         }
@@ -712,6 +792,7 @@ class _NavigationScreenState extends ConsumerState<NavigationScreen>
         'bicycle';
     final calc = EtaCalculator.fromPoints(navPoints, isCycling: isCycling);
     _etaCalculator = calc;
+    _paceCoaster = GpsPaceCoaster(navPoints, isCycling: isCycling);
     _etaNotifier.value = calc.compute(0.0);
 
     unawaited(
@@ -721,35 +802,142 @@ class _NavigationScreenState extends ConsumerState<NavigationScreen>
     );
   }
 
+  List<PeerGpsObservation> _peerObservations(int nowMs) {
+    final session = _groupSession.value;
+    if (session == null) return const <PeerGpsObservation>[];
+    final peers = session.peers;
+    if (peers.isEmpty) return const <PeerGpsObservation>[];
+    return <PeerGpsObservation>[
+      for (final p in peers)
+        PeerGpsObservation(
+          memberId: p.memberId,
+          lat: p.lat,
+          lon: p.lon,
+          accuracy: p.accuracy,
+          ele: p.ele,
+          updatedAtMs: p.updatedAt?.millisecondsSinceEpoch ?? nowMs,
+        ),
+    ];
+  }
+
+  void _onCoasterTick() {
+    if (!mounted || widget.isRecording || _paceCoaster == null) return;
+    final nowMs = DateTime.now().millisecondsSinceEpoch;
+    final rawSelf = _lastRawSelfFix;
+
+    // Only activate groupTether / autonomous coasting when own GPS fix is >6s old.
+    if (rawSelf != null &&
+        (nowMs - rawSelf.timestampMs) <= CooperativeGpsFusion.maxOwnFixAgeMs) {
+      return;
+    }
+
+    final tethered = CooperativeGpsFusion.fuse(
+      selfFix: rawSelf,
+      peers: _peerObservations(nowMs),
+      lastCoLocatedPeerIds: _lastCoLocatedPeerIds,
+      nowMs: nowMs,
+    );
+
+    if (tethered != null && tethered.source == FusedGpsSource.groupTether) {
+      _lastCoLocatedPeerIds = tethered.coLocatedPeerIds;
+      _effectiveGpsAccuracy.value = tethered.accuracy;
+      _gpsSignalState.value = GpsSignalState.cooperative;
+      _animateMarkerTo(tethered.lat, tethered.lon, tethered.accuracy);
+      final matcher = _trackMatcher;
+      if (matcher != null) {
+        final detail = matcher.matchDetailed(
+          tethered.geographic,
+          accuracy: tethered.accuracy,
+        );
+        if (detail != null) {
+          _lastMatchedAlongTrackM = detail.alongTrackMeters;
+          _liveTrackMeters.value = detail.alongTrackMeters;
+          _etaNotifier.value = _etaCalculator?.compute(detail.alongTrackMeters);
+        }
+      }
+      return;
+    }
+
+    final coast = _paceCoaster!.tickCoasting(
+      nowMs,
+      _etaCalculator?.paceFactor ?? 1.0,
+      _frozen,
+    );
+    if (coast == null) return;
+
+    _gpsSignalState.value = GpsSignalState.coasting;
+    _effectiveGpsAccuracy.value = coast.effectiveAccuracyM;
+    _lastMatchedAlongTrackM = coast.effectiveAlongM;
+    _liveTrackMeters.value = coast.effectiveAlongM;
+    _etaNotifier.value = _etaCalculator?.compute(coast.effectiveAlongM);
+    _animateMarkerTo(coast.lat, coast.lon, coast.effectiveAccuracyM);
+  }
+
   void _handleNavMatchFix(
     geo.Position pos,
     ml.Geographic fix,
-    TrackPositionMatcher matcher,
-  ) {
+    TrackPositionMatcher matcher, {
+    required double effectiveAccuracy,
+    required FusedGpsSource fusedSource,
+    required int nowMs,
+  }) {
     final detail = matcher.matchDetailed(
       fix,
       heading: pos.heading,
       headingAccuracy: pos.headingAccuracy,
       speed: pos.speed,
-      accuracy: pos.accuracy,
+      accuracy: effectiveAccuracy,
     );
     if (detail == null) return;
 
-    _lastMatchedAlongTrackM = detail.alongTrackMeters;
-    _liveTrackMeters.value = detail.alongTrackMeters;
+    final coastSnap = _paceCoaster?.ingestFix(
+      lat: fix.lat,
+      lon: fix.lon,
+      accuracy: effectiveAccuracy,
+      matchedAlongM: detail.alongTrackMeters,
+      crossTrackM: detail.crossTrackMeters,
+      isPaused: _frozen,
+      paceFactor: _etaCalculator?.paceFactor ?? 1.0,
+      nowMs: nowMs,
+      fusedSource: fusedSource,
+    );
 
-    if (!detail.isOffTrail) {
-      if (_offTrailNotifier.value != null) {
-        _offTrailNotifier.value = null;
-        _offTrailChartSpots.value = null;
-        _lastRerouteCalcPos = null;
-        _lastRerouteCalcMode = null;
-        _lastRerouteCalcAt = null;
-        _demFallbackPrefetchStarted = false;
-        _pushOffTrailSource(null);
+    if (coastSnap != null) {
+      _gpsSignalState.value = coastSnap.signalState;
+    }
+
+    final effectiveAlongM =
+        coastSnap?.effectiveAlongM ?? detail.alongTrackMeters;
+    final suppressOffTrail = coastSnap?.suppressOffTrail ?? false;
+    final effectiveOffTrail = detail.isOffTrail && !suppressOffTrail;
+
+    _lastMatchedAlongTrackM = effectiveAlongM;
+    _liveTrackMeters.value = effectiveAlongM;
+
+    // > 3000 m Calm Preview Mode: never draw automatic cross-country line.
+    if (detail.crossTrackMeters > OffTrailRouter.farPreviewThresholdMeters) {
+      _farPreviewDistanceM.value = detail.crossTrackMeters;
+      if (!_showingAccessRoute && _offTrailNotifier.value != null) {
+        _clearOffTrailState();
       }
-      _etaCalculator?.recordProgress(detail.alongTrackMeters, DateTime.now());
-      _etaNotifier.value = _etaCalculator?.compute(detail.alongTrackMeters);
+      _etaNotifier.value = _etaCalculator?.compute(effectiveAlongM);
+      return;
+    }
+
+    if (_farPreviewDistanceM.value != null) {
+      _farPreviewDistanceM.value = null;
+      if (_showingAccessRoute) {
+        _showingAccessRoute = false;
+        _clearOffTrailState();
+      }
+    }
+
+    if (!effectiveOffTrail) {
+      if (_offTrailNotifier.value != null) {
+        _clearOffTrailState();
+      }
+      _etaCalculator?.recordProgress(effectiveAlongM, DateTime.now());
+      _etaNotifier.value = _etaCalculator?.compute(effectiveAlongM);
       return;
     }
 
@@ -779,14 +967,14 @@ class _NavigationScreenState extends ConsumerState<NavigationScreen>
         _offTrailNotifier.value == null ||
         _lastRerouteCalcMode != _offTrailMode ||
         movedM >= 20.0 ||
-        elapsedSec >= 8;
+        elapsedSec >= 10;
 
     if (shouldRecompute) {
-      _recomputeOffTrailReroute(fix, detail.alongTrackMeters);
+      _recomputeOffTrailReroute(fix, effectiveAlongM);
     } else {
       final active = _offTrailNotifier.value;
       _etaNotifier.value = _etaCalculator?.compute(
-        detail.alongTrackMeters,
+        effectiveAlongM,
         now: now,
         offTrailDistanceM: active?.distanceM,
         offTrailDurationSec: active?.estimatedSeconds,
@@ -796,18 +984,24 @@ class _NavigationScreenState extends ConsumerState<NavigationScreen>
     }
   }
 
-  void _recomputeOffTrailReroute(ml.Geographic userPos, double alongTrackM) {
-    if (_navTrackPoints.length < 2) return;
-    final reroute = OffTrailRouter.compute(
-      userPos: userPos,
-      userEleM: _lastKnownAltitudeM,
-      trailPoints: _navTrackPoints,
-      lastAlongTrackM: alongTrackM,
-      sampler: _demGrid.sampleElevation,
-      mode: _offTrailMode,
-      localeCode: _localeCode,
-      isCycling: _etaCalculator?.isCycling ?? false,
-    );
+  void _clearOffTrailState() {
+    _valhallaRerouteCancelToken?.cancel('cleared');
+    _valhallaRerouteCancelToken = null;
+    _rerouteGeneration++;
+    _offTrailNotifier.value = null;
+    _offTrailChartSpots.value = null;
+    _lastRerouteCalcPos = null;
+    _lastRerouteCalcMode = null;
+    _lastRerouteCalcAt = null;
+    _demFallbackPrefetchStarted = false;
+    _pushOffTrailSource(null);
+  }
+
+  void _applyRerouteResult(
+    OffTrailRerouteResult? reroute,
+    ml.Geographic userPos,
+    double alongTrackM,
+  ) {
     final now = DateTime.now();
     _lastRerouteCalcPos = userPos;
     _lastRerouteCalcMode = _offTrailMode;
@@ -825,6 +1019,95 @@ class _NavigationScreenState extends ConsumerState<NavigationScreen>
       offTrailAscentM: reroute?.ascentM,
       rejoinAlongTrackM: reroute?.rejoinAlongTrackM,
     );
+  }
+
+  void _recomputeOffTrailReroute(ml.Geographic userPos, double alongTrackM) {
+    if (_navTrackPoints.length < 2) return;
+    _valhallaRerouteCancelToken?.cancel('superseded');
+    _valhallaRerouteCancelToken = null;
+    final myGen = ++_rerouteGeneration;
+
+    final localReroute = OffTrailRouter.compute(
+      userPos: userPos,
+      userEleM: _lastKnownAltitudeM,
+      trailPoints: _navTrackPoints,
+      lastAlongTrackM: alongTrackM,
+      sampler: _demGrid.sampleElevation,
+      mode: _offTrailMode,
+      localeCode: _localeCode,
+      isCycling: _etaCalculator?.isCycling ?? false,
+    );
+    _applyRerouteResult(localReroute, userPos, alongTrackM);
+
+    if (localReroute == null ||
+        !ref.read(onlineStatusProvider) ||
+        !(_liveService?.isConfigured ?? false)) {
+      return;
+    }
+
+    final token = CancelToken();
+    _valhallaRerouteCancelToken = token;
+    unawaited(
+      OffTrailRouter.computeHybridWithValhalla(
+        dio: ref.read(apiProvider),
+        userPos: userPos,
+        userEleM: _lastKnownAltitudeM,
+        trailPoints: _navTrackPoints,
+        lastAlongTrackM: alongTrackM,
+        sampler: _demGrid.sampleElevation,
+        mode: _offTrailMode,
+        localeCode: _localeCode,
+        isCycling: _etaCalculator?.isCycling ?? false,
+        cancelToken: token,
+      ).then((hybrid) {
+        if (!mounted ||
+            myGen != _rerouteGeneration ||
+            _farPreviewDistanceM.value != null ||
+            hybrid == null) {
+          return;
+        }
+        _applyRerouteResult(
+          hybrid,
+          userPos,
+          _lastMatchedAlongTrackM ?? alongTrackM,
+        );
+      }).catchError((Object _) {}),
+    );
+  }
+
+  Future<void> _toggleFarPreviewAccessRoute() async {
+    if (_showingAccessRoute) {
+      setState(() => _showingAccessRoute = false);
+      _offTrailNotifier.value = null;
+      _pushOffTrailSource(null);
+      return;
+    }
+
+    final pos = _currentGeoFix();
+    if (pos == null ||
+        _navTrackPoints.isEmpty ||
+        !(_liveService?.isConfigured ?? false)) {
+      return;
+    }
+
+    _accessRouteLoading.value = true;
+    try {
+      final route = await OffTrailRouter.computeValhallaAccessRoute(
+        dio: ref.read(apiProvider),
+        userPos: pos,
+        userEleM: _lastKnownAltitudeM,
+        trailPoints: _navTrackPoints,
+        sampler: _demGrid.sampleElevation,
+        localeCode: _localeCode,
+        isCycling: _etaCalculator?.isCycling ?? false,
+      );
+      if (!mounted || route == null) return;
+      setState(() => _showingAccessRoute = true);
+      _offTrailNotifier.value = route;
+      _pushOffTrailSource(route);
+    } finally {
+      if (mounted) _accessRouteLoading.value = false;
+    }
   }
 
   List<FlSpot>? _buildOffTrailChartSpots(
@@ -1012,6 +1295,7 @@ class _NavigationScreenState extends ConsumerState<NavigationScreen>
           lat: pos.lat,
           lon: pos.lon,
           trailId: widget.isRecording || widget.id.isEmpty ? null : widget.id,
+          groupCode: _groupSession.value?.code,
           cancelToken: cancelToken,
           isRo: _isRo,
         )
@@ -1136,6 +1420,192 @@ class _NavigationScreenState extends ConsumerState<NavigationScreen>
         _pushRescueSource(null);
       }
     }
+
+    if (event.type == TrailLiveSseEvent.groupMemberUpdate &&
+        event.groupMember != null) {
+      final session = _groupSession.value;
+      if (session != null &&
+          (event.groupCode == null || event.groupCode == session.code)) {
+        final incoming = event.groupMember!.copyWith(
+          isSelf: event.groupMember!.memberId == session.selfMemberId,
+          updatedAt: event.groupMember!.updatedAt ?? now.toUtc(),
+        );
+        final nextMembers = List<GroupMemberModel>.of(session.members);
+        final idx = nextMembers.indexWhere(
+          (m) => m.memberId == incoming.memberId,
+        );
+        if (idx >= 0) {
+          nextMembers[idx] = incoming;
+        } else {
+          nextMembers.add(incoming);
+        }
+        _groupSession.value = session.copyWith(members: nextMembers);
+        if (_selectedGroupMember.value?.memberId == incoming.memberId) {
+          _selectedGroupMember.value = incoming;
+        }
+      }
+    } else if (event.type == TrailLiveSseEvent.groupMemberLeft &&
+        event.leftMemberId != null) {
+      final session = _groupSession.value;
+      if (session != null &&
+          (event.groupCode == null || event.groupCode == session.code)) {
+        final nextMembers = session.members
+            .where((m) => m.memberId != event.leftMemberId)
+            .toList(growable: false);
+        _groupSession.value = session.copyWith(members: nextMembers);
+        if (_selectedGroupMember.value?.memberId == event.leftMemberId) {
+          _selectedGroupMember.value = null;
+        }
+      }
+    }
+  }
+
+  void _syncGroupPingTimer() {
+    _groupPingTimer?.cancel();
+    _groupPingTimer = null;
+    final session = _groupSession.value;
+    if (session != null) {
+      _sendGroupPingTick();
+      _groupPingTimer = Timer.periodic(
+        const Duration(seconds: 6),
+        (_) => _sendGroupPingTick(),
+      );
+    } else {
+      _selectedGroupMember.value = null;
+      _lastCoLocatedPeerIds = <String>{};
+    }
+    final pos = _currentGeoFix();
+    if (pos != null && _uiVisible) {
+      _connectLiveSse(pos);
+    }
+  }
+
+  void _sendGroupPingTick() {
+    final session = _groupSession.value;
+    final service = _liveService;
+    if (session == null || service == null || !service.isConfigured) return;
+
+    final rawSelf = _lastRawSelfFix;
+    final fallbackPos = _currentGeoFix();
+    final lat = rawSelf?.lat ?? fallbackPos?.lat;
+    final lon = rawSelf?.lon ?? fallbackPos?.lon;
+    if (lat == null || lon == null) return;
+
+    final acc = rawSelf?.accuracy ?? (_animAccuracy > 0 ? _animAccuracy : 15.0);
+    unawaited(
+      service
+          .pingGroup(
+            code: session.code,
+            lat: lat,
+            lon: lon,
+            ele: _lastKnownAltitudeM,
+            accuracy: acc,
+            heading: _lastRawHeading ?? _smoothedHeading,
+            speed: _lastRawSpeed,
+            alongTrackM: _lastMatchedAlongTrackM,
+            inNavigation: true,
+          )
+          .then((updated) {
+            if (!mounted) return;
+            final cur = _groupSession.value;
+            if (cur == null || cur.code != updated.code) return;
+            _groupSession.value = cur.copyWith(
+              selfMemberId: updated.selfMemberId.isNotEmpty
+                  ? updated.selfMemberId
+                  : cur.selfMemberId,
+              expiresAt: updated.expiresAt ?? cur.expiresAt,
+              members: updated.members,
+            );
+          })
+          .catchError((Object _) {}),
+    );
+  }
+
+  Future<GroupSessionModel?> _handleCreateGroup(String displayName) async {
+    final service = _liveService;
+    if (service == null || !service.isConfigured) return null;
+    final created = await service.createGroup(
+      trailId: widget.isRecording || widget.id.isEmpty ? null : widget.id,
+      displayName: displayName,
+    );
+    if (!mounted) return created;
+    _groupSession.value = created;
+    _syncGroupPingTimer();
+    return created;
+  }
+
+  Future<GroupSessionModel?> _handleJoinGroup(
+    String code,
+    String displayName,
+  ) async {
+    final service = _liveService;
+    if (service == null || !service.isConfigured) return null;
+    final joined = await service.joinGroup(
+      code: code,
+      displayName: displayName,
+    );
+    if (!mounted) return joined;
+    _groupSession.value = joined;
+    _syncGroupPingTimer();
+    return joined;
+  }
+
+  Future<void> _handleLeaveGroup() async {
+    final session = _groupSession.value;
+    _groupSession.value = null;
+    _syncGroupPingTimer();
+    final service = _liveService;
+    if (session == null || service == null || !service.isConfigured) return;
+    try {
+      await service.leaveGroup(session.code);
+    } catch (_) {}
+  }
+
+  void _onGroupMemberTapped(GroupMemberModel member) {
+    _selectedGroupMember.value =
+        _selectedGroupMember.value?.memberId == member.memberId ? null : member;
+    _controller?.animateCamera(
+      center: ml.Geographic(lat: member.lat, lon: member.lon),
+      nativeDuration: const Duration(milliseconds: 300),
+    );
+  }
+
+  Future<void> _openLiveGroupSheet(BuildContext context) async {
+    final currentUser = ref.read(authProvider).value;
+    final prefName = currentUser?.preferredUsername.trim() ?? '';
+    final initialName = prefName.isNotEmpty
+        ? prefName
+        : (currentUser?.username.trim() ?? '');
+    final rawServer = currentUser?.serverUrl.trim() ?? '';
+    final cleanServer = rawServer.endsWith('/')
+        ? rawServer.substring(0, rawServer.length - 1)
+        : rawServer;
+    final shareUrlBase =
+        (cleanServer.isNotEmpty && !widget.isRecording && widget.id.isNotEmpty)
+        ? '$cleanServer/trail/${widget.id}'
+        : null;
+
+    await showLiveGroupSheet(
+      context,
+      sessionListenable: _groupSession,
+      busyListenable: _liveActionBusy,
+      initialDisplayName: initialName,
+      userAlongTrackM: _lastMatchedAlongTrackM,
+      userPosition: _currentGeoFix(),
+      shareUrlBase: shareUrlBase,
+      onCreateGroup: _handleCreateGroup,
+      onJoinGroup: _handleJoinGroup,
+      onLeaveGroup: _handleLeaveGroup,
+      onFocusMember: (member) {
+        _selectedGroupMember.value = member;
+        _onPanStart();
+        _controller?.animateCamera(
+          center: ml.Geographic(lat: member.lat, lon: member.lon),
+          nativeDuration: const Duration(milliseconds: 300),
+        );
+      },
+      isRo: _isRo,
+    );
   }
 
   void _refreshNearbyWazePrompt(ml.Geographic fix) {
@@ -1554,18 +2024,30 @@ class _NavigationScreenState extends ConsumerState<NavigationScreen>
   /// short tween toward it — mirrors `flutter_map_location_marker`'s
   /// `CurrentLocationLayer`, which disposed/restarted its own per-fix tween
   /// the same way, so overlapping fixes never fight each other.
-  void _onFix(geo.Position pos) {
-    _animStartLat = _lastLat ?? pos.latitude;
-    _animStartLon = _lastLon ?? pos.longitude;
-    _animTargetLat = pos.latitude;
-    _animTargetLon = pos.longitude;
-    _animAccuracy = pos.accuracy;
+  void _onFix(
+    geo.Position pos, {
+    double? latOverride,
+    double? lonOverride,
+    double? accuracyOverride,
+  }) {
+    final targetLat = latOverride ?? pos.latitude;
+    final targetLon = lonOverride ?? pos.longitude;
+    final targetAcc = accuracyOverride ?? pos.accuracy;
+    _animateMarkerTo(targetLat, targetLon, targetAcc);
     if (_smoothedHeading == null &&
         pos.heading.isFinite &&
         pos.heading >= 0 &&
         pos.speed > 0.5) {
       _onHeading(pos.heading);
     }
+  }
+
+  void _animateMarkerTo(double lat, double lon, double accuracy) {
+    _animStartLat = _lastLat ?? lat;
+    _animStartLon = _lastLon ?? lon;
+    _animTargetLat = lat;
+    _animTargetLon = lon;
+    _animAccuracy = accuracy;
     _positionAnimController.forward(from: 0);
   }
 
@@ -1773,10 +2255,19 @@ class _NavigationScreenState extends ConsumerState<NavigationScreen>
     _headingSub?.cancel();
     _persistTimer?.cancel();
     _liveHeartbeatTimer?.cancel();
+    _coasterTimer?.cancel();
+    _groupPingTimer?.cancel();
+    _valhallaRerouteCancelToken?.cancel('dispose');
     _disconnectLiveSse();
     if (active_nav.read(_store) == null) {
       final service = _liveService;
       if (service != null && service.isConfigured) {
+        final activeGroup = _groupSession.value;
+        if (activeGroup != null) {
+          unawaited(
+            service.leaveGroup(activeGroup.code).catchError((Object _) {}),
+          );
+        }
         unawaited(service.clearHeartbeat());
       }
     }
@@ -1798,6 +2289,12 @@ class _NavigationScreenState extends ConsumerState<NavigationScreen>
     _etaNotifier.dispose();
     _offTrailNotifier.dispose();
     _offTrailChartSpots.dispose();
+    _gpsSignalState.dispose();
+    _effectiveGpsAccuracy.dispose();
+    _farPreviewDistanceM.dispose();
+    _accessRouteLoading.dispose();
+    _groupSession.dispose();
+    _selectedGroupMember.dispose();
     _activeHikers30m.dispose();
     _liveReports.dispose();
     _nearbyPromptReport.dispose();
@@ -2286,7 +2783,7 @@ class _NavigationScreenState extends ConsumerState<NavigationScreen>
             },
             paint: <String, Object>{
               'line-color': '#FFFFFF',
-              'line-width': 7.0,
+              'line-width': 6.0,
             },
           ),
         );
@@ -2299,9 +2796,8 @@ class _NavigationScreenState extends ConsumerState<NavigationScreen>
               'line-join': 'round',
             },
             paint: <String, Object>{
-              'line-color': '#F97316',
-              'line-width': 4.0,
-              'line-dasharray': [2.0, 1.5],
+              'line-color': '#B45309',
+              'line-width': 3.5,
             },
           ),
         );
@@ -2497,6 +2993,7 @@ class _NavigationScreenState extends ConsumerState<NavigationScreen>
                       },
                       onEvent: (event) {
                         if (event is ml.MapEventClick) {
+                          _selectedGroupMember.value = null;
                           setState(() => _selectedWaypoint = null);
                         } else if (event is ml.MapEventStartMoveCamera &&
                             event.reason == ml.CameraChangeReason.apiGesture &&
@@ -2520,8 +3017,14 @@ class _NavigationScreenState extends ConsumerState<NavigationScreen>
                         _LiveCommunityMarkerLayer(
                           reports: _liveReports,
                           sosAlerts: _nearbySosAlerts,
+                          groupSession: _groupSession,
+                          selectedGroupMember: _selectedGroupMember,
+                          userAlongTrackM: _liveTrackMeters,
+                          userPosition: _currentPosition,
+                          isRo: _isRo,
                           onReportTap: _onReportMarkerTapped,
                           onSosTap: _onSosMarkerTapped,
+                          onGroupMemberTap: _onGroupMemberTapped,
                         ),
                         _LocationMarkerLayer(
                           position: _currentPosition,
@@ -2586,18 +3089,99 @@ class _NavigationScreenState extends ConsumerState<NavigationScreen>
                                   onPressed: _followEnabled
                                       ? null
                                       : _onRecenter,
-                                  icon: const FaIcon(
+                                  icon: FaIcon(
                                     FontAwesomeIcons.locationCrosshairs,
+                                    size: 18,
+                                    color: _followEnabled
+                                        ? Theme.of(context)
+                                              .colorScheme
+                                              .onSurface
+                                              .withValues(alpha: 0.38)
+                                        : Theme.of(
+                                            context,
+                                          ).colorScheme.onSurface,
                                   ),
                                   style: IconButton.styleFrom(
-                                    backgroundColor: Theme.of(
-                                      context,
-                                    ).colorScheme.surface,
-                                    disabledBackgroundColor: Theme.of(
-                                      context,
-                                    ).colorScheme.surface,
-                                    disabledForegroundColor: Colors.grey,
+                                    backgroundColor: Theme.of(context)
+                                        .colorScheme
+                                        .surface
+                                        .withValues(alpha: 0.94),
+                                    disabledBackgroundColor: Theme.of(context)
+                                        .colorScheme
+                                        .surface
+                                        .withValues(alpha: 0.94),
+                                    side: BorderSide(
+                                      color: Theme.of(context)
+                                          .colorScheme
+                                          .outline
+                                          .withValues(alpha: 0.55),
+                                    ),
                                   ),
+                                ),
+                                const SizedBox(height: 8),
+                                ValueListenableBuilder<GroupSessionModel?>(
+                                  valueListenable: _groupSession,
+                                  builder: (context, group, _) {
+                                    final theme = Theme.of(context);
+                                    final count = group?.members.length ?? 0;
+                                    return Stack(
+                                      clipBehavior: Clip.none,
+                                      children: [
+                                        IconButton(
+                                          key: const ValueKey('nav-group-btn'),
+                                          tooltip: _isRo
+                                              ? 'Grup live'
+                                              : 'Live group',
+                                          onPressed: () =>
+                                              _openLiveGroupSheet(context),
+                                          icon: Icon(
+                                            Icons.group_outlined,
+                                            color: theme.colorScheme.onSurface,
+                                            size: 21,
+                                          ),
+                                          style: IconButton.styleFrom(
+                                            backgroundColor: theme
+                                                .colorScheme
+                                                .surface
+                                                .withValues(alpha: 0.94),
+                                            side: BorderSide(
+                                              color: theme.colorScheme.outline
+                                                  .withValues(alpha: 0.55),
+                                            ),
+                                          ),
+                                        ),
+                                        if (count > 0)
+                                          Positioned(
+                                            right: 0,
+                                            top: -2,
+                                            child: Container(
+                                              padding:
+                                                  const EdgeInsets.symmetric(
+                                                    horizontal: 5,
+                                                    vertical: 1.5,
+                                                  ),
+                                              decoration: BoxDecoration(
+                                                color: AppColors.primaryLight,
+                                                borderRadius:
+                                                    BorderRadius.circular(10),
+                                                border: Border.all(
+                                                  color: Colors.white,
+                                                  width: 1.5,
+                                                ),
+                                              ),
+                                              child: Text(
+                                                '$count',
+                                                style: const TextStyle(
+                                                  color: Colors.white,
+                                                  fontSize: 10,
+                                                  fontWeight: FontWeight.w800,
+                                                ),
+                                              ),
+                                            ),
+                                          ),
+                                      ],
+                                    );
+                                  },
                                 ),
                                 const SizedBox(height: 8),
                                 IconButton(
@@ -2607,14 +3191,24 @@ class _NavigationScreenState extends ConsumerState<NavigationScreen>
                                       : 'Report on trail',
                                   onPressed: () =>
                                       _openWazeReportSheet(context),
-                                  icon: const Icon(
-                                    Icons.warning_amber_rounded,
-                                    color: Color(0xFFEA580C),
+                                  icon: Icon(
+                                    Icons.add_location_alt_outlined,
+                                    color: Theme.of(
+                                      context,
+                                    ).colorScheme.onSurface,
+                                    size: 21,
                                   ),
                                   style: IconButton.styleFrom(
-                                    backgroundColor: Theme.of(
-                                      context,
-                                    ).colorScheme.surface,
+                                    backgroundColor: Theme.of(context)
+                                        .colorScheme
+                                        .surface
+                                        .withValues(alpha: 0.94),
+                                    side: BorderSide(
+                                      color: Theme.of(context)
+                                          .colorScheme
+                                          .outline
+                                          .withValues(alpha: 0.55),
+                                    ),
                                   ),
                                 ),
                                 const SizedBox(height: 8),
@@ -2768,52 +3362,50 @@ class _NavigationScreenState extends ConsumerState<NavigationScreen>
     bool isArrived,
     String unit,
   ) {
-    return ValueListenableBuilder<OffTrailRerouteResult?>(
-      valueListenable: _offTrailNotifier,
-      builder: (context, reroute, _) {
-        if (reroute != null) {
-          return Card(
-            elevation: 6,
-            shape: RoundedRectangleBorder(
-              borderRadius: BorderRadius.circular(16),
-            ),
-            color: const Color(0xFFEA580C),
-            child: Padding(
-              padding: const EdgeInsets.symmetric(
-                horizontal: 14.0,
-                vertical: 10.0,
+    final theme = Theme.of(context);
+    return ValueListenableBuilder<double?>(
+      valueListenable: _farPreviewDistanceM,
+      builder: (context, farDist, _) {
+        return ValueListenableBuilder<OffTrailRerouteResult?>(
+          valueListenable: _offTrailNotifier,
+          builder: (context, reroute, _) {
+            return Card(
+              key: const ValueKey('nav-banner'),
+              elevation: 3,
+              shadowColor: Colors.black.withValues(alpha: 0.14),
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(16),
+                side: BorderSide(
+                  color: theme.colorScheme.outline.withValues(alpha: 0.55),
+                ),
               ),
-              child: _buildOffTrailBannerContent(
-                context,
-                localizations,
-                reroute,
-                unit,
+              color: theme.colorScheme.surface.withValues(alpha: 0.95),
+              child: Padding(
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 14.0,
+                  vertical: 10.0,
+                ),
+                child: (reroute != null && farDist == null)
+                    ? _buildOffTrailBannerContent(
+                        context,
+                        reroute,
+                        unit,
+                      )
+                    : (isArrived
+                          ? _buildCompletionBannerContent(
+                              context,
+                              localizations,
+                            )
+                          : _buildActiveBannerContent(
+                              context,
+                              localizations,
+                              maneuvers,
+                              currentIndex,
+                              unit,
+                            )),
               ),
-            ),
-          );
-        }
-
-        return Card(
-          elevation: 4,
-          shape: RoundedRectangleBorder(
-            borderRadius: BorderRadius.circular(16),
-          ),
-          color: Theme.of(context).colorScheme.surface,
-          child: Padding(
-            padding: const EdgeInsets.symmetric(
-              horizontal: 16.0,
-              vertical: 12.0,
-            ),
-            child: isArrived
-                ? _buildCompletionBannerContent(context, localizations)
-                : _buildActiveBannerContent(
-                    context,
-                    localizations,
-                    maneuvers,
-                    currentIndex,
-                    unit,
-                  ),
-          ),
+            );
+          },
         );
       },
     );
@@ -2821,11 +3413,19 @@ class _NavigationScreenState extends ConsumerState<NavigationScreen>
 
   Widget _buildOffTrailBannerContent(
     BuildContext context,
-    AppLocalizations localizations,
     OffTrailRerouteResult reroute,
     String unit,
   ) {
+    final theme = Theme.of(context);
+    final isDark = theme.brightness == Brightness.dark;
     final distText = formatDistance(reroute.distanceM, unit: unit);
+    final climbPart = reroute.ascentM >= 3.0
+        ? ' · +${reroute.ascentM.round()} m'
+        : '';
+    final headline = _isRo
+        ? '$distText până la potecă$climbPart'
+        : '$distText to trail$climbPart';
+
     return Row(
       crossAxisAlignment: CrossAxisAlignment.center,
       children: [
@@ -2838,19 +3438,21 @@ class _NavigationScreenState extends ConsumerState<NavigationScreen>
               reroute.initialBearingDeg,
             );
             return Container(
-              width: 44,
-              height: 44,
+              width: 36,
+              height: 36,
               decoration: BoxDecoration(
-                color: Colors.white.withValues(alpha: 0.2),
-                shape: BoxShape.circle,
+                color: const Color(0xFFD97706).withValues(alpha: 0.16),
+                borderRadius: BorderRadius.circular(10),
               ),
               child: Center(
                 child: Transform.rotate(
                   angle: relDeg * pi / 180.0,
-                  child: const Icon(
-                    Icons.navigation,
-                    color: Colors.white,
-                    size: 26,
+                  child: Icon(
+                    Icons.navigation_rounded,
+                    color: isDark
+                        ? const Color(0xFFFCD34D)
+                        : const Color(0xFFB45309),
+                    size: 20,
                   ),
                 ),
               ),
@@ -2863,95 +3465,28 @@ class _NavigationScreenState extends ConsumerState<NavigationScreen>
             crossAxisAlignment: CrossAxisAlignment.start,
             mainAxisSize: MainAxisSize.min,
             children: [
-              Row(
-                children: [
-                  const Icon(
-                    Icons.warning_amber_rounded,
-                    color: Colors.white,
-                    size: 16,
-                  ),
-                  const SizedBox(width: 6),
-                  Flexible(
-                    child: Text(
-                      '${localizations.nav_off_trail_title} · ${localizations.nav_rejoin_in(distText)}',
-                      style: Theme.of(context).textTheme.labelMedium?.copyWith(
-                        color: Colors.white,
-                        fontWeight: FontWeight.w700,
-                      ),
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                    ),
-                  ),
-                ],
+              Text(
+                headline,
+                style: theme.textTheme.titleSmall?.copyWith(
+                  color: theme.colorScheme.onSurface,
+                  fontWeight: FontWeight.w800,
+                ),
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
               ),
               const SizedBox(height: 2),
               Text(
                 reroute.instruction,
-                style: Theme.of(context).textTheme.titleMedium?.copyWith(
-                  color: Colors.white,
-                  fontWeight: FontWeight.bold,
+                style: theme.textTheme.bodySmall?.copyWith(
+                  color: theme.colorScheme.onSurface.withValues(alpha: 0.72),
                 ),
-                maxLines: 2,
+                maxLines: 1,
                 overflow: TextOverflow.ellipsis,
-              ),
-              const SizedBox(height: 2),
-              Text(
-                reroute.slopeAdvice,
-                style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                  color: Colors.white.withValues(alpha: 0.92),
-                ),
-                maxLines: 2,
-                overflow: TextOverflow.ellipsis,
-              ),
-              const SizedBox(height: 6),
-              Wrap(
-                spacing: 8,
-                runSpacing: 4,
-                children: [
-                  _buildOffTrailModeChip(
-                    context,
-                    label: localizations.nav_min_climb,
-                    selected: reroute.mode == OffTrailMode.minClimb,
-                    onTap: () => _selectOffTrailMode(OffTrailMode.minClimb),
-                  ),
-                  _buildOffTrailModeChip(
-                    context,
-                    label: localizations.nav_shortest_path,
-                    selected: reroute.mode == OffTrailMode.shortestSafe,
-                    onTap: () => _selectOffTrailMode(OffTrailMode.shortestSafe),
-                  ),
-                ],
               ),
             ],
           ),
         ),
       ],
-    );
-  }
-
-  Widget _buildOffTrailModeChip(
-    BuildContext context, {
-    required String label,
-    required bool selected,
-    required VoidCallback onTap,
-  }) {
-    return Material(
-      color: selected ? Colors.white : Colors.white.withValues(alpha: 0.18),
-      borderRadius: BorderRadius.circular(14),
-      child: InkWell(
-        onTap: onTap,
-        borderRadius: BorderRadius.circular(14),
-        child: Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
-          child: Text(
-            label,
-            style: Theme.of(context).textTheme.labelSmall?.copyWith(
-              color: selected ? const Color(0xFF9A3412) : Colors.white,
-              fontWeight: FontWeight.w700,
-            ),
-          ),
-        ),
-      ),
     );
   }
 
@@ -2965,20 +3500,28 @@ class _NavigationScreenState extends ConsumerState<NavigationScreen>
     if (maneuvers.isEmpty) {
       return const SizedBox.shrink();
     }
+    final theme = Theme.of(context);
     final safeIndex = currentIndex.clamp(0, maneuvers.length - 1);
     final maneuver = maneuvers[safeIndex];
 
     return Row(
       crossAxisAlignment: CrossAxisAlignment.center,
       children: [
-        Padding(
-          padding: const EdgeInsets.only(top: 2.0, right: 8.0),
+        Container(
+          width: 36,
+          height: 36,
+          decoration: BoxDecoration(
+            color: AppColors.primaryLight,
+            borderRadius: BorderRadius.circular(10),
+          ),
+          alignment: Alignment.center,
           child: Icon(
             _iconForManeuverType(maneuver.type),
-            color: Theme.of(context).colorScheme.onSurface,
-            size: 24,
+            color: Colors.white,
+            size: 20,
           ),
         ),
+        const SizedBox(width: 12),
         Expanded(
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
@@ -2986,16 +3529,21 @@ class _NavigationScreenState extends ConsumerState<NavigationScreen>
             children: [
               Text(
                 maneuver.instruction,
-                style: Theme.of(context).textTheme.titleLarge,
-                maxLines: 3,
+                style: theme.textTheme.titleSmall?.copyWith(
+                  fontWeight: FontWeight.w700,
+                  color: theme.colorScheme.onSurface,
+                ),
+                maxLines: 2,
                 overflow: TextOverflow.ellipsis,
               ),
-              const SizedBox(height: 4),
+              const SizedBox(height: 2),
               Text(
                 localizations.in_distance(
                   formatDistance(maneuver.length * 1000, unit: unit),
                 ),
-                style: Theme.of(context).textTheme.bodyMedium,
+                style: theme.textTheme.bodySmall?.copyWith(
+                  color: theme.colorScheme.onSurface.withValues(alpha: 0.7),
+                ),
               ),
             ],
           ),
@@ -3004,8 +3552,8 @@ class _NavigationScreenState extends ConsumerState<NavigationScreen>
           const SizedBox(width: 8),
           Icon(
             Icons.cloud_off,
-            color: Theme.of(context).colorScheme.onSurface,
-            size: 20,
+            color: theme.colorScheme.onSurface.withValues(alpha: 0.75),
+            size: 19,
           ),
         ],
       ],
@@ -3016,14 +3564,28 @@ class _NavigationScreenState extends ConsumerState<NavigationScreen>
     BuildContext context,
     AppLocalizations localizations,
   ) {
+    final theme = Theme.of(context);
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       mainAxisSize: MainAxisSize.min,
       children: [
         Row(
           children: [
-            FaIcon(FontAwesomeIcons.circleCheck, color: Colors.greenAccent),
-            const SizedBox(width: 16),
+            Container(
+              width: 36,
+              height: 36,
+              decoration: BoxDecoration(
+                color: AppColors.primaryLight,
+                borderRadius: BorderRadius.circular(10),
+              ),
+              alignment: Alignment.center,
+              child: const Icon(
+                Icons.flag_rounded,
+                color: Colors.white,
+                size: 20,
+              ),
+            ),
+            const SizedBox(width: 12),
             Expanded(
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
@@ -3031,12 +3593,16 @@ class _NavigationScreenState extends ConsumerState<NavigationScreen>
                 children: [
                   Text(
                     localizations.you_have_arrived,
-                    style: Theme.of(context).textTheme.titleLarge,
+                    style: theme.textTheme.titleSmall?.copyWith(
+                      fontWeight: FontWeight.w800,
+                    ),
                   ),
-                  const SizedBox(height: 4),
+                  const SizedBox(height: 2),
                   Text(
                     localizations.reached_end_of_trail,
-                    style: Theme.of(context).textTheme.bodyMedium,
+                    style: theme.textTheme.bodySmall?.copyWith(
+                      color: theme.colorScheme.onSurface.withValues(alpha: 0.7),
+                    ),
                   ),
                 ],
               ),
@@ -3044,7 +3610,7 @@ class _NavigationScreenState extends ConsumerState<NavigationScreen>
           ],
         ),
         if (_hasSavableTrack()) ...[
-          const SizedBox(height: 12),
+          const SizedBox(height: 10),
           FilledButton.icon(
             onPressed: _savingTrack ? null : () => _saveRecordedTrack(context),
             icon: _savingTrack
@@ -3182,6 +3748,9 @@ class _NavigationScreenState extends ConsumerState<NavigationScreen>
           },
         ),
 
+        if (!widget.isRecording)
+          _buildNavigationContextStrip(context, localizations, unit),
+
         // Additional content fades in as the sheet expands.
         AnimatedBuilder(
           animation: _sheetController,
@@ -3231,6 +3800,269 @@ class _NavigationScreenState extends ConsumerState<NavigationScreen>
         // Clearance so content does not hide behind the button overlay.
         const SizedBox(height: 80),
       ],
+    );
+  }
+
+  Widget _buildNavigationContextStrip(
+    BuildContext context,
+    AppLocalizations localizations,
+    String unit,
+  ) {
+    final theme = Theme.of(context);
+    return ValueListenableBuilder<double?>(
+      valueListenable: _farPreviewDistanceM,
+      builder: (context, farDist, _) {
+        return ValueListenableBuilder<OffTrailRerouteResult?>(
+          valueListenable: _offTrailNotifier,
+          builder: (context, reroute, _) {
+            return ValueListenableBuilder<GpsSignalState>(
+              valueListenable: _gpsSignalState,
+              builder: (context, sigState, _) {
+                return ValueListenableBuilder<double>(
+                  valueListenable: _effectiveGpsAccuracy,
+                  builder: (context, effAcc, _) {
+                    final hasGpsChip =
+                        sigState == GpsSignalState.degraded ||
+                        sigState == GpsSignalState.coasting ||
+                        sigState == GpsSignalState.cooperative;
+
+                    if (farDist == null && reroute == null && !hasGpsChip) {
+                      return const SizedBox.shrink();
+                    }
+
+                    return Padding(
+                      padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
+                      child: Wrap(
+                        spacing: 8,
+                        runSpacing: 6,
+                        crossAxisAlignment: WrapCrossAlignment.center,
+                        children: [
+                          if (farDist != null) ...[
+                            Container(
+                              padding: const EdgeInsets.symmetric(
+                                horizontal: 10,
+                                vertical: 5,
+                              ),
+                              decoration: BoxDecoration(
+                                color: theme.colorScheme.onSurface.withValues(
+                                  alpha: 0.06,
+                                ),
+                                borderRadius: BorderRadius.circular(12),
+                                border: Border.all(
+                                  color: theme.colorScheme.outline.withValues(
+                                    alpha: 0.5,
+                                  ),
+                                ),
+                              ),
+                              child: Text(
+                                _isRo
+                                    ? 'La ${formatDistance(farDist, unit: unit)} de start · Mod previzualizare'
+                                    : '${formatDistance(farDist, unit: unit)} from start · Preview mode',
+                                style: theme.textTheme.labelSmall?.copyWith(
+                                  fontWeight: FontWeight.w700,
+                                ),
+                              ),
+                            ),
+                            ValueListenableBuilder<bool>(
+                              valueListenable: _accessRouteLoading,
+                              builder: (context, loading, _) {
+                                return OutlinedButton.icon(
+                                  key: const ValueKey('nav-access-route-btn'),
+                                  style: OutlinedButton.styleFrom(
+                                    visualDensity: VisualDensity.compact,
+                                    padding: const EdgeInsets.symmetric(
+                                      horizontal: 10,
+                                      vertical: 4,
+                                    ),
+                                    shape: RoundedRectangleBorder(
+                                      borderRadius: BorderRadius.circular(12),
+                                    ),
+                                  ),
+                                  onPressed: loading
+                                      ? null
+                                      : _toggleFarPreviewAccessRoute,
+                                  icon: loading
+                                      ? const SizedBox(
+                                          width: 12,
+                                          height: 12,
+                                          child: CircularProgressIndicator(
+                                            strokeWidth: 1.8,
+                                          ),
+                                        )
+                                      : Icon(
+                                          _showingAccessRoute
+                                              ? Icons.visibility_off_outlined
+                                              : Icons.alt_route_rounded,
+                                          size: 14,
+                                        ),
+                                  label: Text(
+                                    _showingAccessRoute
+                                        ? (_isRo
+                                              ? 'Ascunde ruta'
+                                              : 'Hide route')
+                                        : (_isRo
+                                              ? 'Rută de acces'
+                                              : 'Access route'),
+                                    style: theme.textTheme.labelSmall?.copyWith(
+                                      fontWeight: FontWeight.w700,
+                                    ),
+                                  ),
+                                );
+                              },
+                            ),
+                          ],
+                          if (reroute != null && farDist == null) ...[
+                            Container(
+                              padding: const EdgeInsets.symmetric(
+                                horizontal: 9,
+                                vertical: 4,
+                              ),
+                              decoration: BoxDecoration(
+                                color: const Color(
+                                  0xFFD97706,
+                                ).withValues(alpha: 0.14),
+                                borderRadius: BorderRadius.circular(10),
+                              ),
+                              child: Text(
+                                _isRo
+                                    ? 'Abatere · +${reroute.ascentM.round()} m'
+                                    : 'Detour · +${reroute.ascentM.round()} m',
+                                style: theme.textTheme.labelSmall?.copyWith(
+                                  color: theme.brightness == Brightness.dark
+                                      ? const Color(0xFFFCD34D)
+                                      : const Color(0xFF92400E),
+                                  fontWeight: FontWeight.w700,
+                                ),
+                              ),
+                            ),
+                            _buildContextModeChip(
+                              context,
+                              key: const ValueKey('offtrail-mode-min-climb'),
+                              label: localizations.nav_min_climb,
+                              selected: reroute.mode == OffTrailMode.minClimb,
+                              onTap: () =>
+                                  _selectOffTrailMode(OffTrailMode.minClimb),
+                            ),
+                            _buildContextModeChip(
+                              context,
+                              key: const ValueKey(
+                                'offtrail-mode-shortest-safe',
+                              ),
+                              label: _isRo
+                                  ? 'Drum scurt'
+                                  : localizations.nav_shortest_path,
+                              selected:
+                                  reroute.mode == OffTrailMode.shortestSafe,
+                              onTap: () => _selectOffTrailMode(
+                                OffTrailMode.shortestSafe,
+                              ),
+                            ),
+                          ],
+                          if (sigState == GpsSignalState.degraded ||
+                              sigState == GpsSignalState.coasting)
+                            Container(
+                              padding: const EdgeInsets.symmetric(
+                                horizontal: 9,
+                                vertical: 4,
+                              ),
+                              decoration: BoxDecoration(
+                                color: theme.colorScheme.onSurface.withValues(
+                                  alpha: 0.06,
+                                ),
+                                borderRadius: BorderRadius.circular(10),
+                                border: Border.all(
+                                  color: theme.colorScheme.outline.withValues(
+                                    alpha: 0.45,
+                                  ),
+                                ),
+                              ),
+                              child: Text(
+                                _isRo
+                                    ? 'GPS slab · estimat după ritm'
+                                    : 'Weak GPS · pace estimated',
+                                style: theme.textTheme.labelSmall?.copyWith(
+                                  color: theme.colorScheme.onSurface.withValues(
+                                    alpha: 0.8,
+                                  ),
+                                  fontWeight: FontWeight.w600,
+                                ),
+                              ),
+                            )
+                          else if (sigState == GpsSignalState.cooperative)
+                            Container(
+                              padding: const EdgeInsets.symmetric(
+                                horizontal: 9,
+                                vertical: 4,
+                              ),
+                              decoration: BoxDecoration(
+                                color: theme.colorScheme.onSurface.withValues(
+                                  alpha: 0.06,
+                                ),
+                                borderRadius: BorderRadius.circular(10),
+                                border: Border.all(
+                                  color: theme.colorScheme.outline.withValues(
+                                    alpha: 0.45,
+                                  ),
+                                ),
+                              ),
+                              child: Text(
+                                _isRo
+                                    ? 'GPS grup · ±${effAcc.round()} m'
+                                    : 'Group GPS · ±${effAcc.round()} m',
+                                style: theme.textTheme.labelSmall?.copyWith(
+                                  color: theme.colorScheme.onSurface.withValues(
+                                    alpha: 0.8,
+                                  ),
+                                  fontWeight: FontWeight.w600,
+                                ),
+                              ),
+                            ),
+                        ],
+                      ),
+                    );
+                  },
+                );
+              },
+            );
+          },
+        );
+      },
+    );
+  }
+
+  Widget _buildContextModeChip(
+    BuildContext context, {
+    required Key key,
+    required String label,
+    required bool selected,
+    required VoidCallback onTap,
+  }) {
+    final theme = Theme.of(context);
+    final selectedBg = theme.brightness == Brightness.dark
+        ? theme.colorScheme.primary
+        : AppColors.primaryLight;
+    return Material(
+      color: selected
+          ? selectedBg
+          : theme.colorScheme.onSurface.withValues(alpha: 0.06),
+      borderRadius: BorderRadius.circular(10),
+      child: InkWell(
+        key: key,
+        onTap: onTap,
+        borderRadius: BorderRadius.circular(10),
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 4),
+          child: Text(
+            label,
+            style: theme.textTheme.labelSmall?.copyWith(
+              color: selected
+                  ? Colors.white
+                  : theme.colorScheme.onSurface.withValues(alpha: 0.82),
+              fontWeight: FontWeight.w700,
+            ),
+          ),
+        ),
+      ),
     );
   }
 
@@ -3817,99 +4649,242 @@ class _LocationMarkerLayer extends StatelessWidget {
   }
 }
 
-/// Renders active community Waze reports, permanent landmarks, and nearby SOS
-/// emergency pins on the live navigation map.
+/// Renders active community Waze reports, permanent landmarks, nearby SOS
+/// emergency pins, and live hiking group friends on the navigation map.
 class _LiveCommunityMarkerLayer extends StatelessWidget {
   const _LiveCommunityMarkerLayer({
     required this.reports,
     required this.sosAlerts,
+    required this.groupSession,
+    required this.selectedGroupMember,
+    required this.userAlongTrackM,
+    required this.userPosition,
+    required this.isRo,
     required this.onReportTap,
     required this.onSosTap,
+    required this.onGroupMemberTap,
   });
 
   final ValueNotifier<List<TrailReportModel>> reports;
   final ValueNotifier<List<SosAlertModel>> sosAlerts;
+  final ValueNotifier<GroupSessionModel?> groupSession;
+  final ValueNotifier<GroupMemberModel?> selectedGroupMember;
+  final ValueNotifier<double?> userAlongTrackM;
+  final ValueNotifier<LocationMarkerPosition?> userPosition;
+  final bool isRo;
   final ValueChanged<TrailReportModel> onReportTap;
   final ValueChanged<SosAlertModel> onSosTap;
+  final ValueChanged<GroupMemberModel> onGroupMemberTap;
 
   @override
   Widget build(BuildContext context) {
+    final theme = Theme.of(context);
     return ValueListenableBuilder<List<TrailReportModel>>(
       valueListenable: reports,
       builder: (context, reportList, _) {
         return ValueListenableBuilder<List<SosAlertModel>>(
           valueListenable: sosAlerts,
           builder: (context, sosList, _) {
-            if (reportList.isEmpty && sosList.isEmpty) {
-              return const SizedBox.shrink();
-            }
-            return ml.WidgetLayer(
-              markers: [
-                for (final report in reportList)
-                  ml.Marker(
-                    point: ml.Geographic(lat: report.lat, lon: report.lon),
-                    size: const Size(38, 38),
-                    child: GestureDetector(
-                      behavior: HitTestBehavior.opaque,
-                      onTap: () => onReportTap(report),
-                      child: Opacity(
-                        opacity: report.isDryOrClosed ? 0.65 : 1.0,
-                        child: Container(
-                          decoration: BoxDecoration(
-                            color: Colors.white,
-                            shape: BoxShape.circle,
-                            border: Border.all(
-                              color: categoryAccentColor(report.category),
-                              width: 2.5,
+            return ValueListenableBuilder<GroupSessionModel?>(
+              valueListenable: groupSession,
+              builder: (context, session, _) {
+                return ValueListenableBuilder<GroupMemberModel?>(
+                  valueListenable: selectedGroupMember,
+                  builder: (context, selectedFriend, _) {
+                    final peers = session?.peers ?? const <GroupMemberModel>[];
+                    if (reportList.isEmpty &&
+                        sosList.isEmpty &&
+                        peers.isEmpty) {
+                      return const SizedBox.shrink();
+                    }
+                    final userPosVal = userPosition.value;
+                    final userGeo = userPosVal != null
+                        ? ml.Geographic(
+                            lat: userPosVal.latitude,
+                            lon: userPosVal.longitude,
+                          )
+                        : null;
+                    return ml.WidgetLayer(
+                      markers: [
+                        for (final report in reportList)
+                          ml.Marker(
+                            point: ml.Geographic(
+                              lat: report.lat,
+                              lon: report.lon,
                             ),
-                            boxShadow: [
-                              BoxShadow(
-                                color: Colors.black.withValues(alpha: 0.28),
-                                blurRadius: 4,
-                                offset: const Offset(0, 1),
+                            size: const Size(38, 38),
+                            child: GestureDetector(
+                              behavior: HitTestBehavior.opaque,
+                              onTap: () => onReportTap(report),
+                              child: Opacity(
+                                opacity: report.isDryOrClosed ? 0.65 : 1.0,
+                                child: Container(
+                                  decoration: BoxDecoration(
+                                    color: Colors.white,
+                                    shape: BoxShape.circle,
+                                    border: Border.all(
+                                      color: categoryAccentColor(
+                                        report.category,
+                                      ),
+                                      width: 2.5,
+                                    ),
+                                    boxShadow: [
+                                      BoxShadow(
+                                        color: Colors.black.withValues(
+                                          alpha: 0.28,
+                                        ),
+                                        blurRadius: 4,
+                                        offset: const Offset(0, 1),
+                                      ),
+                                    ],
+                                  ),
+                                  alignment: Alignment.center,
+                                  child: Text(
+                                    report.category.emoji,
+                                    style: const TextStyle(fontSize: 18),
+                                  ),
+                                ),
                               ),
-                            ],
-                          ),
-                          alignment: Alignment.center,
-                          child: Text(
-                            report.category.emoji,
-                            style: const TextStyle(fontSize: 18),
-                          ),
-                        ),
-                      ),
-                    ),
-                  ),
-                for (final sos in sosList)
-                  ml.Marker(
-                    point: ml.Geographic(lat: sos.lat, lon: sos.lon),
-                    size: const Size(46, 46),
-                    child: GestureDetector(
-                      behavior: HitTestBehavior.opaque,
-                      onTap: () => onSosTap(sos),
-                      child: Container(
-                        decoration: BoxDecoration(
-                          color: const Color(0xFFDC2626),
-                          shape: BoxShape.circle,
-                          border: Border.all(color: Colors.white, width: 3),
-                          boxShadow: [
-                            BoxShadow(
-                              color: const Color(
-                                0xFFDC2626,
-                              ).withValues(alpha: 0.55),
-                              blurRadius: 8,
-                              spreadRadius: 1,
                             ),
-                          ],
-                        ),
-                        alignment: Alignment.center,
-                        child: const Text(
-                          '🆘',
-                          style: TextStyle(fontSize: 20),
-                        ),
-                      ),
-                    ),
-                  ),
-              ],
+                          ),
+                        for (final friend in peers)
+                          ml.Marker(
+                            point: ml.Geographic(
+                              lat: friend.lat,
+                              lon: friend.lon,
+                            ),
+                            size: selectedFriend?.memberId == friend.memberId
+                                ? const Size(156, 62)
+                                : const Size(36, 36),
+                            child: GestureDetector(
+                              behavior: HitTestBehavior.opaque,
+                              onTap: () => onGroupMemberTap(friend),
+                              child: Column(
+                                mainAxisSize: MainAxisSize.min,
+                                mainAxisAlignment: MainAxisAlignment.center,
+                                children: [
+                                  if (selectedFriend?.memberId ==
+                                      friend.memberId)
+                                    Container(
+                                      margin: const EdgeInsets.only(bottom: 3),
+                                      padding: const EdgeInsets.symmetric(
+                                        horizontal: 8,
+                                        vertical: 3,
+                                      ),
+                                      decoration: BoxDecoration(
+                                        color: theme.colorScheme.surface
+                                            .withValues(alpha: 0.95),
+                                        borderRadius: BorderRadius.circular(10),
+                                        border: Border.all(
+                                          color: theme.colorScheme.outline
+                                              .withValues(alpha: 0.55),
+                                        ),
+                                        boxShadow: [
+                                          BoxShadow(
+                                            color: Colors.black.withValues(
+                                              alpha: 0.16,
+                                            ),
+                                            blurRadius: 4,
+                                          ),
+                                        ],
+                                      ),
+                                      child: Text(
+                                        () {
+                                          final rel =
+                                              formatRelativeGroupDistance(
+                                                member: friend,
+                                                userAlongTrackM:
+                                                    userAlongTrackM.value,
+                                                userPos: userGeo,
+                                                isRo: isRo,
+                                              );
+                                          return rel.isNotEmpty
+                                              ? '${friend.displayName} · $rel'
+                                              : friend.displayName;
+                                        }(),
+                                        maxLines: 1,
+                                        overflow: TextOverflow.ellipsis,
+                                        style: theme.textTheme.labelSmall
+                                            ?.copyWith(
+                                              fontWeight: FontWeight.w700,
+                                              fontSize: 10.5,
+                                            ),
+                                      ),
+                                    ),
+                                  Container(
+                                    width: 32,
+                                    height: 32,
+                                    decoration: BoxDecoration(
+                                      color: parseGroupHexColor(
+                                        friend.colorHex,
+                                      ),
+                                      shape: BoxShape.circle,
+                                      border: Border.all(
+                                        color: Colors.white,
+                                        width: 2.5,
+                                      ),
+                                      boxShadow: [
+                                        BoxShadow(
+                                          color: Colors.black.withValues(
+                                            alpha: 0.25,
+                                          ),
+                                          blurRadius: 4,
+                                          offset: const Offset(0, 1),
+                                        ),
+                                      ],
+                                    ),
+                                    alignment: Alignment.center,
+                                    child: Text(
+                                      friend.initials,
+                                      style: const TextStyle(
+                                        color: Colors.white,
+                                        fontSize: 11,
+                                        fontWeight: FontWeight.w800,
+                                      ),
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ),
+                          ),
+                        for (final sos in sosList)
+                          ml.Marker(
+                            point: ml.Geographic(lat: sos.lat, lon: sos.lon),
+                            size: const Size(46, 46),
+                            child: GestureDetector(
+                              behavior: HitTestBehavior.opaque,
+                              onTap: () => onSosTap(sos),
+                              child: Container(
+                                decoration: BoxDecoration(
+                                  color: const Color(0xFFDC2626),
+                                  shape: BoxShape.circle,
+                                  border: Border.all(
+                                    color: Colors.white,
+                                    width: 3,
+                                  ),
+                                  boxShadow: [
+                                    BoxShadow(
+                                      color: const Color(
+                                        0xFFDC2626,
+                                      ).withValues(alpha: 0.55),
+                                      blurRadius: 8,
+                                      spreadRadius: 1,
+                                    ),
+                                  ],
+                                ),
+                                alignment: Alignment.center,
+                                child: const Text(
+                                  '🆘',
+                                  style: TextStyle(fontSize: 20),
+                                ),
+                              ),
+                            ),
+                          ),
+                      ],
+                    );
+                  },
+                );
+              },
             );
           },
         );

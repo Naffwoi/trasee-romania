@@ -99,3 +99,74 @@ export interface SegmentProjection {
 	segmentLengthMeters: number;
 	bearingDegrees: number;
 }
+
+export const FAR_PREVIEW_THRESHOLD_METERS = 3_000;
+
+export type GpsSignalState = "good" | "cooperative" | "degraded" | "coasting";
+
+export interface PeerGpsObservation {
+	memberId: string;
+	lat: number;
+	lon: number;
+	accuracy: number;
+	ele?: number | null;
+	updatedAtMs: number;
+}
+
+export interface NavGpsFixWithMeta {
+	lat: number;
+	lon: number;
+	accuracy: number;
+	ele?: number | null;
+	heading?: number | null;
+	speed?: number | null;
+	timestampMs?: number;
+}
+
+export interface FusedGpsResult {
+	lat: number;
+	lon: number;
+	accuracy: number;
+	source: "self" | "cooperative" | "group-tether";
+	fusedPeerCount: number;
+}
+
+export interface ObstaclePolygon {
+	rings: [number, number][];
+}
+
+export interface PreferredCorridor {
+	coords: [number, number][];
+}
+
+export interface PaceCoasterFixInput {
+	lat: number;
+	lon: number;
+	accuracy: number;
+	matchedAlongM: number;
+	crossTrackM: number;
+	isPaused?: boolean;
+	paceFactor?: number;
+	fusedSource?: "self" | "cooperative" | "group-tether";
+	nowMs?: number;
+}
+
+export interface PaceCoasterIngestResult {
+	lat: number;
+	lon: number;
+	ele: number;
+	gradePct: number;
+	effectiveAlongM: number;
+	signalState: GpsSignalState;
+	suppressOffTrail: boolean;
+}
+
+export interface CoastingSnapshot {
+	lat: number;
+	lon: number;
+	ele: number;
+	gradePct: number;
+	effectiveAlongM: number;
+	signalState: "coasting";
+	suppressOffTrail: true;
+}

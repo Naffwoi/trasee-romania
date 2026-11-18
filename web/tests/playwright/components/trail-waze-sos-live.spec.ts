@@ -985,12 +985,24 @@ test.describe("Multi-User Trail Live Community (Waze Alerts, Permanent Landmarks
             expect(tokenA).not.toBe(tokenB);
 
             // =========================================================================
-            // (a) Icon-only Waze controls, Layer Switcher on /navigate & Location Presence
+            // (a) Unified Slate & Frosted Glass Controls, Layer Switcher & Location Presence
             // =========================================================================
+            const bannerA = pageA.locator('[data-testid="nav-banner"]');
+            await expect(bannerA).toBeVisible();
+            await expect(bannerA).toHaveClass(/bg-menu-background/);
+            await expect(bannerA).not.toHaveClass(/bg-orange-600/);
+            await expect(bannerA).not.toHaveClass(/bg-emerald-700/);
+
             const sosBtnA = pageA.locator('[data-testid="nav-sos-btn"]');
             const reportBtnA = pageA.locator('[data-testid="nav-waze-report-btn"]');
+            const groupBtnA = pageA.locator('[data-testid="nav-group-btn"]');
             await expect(sosBtnA).toBeVisible();
             await expect(reportBtnA).toBeVisible();
+            await expect(groupBtnA).toBeVisible();
+            // Calm inactive SOS & Report controls: no orange triangle exclamation or red background at rest
+            await expect(sosBtnA).not.toHaveClass(/bg-red-600/);
+            await expect(reportBtnA).not.toHaveClass(/text-orange-500/);
+            await expect(reportBtnA.locator("i")).not.toHaveClass(/fa-triangle-exclamation/);
             // Icon-only circular buttons: must NOT show aggressive "Ajutor" / "Raportează" text
             await expect(sosBtnA).not.toContainText("Ajutor");
             await expect(reportBtnA).not.toContainText("Raportează");
@@ -1251,10 +1263,11 @@ test.describe("Multi-User Trail Live Community (Waze Alerts, Permanent Landmarks
             await pageA.locator('[data-testid="sos-submit-btn"]').click();
             await expect(sosModal).toHaveCount(0);
 
-            // Hiker A sees own comforting active SOS bar
+            // Hiker A sees own comforting active SOS bar & SOS button turns #DC2626 red ONLY while active
             const mySosBarA = pageA.locator('[data-testid="my-active-sos-bar"]');
             await expect(mySosBarA).toBeVisible();
             await expect(mySosBarA).toContainText("SOS Activ");
+            await expect(sosBtnA).toHaveClass(/bg-red-600/);
 
             // Hiker B immediately receives high-priority red SOS rescue banner via SSE
             const rescueBannerB = pageB.locator('[data-testid="sos-rescue-banner"]');
@@ -1315,6 +1328,7 @@ test.describe("Multi-User Trail Live Community (Waze Alerts, Permanent Landmarks
             // Hiker A resolves SOS ("Sunt în siguranță") -> clears banner & rescue route on both clients
             await pageA.locator('[data-testid="sos-resolve-btn"]').click();
             await expect(mySosBarA).toHaveCount(0);
+            await expect(sosBtnA).not.toHaveClass(/bg-red-600/);
             await expect(rescueBannerB).toHaveCount(0);
             await expect
                 .poll(() =>

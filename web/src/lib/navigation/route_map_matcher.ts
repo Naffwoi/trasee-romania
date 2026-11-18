@@ -6,11 +6,12 @@ import {
 	normalizeBearingDelta,
 	projectOntoSegment,
 } from "./geo_math";
-import type {
-	NavGpsFix,
-	NavMatchResult,
-	NavTrackPoint,
-	RouteMapMatcherOptions,
+import {
+	FAR_PREVIEW_THRESHOLD_METERS,
+	type NavGpsFix,
+	type NavMatchResult,
+	type NavTrackPoint,
+	type RouteMapMatcherOptions,
 } from "./types";
 
 interface Hypothesis {
@@ -119,13 +120,15 @@ export class RouteMapMatcher {
 			};
 		}
 
-		const isFirstFix = this.lastPos === null;
+		const prevPos = this.lastPos;
+		const isFirstFix = prevPos === null;
 		const groundDistance = isFirstFix
 			? 0
-			: haversineMeters(this.lastPos!.lat, this.lastPos!.lon, fix.lat, fix.lon);
+			: haversineMeters(prevPos.lat, prevPos.lon, fix.lat, fix.lon);
 		this.lastPos = { lat: fix.lat, lon: fix.lon };
 
 		const threshold = this.computeThreshold(fix.accuracy);
+		const immediateOffTrailThreshold = Math.max(90, threshold);
 		const globalNearest = this.findGlobalNearest(fix.lat, fix.lon);
 
 		if (this.isOffTrailState) {
@@ -147,6 +150,14 @@ export class RouteMapMatcher {
 			}
 
 			this.consecutiveOffTrailFixesCount += 1;
+			if (globalNearest.crossTrackMeters <= FAR_PREVIEW_THRESHOLD_METERS) {
+				this.advanceCommittedAlongForwardCorridor(
+					fix.lat,
+					fix.lon,
+					prevPos,
+					groundDistance,
+				);
+			}
 			const held = interpolateTrackAtDistance(this.points, this.committedAtd);
 			return {
 				isOffTrail: true,
@@ -205,7 +216,10 @@ export class RouteMapMatcher {
 			const bestNormalCross = this.minCrossTrack(normalCandidates);
 
 			if (bestNormalCross > threshold) {
-				if (bestNormalCross > 90 && globalNearest.crossTrackMeters <= this.rejoinThresholdMeters) {
+				if (
+					bestNormalCross > immediateOffTrailThreshold &&
+					globalNearest.crossTrackMeters <= this.rejoinThresholdMeters
+				) {
 					// Large single-fix jump along the trail (e.g. simulated teleport on-trail).
 					this.snapToGlobalNearest(globalNearest);
 					this.consecutiveOffTrailFixesCount = 0;
@@ -225,13 +239,21 @@ export class RouteMapMatcher {
 
 				const nextConsecutive = this.consecutiveOffTrailFixesCount + 1;
 				const entersOffTrail =
-					globalNearest.crossTrackMeters > 90 ||
+					globalNearest.crossTrackMeters > immediateOffTrailThreshold ||
 					(globalNearest.crossTrackMeters > threshold &&
 						nextConsecutive >= this.offTrailConfirmFixes);
 
 				if (entersOffTrail) {
 					this.consecutiveOffTrailFixesCount = nextConsecutive;
 					this.isOffTrailState = true;
+					if (globalNearest.crossTrackMeters <= FAR_PREVIEW_THRESHOLD_METERS) {
+						this.advanceCommittedAlongForwardCorridor(
+							fix.lat,
+							fix.lon,
+							prevPos,
+							groundDistance,
+						);
+					}
 					const held = interpolateTrackAtDistance(this.points, this.committedAtd);
 					return {
 						isOffTrail: true,
@@ -265,7 +287,10 @@ export class RouteMapMatcher {
 		// Handle very first fix starting far off-trail.
 		if (isFirstFix) {
 			const bestCross = this.minCrossTrack(candidates);
-			if (bestCross > 90 || (bestCross > threshold && this.offTrailConfirmFixes <= 1)) {
+			if (
+				bestCross > immediateOffTrailThreshold ||
+				(bestCross > threshold && this.offTrailConfirmFixes <= 1)
+			) {
 				this.snapToGlobalNearest(globalNearest);
 				this.consecutiveOffTrailFixesCount = 1;
 				this.isOffTrailState = true;
@@ -390,13 +415,71 @@ export class RouteMapMatcher {
 	}
 
 	private computeThreshold(accuracy?: number | null): number {
-		const acc = accuracy !== null && accuracy !== undefined && Number.isFinite(accuracy)
-			? Math.max(0, accuracy)
-			: 15;
+		const acc =
+			accuracy !== null && accuracy !== undefined && Number.isFinite(accuracy)
+				? Math.max(0, accuracy)
+				: 15;
+		if (acc > 25) {
+			return Math.max(this.offTrailThresholdMeters, Math.min(140, 2.2 * acc));
+		}
 		return Math.max(this.offTrailThresholdMeters, Math.min(75, 1.5 * acc));
 	}
 
+	private advanceCommittedAlongForwardCorridor(
+		lat: number,
+		lon: number,
+		prevPos: { lat: number; lon: number } | null,
+		groundDistance: number,
+	): void {
+		const winMin = Math.max(0, this.committedAtd - 15);
+		const winMax = Math.min(
+			this.totalLength,
+			this.committedAtd + Math.max(400, 4 * groundDistance),
+		);
+		const corridorCandidates = this.candidatesInWindow(lat, lon, winMin, winMax);
+		if (corridorCandidates.length === 0) return;
+
+		const hasMoveBearing = prevPos !== null && groundDistance >= 3;
+		const moveBearing = hasMoveBearing
+			? bearingDegrees(prevPos.lat, prevPos.lon, lat, lon)
+			: 0;
+
+		const alignedCandidates = hasMoveBearing
+			? corridorCandidates.filter(
+					(c) => Math.abs(normalizeBearingDelta(moveBearing, c.bearingDegrees)) <= 95,
+				)
+			: corridorCandidates;
+		const pool = alignedCandidates.length > 0 ? alignedCandidates : corridorCandidates;
+
+		const expectedAtd = this.committedAtd + groundDistance;
+		let forwardProj: Candidate = pool[0];
+		for (let i = 1; i < pool.length; i++) {
+			const c = pool[i];
+			const strictlyCloser = c.crossTrackMeters < forwardProj.crossTrackMeters - 1e-3;
+			const tieCloserToStep =
+				Math.abs(c.crossTrackMeters - forwardProj.crossTrackMeters) <= 1e-3 &&
+				Math.abs(c.alongTrackMeters - expectedAtd) <
+					Math.abs(forwardProj.alongTrackMeters - expectedAtd);
+			if (strictlyCloser || tieCloserToStep) {
+				forwardProj = c;
+			}
+		}
+
+		if (forwardProj.alongTrackMeters > this.committedAtd) {
+			this.committedAtd = forwardProj.alongTrackMeters;
+			this.committedSegmentIndex = forwardProj.segmentIndex;
+			this.hypotheses = [
+				{
+					segmentIndex: this.committedSegmentIndex,
+					alongTrackMeters: this.committedAtd,
+					score: 0,
+				},
+			];
+		}
+	}
+
 	private updateSinglePointOffTrail(dist: number, threshold: number): void {
+		const immediateThreshold = Math.max(90, threshold);
 		if (this.isOffTrailState) {
 			if (dist <= this.rejoinThresholdMeters) {
 				this.isOffTrailState = false;
@@ -406,7 +489,7 @@ export class RouteMapMatcher {
 			}
 			return;
 		}
-		if (dist > 90) {
+		if (dist > immediateThreshold) {
 			this.consecutiveOffTrailFixesCount += 1;
 			this.isOffTrailState = true;
 		} else if (dist > threshold) {

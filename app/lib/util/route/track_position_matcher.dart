@@ -83,6 +83,7 @@ class TrackPositionMatcher {
   double _lastValidAlongTrack = 0.0;
   int _lastValidSegmentIndex = 0;
   Geographic? _lastValidPoint;
+  Geographic? _prevFix;
 
   /// Feeds one GPS fix into the underlying matcher and returns the along-
   /// track distance (chart x-axis units) when [pos] is within
@@ -130,6 +131,12 @@ class TrackPositionMatcher {
   }) {
     if (_shape.length < 2 || _cumulative.length < 2) return null;
 
+    final prevFix = _prevFix;
+    final stepM = prevFix == null
+        ? 0.0
+        : SphericalGreatCircle(prevFix).distanceTo(pos);
+    _prevFix = pos;
+
     final hmm = _matcher.update(
       pos: pos,
       heading: heading,
@@ -143,13 +150,18 @@ class TrackPositionMatcher {
     final nearest = _globalNearest(pos);
     final effAcc =
         (accuracy != null && accuracy.isFinite && accuracy > 0) ? accuracy : 0.0;
-    final entryThreshold = math.max(offTrailEntryFloorMeters, 1.5 * effAcc);
+    final entryThreshold = effAcc > 25.0
+        ? math.max(offTrailEntryFloorMeters, math.min(140.0, 2.2 * effAcc))
+        : math.max(offTrailEntryFloorMeters, 1.5 * effAcc);
 
     if (!_isOffTrail) {
       if (nearest.crossTrackMeters > entryThreshold) {
         _consecutiveOffTrailFixes++;
         if (_consecutiveOffTrailFixes >= offTrailConfirmFixes) {
           _isOffTrail = true;
+        }
+        if (nearest.crossTrackMeters <= 3000.0) {
+          _advanceCorridorAlong(pos, prevFix, stepM, nearest);
         }
       } else {
         _consecutiveOffTrailFixes = 0;
@@ -175,6 +187,9 @@ class TrackPositionMatcher {
         _lastValidPoint = nearest.point;
       } else {
         _consecutiveOffTrailFixes++;
+        if (nearest.crossTrackMeters <= 3000.0) {
+          _advanceCorridorAlong(pos, prevFix, stepM, nearest);
+        }
       }
     }
 
@@ -196,6 +211,110 @@ class TrackPositionMatcher {
       segmentIndex: reportedSeg,
       consecutiveOffTrailFixes: _consecutiveOffTrailFixes,
     );
+  }
+
+  void _advanceCorridorAlong(
+    Geographic pos,
+    Geographic? prevFix,
+    double stepM,
+    ({
+      double crossTrackMeters,
+      double alongTrackMeters,
+      int segmentIndex,
+      Geographic point,
+    })
+    nearest,
+  ) {
+    if (!_hasValidMatch) {
+      _hasValidMatch = true;
+      _lastValidAlongTrack = nearest.alongTrackMeters;
+      _lastValidSegmentIndex = nearest.segmentIndex;
+      _lastValidPoint = nearest.point;
+      return;
+    }
+
+    final totalLen = _cumulative.last;
+    final windowMin = math.max(0.0, _lastValidAlongTrack - 15.0);
+    final windowMax = math.min(
+      totalLen,
+      _lastValidAlongTrack +
+          math.max(400.0, 4.0 * (stepM.isFinite ? stepM : 0.0)),
+    );
+    final forwardCand = _nearestInWindow(pos, windowMin, windowMax);
+    if (forwardCand == null ||
+        forwardCand.alongTrackMeters <= _lastValidAlongTrack) {
+      return;
+    }
+
+    if (prevFix != null && stepM.isFinite && stepM >= 5.0) {
+      final moveBearing = SphericalGreatCircle(prevFix).initialBearingTo(pos);
+      final segIdx = forwardCand.segmentIndex.clamp(0, _shape.length - 2);
+      final segBearing = SphericalGreatCircle(
+        _shape[segIdx],
+      ).initialBearingTo(_shape[segIdx + 1]);
+      if (moveBearing.isFinite && segBearing.isFinite) {
+        var angleDiff = ((moveBearing - segBearing) % 360.0).abs();
+        if (angleDiff > 180.0) angleDiff = 360.0 - angleDiff;
+        if (angleDiff > 80.0) {
+          return;
+        }
+      }
+    }
+
+    _lastValidAlongTrack = forwardCand.alongTrackMeters;
+    _lastValidSegmentIndex = forwardCand.segmentIndex;
+    _lastValidPoint = forwardCand.point;
+  }
+
+  ({double alongTrackMeters, int segmentIndex, Geographic point})?
+  _nearestInWindow(Geographic pos, double minAlong, double maxAlong) {
+    if (maxAlong < minAlong || _shape.length < 2) return null;
+    const metersPerDegree = 111320.0;
+    var bestApproxSq = double.infinity;
+    var bestSeg = -1;
+    var bestT = 0.0;
+
+    for (var i = 0; i < _shape.length - 1; i++) {
+      final segStart = _cumulative[i];
+      final segEnd = _cumulative[i + 1];
+      if (segEnd < minAlong || segStart > maxAlong) continue;
+
+      final segLen = segEnd - segStart;
+      final a = _shape[i];
+      final b = _shape[i + 1];
+      final midLatRad = ((a.lat + b.lat) / 2.0) * math.pi / 180.0;
+      final cosMidLat = math.cos(midLatRad);
+
+      final abX = (b.lon - a.lon) * metersPerDegree * cosMidLat;
+      final abY = (b.lat - a.lat) * metersPerDegree;
+      final apX = (pos.lon - a.lon) * metersPerDegree * cosMidLat;
+      final apY = (pos.lat - a.lat) * metersPerDegree;
+
+      final segLenSq = abX * abX + abY * abY;
+      final tMin = segLen <= 0.0
+          ? 0.0
+          : ((minAlong - segStart) / segLen).clamp(0.0, 1.0);
+      final tMax = segLen <= 0.0
+          ? 0.0
+          : ((maxAlong - segStart) / segLen).clamp(0.0, 1.0);
+      final rawT = segLenSq <= 0.0 ? 0.0 : ((apX * abX + apY * abY) / segLenSq);
+      final t = rawT.clamp(tMin, tMax);
+
+      final footX = apX - t * abX;
+      final footY = apY - t * abY;
+      final dSq = footX * footX + footY * footY;
+      if (dSq < bestApproxSq) {
+        bestApproxSq = dSq;
+        bestSeg = i;
+        bestT = t;
+      }
+    }
+
+    if (bestSeg < 0) return null;
+    final segLen = _cumulative[bestSeg + 1] - _cumulative[bestSeg];
+    final along = _cumulative[bestSeg] + bestT * segLen;
+    final pt = pointAtAlongTrack(along, bestSeg);
+    return (alongTrackMeters: along, segmentIndex: bestSeg, point: pt);
   }
 
   ({

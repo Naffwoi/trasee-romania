@@ -3,6 +3,7 @@
     import { goto } from "$app/navigation";
     import { page } from "$app/state";
     import MetaTags from "#lib/components/base/meta_tags.svelte";
+    import GroupSheet from "#lib/components/navigation/group_sheet.svelte";
     import LiveElevationSheet from "#lib/components/navigation/live_elevation_sheet.svelte";
     import NavigationTopBanner from "#lib/components/navigation/navigation_top_banner.svelte";
     import SosModalAndBanner from "#lib/components/navigation/sos_modal_and_banner.svelte";
@@ -11,19 +12,30 @@
     import {
         clearHeartbeat,
         connectLiveStream,
+        createLiveGroup,
         createReport,
+        fetchLiveGroup,
         fetchTrailLiveSummary,
+        getSavedGroupSession,
         getVotedReportsMap,
         isReportVisibleOnMap,
+        joinLiveGroup,
+        leaveLiveGroup,
+        mergeGroupMemberIntoList,
         mergeReportIntoList,
         mergeSosIntoList,
+        normalizeGroupCode,
+        pingLiveGroup,
         playSosTone,
+        removeGroupMemberFromList,
         respondToSos,
         sendHeartbeat,
         subscribeWebPushIfSupported,
         triggerSos,
         updateSos,
         voteReport,
+        type GroupMemberDto,
+        type GroupSessionDto,
         type LiveStreamHandle,
         type ReportVoteType,
         type SosAlertDto,
@@ -32,6 +44,7 @@
         type TrailReportDto,
     } from "#lib/live/live_client.ts";
     import {
+        syncGroupMapMarkers,
         syncReportMapMarkers,
         syncSosMapMarkers,
     } from "#lib/live/report_markers.ts";
@@ -39,25 +52,34 @@
     import type { Trail } from "#lib/models/trail.ts";
     import {
         bearingDegrees,
+        computeDirectRescueRoute,
+        computeHybridOffTrailReroute,
         computeOffTrailReroute,
+        computeValhallaAccessRoute,
         DemTileGrid,
         EtaCalculator,
+        extractMapLibreObstacles,
         extractRawTrackPoints,
+        FAR_PREVIEW_THRESHOLD_METERS,
+        findCoLocatedPeerIds,
+        fuseCooperativeGps,
+        GpsPaceCoaster,
         haversineMeters,
         reverseTrackPoints,
         RouteMapMatcher,
         synthesizeTrailManeuvers,
+        type DirectRescueRouteResult,
         type EtaSnapshot,
+        type GpsSignalState,
         type NavManeuver,
         type NavMatchResult,
         type NavTrackPoint,
+        type ObstaclePolygon,
         type OffTrailMode,
+        type OffTrailPoint,
         type OffTrailRerouteResult,
+        type PeerGpsObservation,
     } from "#lib/navigation/index.ts";
-    import {
-        computeDirectRescueRoute,
-        type DirectRescueRouteResult,
-    } from "#lib/navigation/off_trail_router.ts";
     import { decodePolyline } from "#lib/util/polyline_util.ts";
     import { AccuracyLayer } from "#lib/vendor/maplibre-user-location/accuracy-layer.ts";
     import { CompassSensor } from "#lib/vendor/maplibre-user-location/compass-sensor.ts";
@@ -107,6 +129,7 @@
     const SRC_OFFTRAIL = "nav-offtrail";
     const SRC_REJOIN = "nav-rejoin-point";
     const SRC_RESCUE = "nav-sos-rescue";
+    const SRC_ACCESS = "nav-access-route";
 
     const LAYER_WALKED = "nav-trail-walked";
     const LAYER_UPCOMING_CASING = "nav-trail-upcoming-casing";
@@ -117,6 +140,8 @@
     const LAYER_REJOIN_POINT = "nav-rejoin-point";
     const LAYER_RESCUE_CASING = "nav-sos-rescue-casing";
     const LAYER_RESCUE_LINE = "nav-sos-rescue-line";
+    const LAYER_ACCESS_CASING = "nav-access-casing";
+    const LAYER_ACCESS_LINE = "nav-access-line";
 
     let { data }: Props = $props();
     const trail = $derived(data.trail);
@@ -179,14 +204,24 @@
     let isFollowing = $state(true);
     let is3D = $state(true);
     let sheetExpanded = $state(true);
+    let signalState = $state<GpsSignalState>("good");
+    let effectiveAccuracyM = $state<number | null>(null);
+    let isFarPreview = $state(false);
+    let farFromTrailDistanceM = $state<number | null>(null);
+    let accessRouteActive = $state(false);
+    let accessRoutePoints = $state<OffTrailPoint[] | null>(null);
 
-    // Live Community (Waze Reports, 30m Presence & 5 km SOS Rescue) reactive state
+    // Live Community (Waze Reports, 30m Presence, Live Groups & 5 km SOS Rescue) reactive state
     let activeHikersCount = $state<number | null>(null);
     let liveReports = $state<TrailReportDto[]>([]);
     let liveSosAlerts = $state<SosAlertDto[]>([]);
     let liveUserPos = $state<{ lat: number; lon: number } | null>(null);
     let reportSheetOpen = $state(false);
     let sosModalOpen = $state(false);
+    let groupSheetOpen = $state(false);
+    let groupSession = $state<GroupSessionDto | null>(null);
+    let groupBusy = $state(false);
+    let savedGroupName = $state("");
     let liveBusy = $state(false);
     let votedReportMap = $state<Record<string, ReportVoteType>>({});
     let snoozedReportIds = $state<Record<string, boolean>>({});
@@ -197,6 +232,8 @@
     let bottomSheetWrapEl = $state<HTMLDivElement | null>(null);
     let bottomBarHeight = $state(0);
 
+    const groupMembers = $derived(groupSession?.members ?? []);
+
     const floatingBottomPx = $derived(
         (bottomBarHeight > 0 ? bottomBarHeight : sheetExpanded ? 290 : 96) + 12,
     );
@@ -206,6 +243,9 @@
         sheetExpanded;
         activeHikersCount;
         etaSnapshot;
+        reroute;
+        isFarPreview;
+        signalState;
         if (!el) return;
         const measure = () => {
             const h = Math.round(el.getBoundingClientRect().height);
@@ -228,17 +268,29 @@
     let accuracyLayer: AccuracyLayer | null = null;
     let demGrid: DemTileGrid | null = null;
     let customDemSampler: ((lat: number, lon: number) => number | null) | null = null;
+    let customObstacles: ObstaclePolygon[] | null = null;
     let matcher: RouteMapMatcher | null = null;
     let etaCalc: EtaCalculator | null = null;
+    let coaster: GpsPaceCoaster | null = null;
     let wakeLock: WakeLockSentinel | null = null;
     let watchId: number | null = null;
     let rejoinTimer: ReturnType<typeof setTimeout> | null = null;
     let heartbeatTimer: ReturnType<typeof setInterval> | null = null;
+    let coastingTimer: ReturnType<typeof setInterval> | null = null;
+    let groupPingTimer: ReturnType<typeof setInterval> | null = null;
     let streamHandle: LiveStreamHandle | null = null;
     let reportMarkers: M.Marker[] = [];
     let sosMarkers: M.Marker[] = [];
+    let groupMarkers: M.Marker[] = [];
+    let coLocatedPeerIds = new Set<string>();
     const alertedSosIds = new Set<string>();
     let lastHeartbeatSentAt = 0;
+    let lastRealFixMs: number | null = null;
+    let lastHybridRerouteAt = 0;
+    let lastHybridReroutePos: { lat: number; lon: number } | null = null;
+    let hybridReqSeq = 0;
+    let lastGroupPingAt = 0;
+    let lastGroupPingPos: { lat: number; lon: number } | null = null;
     let lastMySosPatchAt = 0;
     let lastMySosPos: { lat: number; lon: number } | null = null;
     let lastResponderUpdateAt = 0;
@@ -423,6 +475,7 @@
         if (ordered.length > 0) {
             matcher = new RouteMapMatcher(ordered);
             etaCalc = new EtaCalculator(ordered, { isCycling });
+            coaster = new GpsPaceCoaster(ordered, { isCycling });
             maneuvers = synthesizeTrailManeuvers(ordered, {
                 locale: activeLocaleCode(),
                 waypoints: trailWaypoints,
@@ -432,11 +485,19 @@
                 reroute = null;
                 matchResult = null;
                 lastReroutePos = null;
+                lastHybridReroutePos = null;
+                hybridReqSeq++;
+                isFarPreview = false;
+                farFromTrailDistanceM = null;
+                accessRouteActive = false;
+                accessRoutePoints = null;
+                signalState = "good";
                 etaSnapshot = etaCalc.compute(0, Date.now(), null);
             }
         } else {
             matcher = null;
             etaCalc = null;
+            coaster = null;
             maneuvers = [];
             etaSnapshot = null;
         }
@@ -636,6 +697,7 @@
                 SRC_OFFTRAIL,
                 SRC_REJOIN,
                 SRC_RESCUE,
+                SRC_ACCESS,
             ]) {
                 if (!map.getSource(srcId)) {
                     map.addSource(srcId, { type: "geojson", data: EMPTY_FC });
@@ -726,7 +788,7 @@
                         type: "line",
                         source: SRC_OFFTRAIL,
                         layout: { "line-cap": "round", "line-join": "round" },
-                        paint: { "line-color": "#ffffff", "line-width": 8 },
+                        paint: { "line-color": "#ffffff", "line-width": 6.5 },
                     });
                 }
                 if (!map.getLayer(LAYER_OFFTRAIL_LINE)) {
@@ -736,9 +798,9 @@
                         source: SRC_OFFTRAIL,
                         layout: { "line-cap": "round", "line-join": "round" },
                         paint: {
-                            "line-color": "#f97316",
-                            "line-width": 4.5,
-                            "line-dasharray": [2, 1.5],
+                            "line-color": "#b45309",
+                            "line-width": 3.5,
+                            "line-dasharray": [2, 1.4],
                         },
                     });
                 }
@@ -748,8 +810,8 @@
                         type: "circle",
                         source: SRC_REJOIN,
                         paint: {
-                            "circle-radius": 7,
-                            "circle-color": "#f97316",
+                            "circle-radius": 6.5,
+                            "circle-color": "#b45309",
                             "circle-stroke-color": "#ffffff",
                             "circle-stroke-width": 2.5,
                         },
@@ -763,6 +825,59 @@
                 }
                 offSrc?.setData(EMPTY_FC);
                 rejoinSrc?.setData(EMPTY_FC);
+            }
+        } catch {
+            // Ignore during style swap
+        }
+    }
+
+    function syncAccessRouteLayers(pts: OffTrailPoint[] | null) {
+        if (!map || !isStyleReady()) return;
+        try {
+            const accessSrc = map.getSource(SRC_ACCESS) as M.GeoJSONSource | undefined;
+            if (accessRouteActive && pts && pts.length >= 2) {
+                accessSrc?.setData({
+                    type: "FeatureCollection",
+                    features: [
+                        {
+                            type: "Feature",
+                            properties: {},
+                            geometry: {
+                                type: "LineString",
+                                coordinates: pts.map((p) => [p.lon, p.lat]),
+                            },
+                        },
+                    ],
+                });
+                if (!map.getLayer(LAYER_ACCESS_CASING)) {
+                    map.addLayer({
+                        id: LAYER_ACCESS_CASING,
+                        type: "line",
+                        source: SRC_ACCESS,
+                        layout: { "line-cap": "round", "line-join": "round" },
+                        paint: { "line-color": "#ffffff", "line-width": 6.5 },
+                    });
+                }
+                if (!map.getLayer(LAYER_ACCESS_LINE)) {
+                    map.addLayer({
+                        id: LAYER_ACCESS_LINE,
+                        type: "line",
+                        source: SRC_ACCESS,
+                        layout: { "line-cap": "round", "line-join": "round" },
+                        paint: {
+                            "line-color": "#242734",
+                            "line-width": 3.5,
+                            "line-dasharray": [2, 1.4],
+                        },
+                    });
+                }
+            } else {
+                for (const id of [LAYER_ACCESS_LINE, LAYER_ACCESS_CASING]) {
+                    if (map.getLayer(id)) {
+                        map.removeLayer(id);
+                    }
+                }
+                accessSrc?.setData(EMPTY_FC);
             }
         } catch {
             // Ignore during style swap
@@ -852,6 +967,7 @@
             );
 
             syncOffTrailLayers(reroute);
+            syncAccessRouteLayers(accessRoutePoints);
             syncRescueLayers(activeRescueRoute);
         } catch {
             // Ignore transient map teardown
@@ -880,38 +996,133 @@
             .addTo(map);
     }
 
+    function gatherCorridorObstacles(userLat: number, userLon: number, matched: NavMatchResult) {
+        const padDeg = 0.008;
+        const bbox: [number, number, number, number] = [
+            Math.min(userLon, matched.matchedLon) - padDeg,
+            Math.min(userLat, matched.matchedLat) - padDeg,
+            Math.max(userLon, matched.matchedLon) + padDeg,
+            Math.max(userLat, matched.matchedLat) + padDeg,
+        ];
+        const extracted = extractMapLibreObstacles(
+            map as unknown as Parameters<typeof extractMapLibreObstacles>[0],
+            bbox,
+        );
+        const obstacles = customObstacles
+            ? [...customObstacles, ...extracted.obstacles]
+            : extracted.obstacles;
+        return { obstacles, preferredPaths: extracted.preferredPaths };
+    }
+
     function recomputeRerouteForFix(
         fix: { lat: number; lon: number; altitude: number | null },
         matched: NavMatchResult,
         force = false,
     ): OffTrailRerouteResult | null {
-        if (!matched.isOffTrail || activePoints.length === 0) {
+        if (
+            !matched.isOffTrail ||
+            matched.crossTrackMeters > FAR_PREVIEW_THRESHOLD_METERS ||
+            activePoints.length === 0
+        ) {
             lastReroutePos = null;
+            lastHybridReroutePos = null;
+            hybridReqSeq++;
             return null;
         }
+
+        const evalUserEle =
+            fix.altitude !== null && Number.isFinite(fix.altitude)
+                ? fix.altitude
+                : activeSampler(fix.lat, fix.lon) ?? matched.matchedEle;
+
+        const { obstacles, preferredPaths } = gatherCorridorObstacles(fix.lat, fix.lon, matched);
+
+        let syncResult = reroute;
         if (
-            !force &&
-            reroute &&
-            lastReroutePos &&
-            haversineMeters(lastReroutePos.lat, lastReroutePos.lon, fix.lat, fix.lon) < 15
+            force ||
+            !reroute ||
+            !lastReroutePos ||
+            haversineMeters(lastReroutePos.lat, lastReroutePos.lon, fix.lat, fix.lon) >= 15
         ) {
-            return reroute;
+            syncResult = computeOffTrailReroute({
+                userLat: fix.lat,
+                userLon: fix.lon,
+                userEle: evalUserEle,
+                trailPoints: activePoints,
+                lastAlongTrackM: matched.alongTrackMeters,
+                sampler: activeSampler,
+                mode: offTrailMode,
+                locale: activeLocaleCode(),
+                obstacles,
+                preferredPaths,
+            });
+            lastReroutePos = { lat: fix.lat, lon: fix.lon };
         }
-        const computed = computeOffTrailReroute({
-            userLat: fix.lat,
-            userLon: fix.lon,
-            userEle:
-                fix.altitude !== null && Number.isFinite(fix.altitude)
-                    ? fix.altitude
-                    : activeSampler(fix.lat, fix.lon) ?? matched.matchedEle,
-            trailPoints: activePoints,
-            lastAlongTrackM: matched.alongTrackMeters,
-            sampler: activeSampler,
-            mode: offTrailMode,
-            locale: activeLocaleCode(),
+
+        const now = Date.now();
+        const movedHybrid =
+            !lastHybridReroutePos ||
+            haversineMeters(
+                lastHybridReroutePos.lat,
+                lastHybridReroutePos.lon,
+                fix.lat,
+                fix.lon,
+            ) >= 20;
+        if (force || movedHybrid || now - lastHybridRerouteAt >= 10_000) {
+            const seq = ++hybridReqSeq;
+            lastHybridRerouteAt = now;
+            lastHybridReroutePos = { lat: fix.lat, lon: fix.lon };
+            void computeHybridOffTrailReroute({
+                userLat: fix.lat,
+                userLon: fix.lon,
+                userEle: evalUserEle,
+                trailPoints: activePoints,
+                lastAlongTrackM: matched.alongTrackMeters,
+                sampler: activeSampler,
+                mode: offTrailMode,
+                locale: activeLocaleCode(),
+                isCycling,
+                obstacles,
+                preferredPaths,
+                map: map as unknown as Parameters<typeof extractMapLibreObstacles>[0],
+            }).then((hybridRes) => {
+                if (seq !== hybridReqSeq) return;
+                if (
+                    !matchResult?.isOffTrail ||
+                    isFarPreview ||
+                    signalState === "degraded" ||
+                    signalState === "coasting"
+                ) {
+                    return;
+                }
+                if (hybridRes) {
+                    reroute = hybridRes;
+                    if (etaCalc) {
+                        etaSnapshot = etaCalc.compute(alongTrackMeters, Date.now(), {
+                            distanceM: hybridRes.distanceM,
+                            durationSec: hybridRes.estimatedSeconds,
+                            ascentM: hybridRes.ascentM,
+                            rejoinAlongTrackM: hybridRes.rejoinAlongTrackM,
+                        });
+                    }
+                    syncNavGeoJson();
+                }
+            });
+        }
+
+        return syncResult;
+    }
+
+    function handleFocusGroupMember(member: GroupMemberDto) {
+        if (!map || !Number.isFinite(member.lat) || !Number.isFinite(member.lon)) return;
+        isFollowing = false;
+        runProgrammaticCamera(() => {
+            map!.easeTo({
+                center: [member.lon, member.lat],
+                zoom: Math.max(15.8, map!.getZoom()),
+                duration: 380,
+            });
         });
-        lastReroutePos = { lat: fix.lat, lon: fix.lon };
-        return computed;
     }
 
     function syncLiveMapOverlays() {
@@ -922,11 +1133,19 @@
         sosMarkers = syncSosMapMarkers(map, sosMarkers, liveSosAlerts, {
             onRespond: (sos) => void handleRespondSos(sos),
         });
+        groupMarkers = syncGroupMapMarkers(map, groupMarkers, groupMembers, {
+            selfAlongTrackM: alongTrackMeters,
+            selfLat: liveUserPos?.lat ?? null,
+            selfLon: liveUserPos?.lon ?? null,
+            locale: activeLocaleCode(),
+            onSelectMember: handleFocusGroupMember,
+        });
     }
 
     $effect(() => {
         liveReports;
         liveSosAlerts;
+        groupSession;
         untrack(() => {
             syncLiveMapOverlays();
         });
@@ -1162,6 +1381,206 @@
         }
     }
 
+    function forwardAlongTrackMeters(): number {
+        const totalDist =
+            activePoints.length > 0 ? activePoints[activePoints.length - 1].distanceM : 0;
+        return reversed ? Math.max(0, totalDist - alongTrackMeters) : alongTrackMeters;
+    }
+
+    function buildPeerObservations(nowMs: number): PeerGpsObservation[] {
+        if (!groupSession) return [];
+        const out: PeerGpsObservation[] = [];
+        for (const m of groupSession.members) {
+            if (m.isSelf) continue;
+            if (!Number.isFinite(m.lat) || !Number.isFinite(m.lon) || (m.lat === 0 && m.lon === 0)) {
+                continue;
+            }
+            const parsedTs = m.updatedAt ? Date.parse(m.updatedAt) : NaN;
+            const updatedAtMs =
+                Number.isFinite(parsedTs) && parsedTs <= nowMs + 60_000 ? parsedTs : nowMs;
+            out.push({
+                memberId: m.memberId,
+                lat: m.lat,
+                lon: m.lon,
+                accuracy: m.accuracy > 0 ? m.accuracy : 10,
+                ele: m.ele,
+                updatedAtMs,
+            });
+        }
+        return out;
+    }
+
+    async function triggerGroupPingIfDue(force = false) {
+        if (!groupSession || !latestFix) return;
+        const now = Date.now();
+        const movedM = lastGroupPingPos
+            ? haversineMeters(
+                  lastGroupPingPos.lat,
+                  lastGroupPingPos.lon,
+                  latestFix.lat,
+                  latestFix.lon,
+              )
+            : Infinity;
+        const minIntervalMs = movedM >= 4 ? 5_500 : 18_000;
+        if (!force && now - lastGroupPingAt < minIntervalMs) return;
+
+        lastGroupPingAt = now;
+        lastGroupPingPos = { lat: latestFix.lat, lon: latestFix.lon };
+        const code = groupSession.code;
+        const updated = await pingLiveGroup(code, {
+            lat: latestFix.lat,
+            lon: latestFix.lon,
+            ele: userEle ?? latestFix.altitude,
+            accuracy: effectiveAccuracyM ?? latestFix.accuracy,
+            heading: resolveHeadingDeg(),
+            speed: latestFix.speed,
+            alongTrackM: forwardAlongTrackMeters(),
+            inNavigation: true,
+        });
+        if (updated && groupSession?.code === code) {
+            groupSession = {
+                ...groupSession,
+                ...updated,
+                trailId: updated.trailId || groupSession.trailId,
+                expiresAt: updated.expiresAt || groupSession.expiresAt,
+            };
+        }
+    }
+
+    async function handleCreateGroup(displayName: string) {
+        groupBusy = true;
+        try {
+            const origin = getEffectiveResponderOrigin();
+            const created = await createLiveGroup({
+                displayName,
+                trailId: trail.id,
+                lat: latestFix ? latestFix.lat : origin?.lat ?? null,
+                lon: latestFix ? latestFix.lon : origin?.lon ?? null,
+                ele: userEle ?? origin?.ele ?? null,
+                accuracy: effectiveAccuracyM ?? latestFix?.accuracy ?? null,
+                alongTrackM: forwardAlongTrackMeters(),
+                inNavigation: true,
+            });
+            if (created) {
+                savedGroupName = displayName;
+                groupSession = created;
+                streamHandle?.updateGroupCode(created.code);
+            }
+        } finally {
+            groupBusy = false;
+        }
+    }
+
+    async function handleJoinGroup(code: string, displayName: string) {
+        groupBusy = true;
+        try {
+            const origin = getEffectiveResponderOrigin();
+            const joined = await joinLiveGroup(code, {
+                displayName,
+                trailId: trail.id,
+                lat: latestFix ? latestFix.lat : origin?.lat ?? null,
+                lon: latestFix ? latestFix.lon : origin?.lon ?? null,
+                ele: userEle ?? origin?.ele ?? null,
+                accuracy: effectiveAccuracyM ?? latestFix?.accuracy ?? null,
+                alongTrackM: forwardAlongTrackMeters(),
+                inNavigation: true,
+            });
+            if (joined) {
+                savedGroupName = displayName;
+                groupSession = joined;
+                streamHandle?.updateGroupCode(joined.code);
+            }
+        } finally {
+            groupBusy = false;
+        }
+    }
+
+    async function handleLeaveGroup() {
+        if (!groupSession) return;
+        const code = groupSession.code;
+        groupBusy = true;
+        try {
+            await leaveLiveGroup(code);
+            groupSession = null;
+            coLocatedPeerIds = new Set();
+            streamHandle?.updateGroupCode(null);
+        } finally {
+            groupBusy = false;
+        }
+    }
+
+    async function handleRequestAccessRoute() {
+        if (accessRouteActive) {
+            accessRouteActive = false;
+            accessRoutePoints = null;
+            syncNavGeoJson();
+            return;
+        }
+        if (!latestFix || activePoints.length === 0) return;
+        const startPt = activePoints[0];
+        const pts = await computeValhallaAccessRoute(
+            latestFix.lat,
+            latestFix.lon,
+            startPt.lat,
+            startPt.lon,
+            isCycling,
+            undefined,
+            activeSampler,
+        );
+        if (pts && pts.length >= 2) {
+            accessRoutePoints = pts;
+            accessRouteActive = true;
+            syncNavGeoJson();
+        }
+    }
+
+    function runCoastingTick(nowMs = Date.now()) {
+        if (!hasFix || lastRealFixMs === null || nowMs - lastRealFixMs < 6_000) {
+            return;
+        }
+
+        // 1. Check Group Tether first when own GNSS dropped out > 6s
+        const peerObs = buildPeerObservations(nowMs);
+        const tethered = fuseCooperativeGps(null, peerObs, coLocatedPeerIds, nowMs);
+        if (tethered && matcher && etaCalc && activePoints.length > 0) {
+            signalState = "cooperative";
+            effectiveAccuracyM = tethered.accuracy;
+            liveUserPos = { lat: tethered.lat, lon: tethered.lon };
+            locationPuck?.setPosition(tethered.lon, tethered.lat);
+            accuracyLayer?.update(tethered.lon, tethered.lat, tethered.accuracy);
+
+            const matched = matcher.update({
+                lat: tethered.lat,
+                lon: tethered.lon,
+                accuracy: tethered.accuracy,
+            });
+            matchResult = matched;
+            alongTrackMeters = matched.alongTrackMeters;
+            userEle = activeSampler(tethered.lat, tethered.lon) ?? matched.matchedEle;
+            etaSnapshot = etaCalc.compute(alongTrackMeters, nowMs, null);
+            syncNavGeoJson();
+            return;
+        }
+
+        // 2. Otherwise advance smoothly along trail via 1Hz Tobler Pace Coaster
+        const coastSnap = coaster?.tickCoasting(
+            nowMs,
+            etaCalc?.getPaceFactor() ?? 1,
+            paused,
+        );
+        if (coastSnap) {
+            signalState = "coasting";
+            alongTrackMeters = coastSnap.effectiveAlongM;
+            userEle = coastSnap.ele;
+            reroute = null;
+            locationPuck?.setPosition(coastSnap.lon, coastSnap.lat);
+            if (etaCalc) {
+                etaSnapshot = etaCalc.compute(coastSnap.effectiveAlongM, nowMs, null);
+            }
+            syncNavGeoJson();
+        }
+    }
+
     async function handleEnableWebPush() {
         const origin = getEffectiveResponderOrigin();
         const status = await subscribeWebPushIfSupported(
@@ -1211,11 +1630,45 @@
         }
 
         hasFix = true;
-        latestFix = { lat: raw.lat, lon: raw.lon, accuracy, altitude, heading, speed };
-        liveUserPos = { lat: raw.lat, lon: raw.lon };
+        lastRealFixMs = nowMs;
 
-        locationPuck?.setPosition(raw.lon, raw.lat);
-        accuracyLayer?.update(raw.lon, raw.lat, accuracy);
+        const peerObs = buildPeerObservations(nowMs);
+        coLocatedPeerIds = findCoLocatedPeerIds(
+            { lat: raw.lat, lon: raw.lon, accuracy },
+            peerObs,
+            nowMs,
+        );
+        const fused = fuseCooperativeGps(
+            {
+                lat: raw.lat,
+                lon: raw.lon,
+                accuracy,
+                ele: altitude,
+                heading,
+                speed,
+                timestampMs: nowMs,
+            },
+            peerObs,
+            coLocatedPeerIds,
+            nowMs,
+        ) ?? {
+            lat: raw.lat,
+            lon: raw.lon,
+            accuracy,
+            source: "self" as const,
+            fusedPeerCount: 0,
+        };
+
+        const effLat = fused.lat;
+        const effLon = fused.lon;
+        const effAcc = fused.accuracy;
+        effectiveAccuracyM = effAcc;
+
+        latestFix = { lat: effLat, lon: effLon, accuracy: effAcc, altitude, heading, speed };
+        liveUserPos = { lat: effLat, lon: effLon };
+
+        locationPuck?.setPosition(effLon, effLat);
+        accuracyLayer?.update(effLon, effLat, effAcc);
         const effHeading = resolveHeadingDeg();
         locationPuck?.setHeading(effHeading, compassAccuracy ?? (effHeading !== null ? 20 : null));
 
@@ -1223,41 +1676,89 @@
             const lastBc = breadcrumbCoords[breadcrumbCoords.length - 1];
             if (
                 !lastBc ||
-                haversineMeters(lastBc[1], lastBc[0], raw.lat, raw.lon) >= 5
+                haversineMeters(lastBc[1], lastBc[0], effLat, effLon) >= 5
             ) {
-                breadcrumbCoords.push([raw.lon, raw.lat]);
+                breadcrumbCoords.push([effLon, effLat]);
             }
         }
 
-        if (matcher && etaCalc && activePoints.length > 0) {
-            const wasOffTrail = matchResult?.isOffTrail ?? false;
+        if (matcher && etaCalc && coaster && activePoints.length > 0) {
+            const wasOffTrail = (matchResult?.isOffTrail ?? false) && !isFarPreview;
             const matched = matcher.update({
-                lat: raw.lat,
-                lon: raw.lon,
-                accuracy,
+                lat: effLat,
+                lon: effLon,
+                accuracy: effAcc,
                 heading,
                 speed,
             });
             matchResult = matched;
-            alongTrackMeters = matched.alongTrackMeters;
+
+            const coasterRes = coaster.ingestFix({
+                lat: effLat,
+                lon: effLon,
+                accuracy: effAcc,
+                matchedAlongM: matched.alongTrackMeters,
+                crossTrackM: matched.crossTrackMeters,
+                isPaused: paused,
+                paceFactor: etaCalc.getPaceFactor(),
+                fusedSource: fused.source,
+                nowMs,
+            });
+
+            signalState = coasterRes.signalState;
+            alongTrackMeters = coasterRes.effectiveAlongM;
+
+            if (coasterRes.suppressOffTrail) {
+                locationPuck?.setPosition(coasterRes.lon, coasterRes.lat);
+            }
 
             const sampledEle =
                 altitude !== null
                     ? altitude
-                    : activeSampler(raw.lat, raw.lon) ?? matched.matchedEle;
+                    : activeSampler(effLat, effLon) ?? coasterRes.ele ?? matched.matchedEle;
             userEle = sampledEle;
 
-            if (!paused && !matched.isOffTrail) {
-                etaCalc.recordProgress(matched.alongTrackMeters, nowMs);
+            if (!paused && (!matched.isOffTrail || coasterRes.suppressOffTrail)) {
+                etaCalc.recordProgress(alongTrackMeters, nowMs);
             }
 
-            if (matched.isOffTrail) {
-                reroute = recomputeRerouteForFix({ lat: raw.lat, lon: raw.lon, altitude }, matched);
+            if (matched.crossTrackMeters > FAR_PREVIEW_THRESHOLD_METERS) {
+                isFarPreview = true;
+                farFromTrailDistanceM = matched.crossTrackMeters;
+                reroute = null;
+                lastReroutePos = null;
+                lastHybridReroutePos = null;
+                hybridReqSeq++;
+                justRejoined = false;
+            } else if (coasterRes.suppressOffTrail) {
+                isFarPreview = false;
+                farFromTrailDistanceM = null;
+                accessRouteActive = false;
+                accessRoutePoints = null;
+                reroute = null;
+                lastReroutePos = null;
+                lastHybridReroutePos = null;
+                hybridReqSeq++;
+            } else if (matched.isOffTrail) {
+                isFarPreview = false;
+                farFromTrailDistanceM = null;
+                accessRouteActive = false;
+                accessRoutePoints = null;
+                reroute = recomputeRerouteForFix(
+                    { lat: effLat, lon: effLon, altitude },
+                    matched,
+                );
                 justRejoined = false;
             } else {
+                isFarPreview = false;
+                farFromTrailDistanceM = null;
+                accessRouteActive = false;
+                accessRoutePoints = null;
                 if (wasOffTrail || reroute !== null) {
                     reroute = null;
                     lastReroutePos = null;
+                    lastHybridReroutePos = null;
+                    hybridReqSeq++;
                     justRejoined = true;
                     if (rejoinTimer) clearTimeout(rejoinTimer);
                     rejoinTimer = setTimeout(() => {
@@ -1274,13 +1775,16 @@
                       rejoinAlongTrackM: reroute.rejoinAlongTrackM,
                   }
                 : null;
-            etaSnapshot = etaCalc.compute(matched.alongTrackMeters, nowMs, offTrailExtra);
+            etaSnapshot = etaCalc.compute(alongTrackMeters, nowMs, offTrailExtra);
         }
 
-        // Update live SSE geo subscription & fire immediate heartbeat on first GPS fix
-        streamHandle?.updateCoords(raw.lat, raw.lon);
+        // Update live SSE geo subscription, fire immediate heartbeat on first GPS fix & sync group ping
+        streamHandle?.updateCoords(effLat, effLon);
         if (wasFirstFix) {
             void triggerHeartbeatNow(true);
+            void triggerGroupPingIfDue(true);
+        } else {
+            void triggerGroupPingIfDue(false);
         }
 
         // Keep requester's active SOS coordinates live as GPS moves
@@ -1375,7 +1879,7 @@
         if (offTrailMode === mode) return;
         offTrailMode = mode;
         persistSession();
-        if (latestFix && matchResult?.isOffTrail) {
+        if (latestFix && matchResult?.isOffTrail && !isFarPreview) {
             reroute = recomputeRerouteForFix(latestFix, matchResult, true);
             if (etaCalc && matchResult) {
                 const offTrailExtra = reroute
@@ -1386,7 +1890,7 @@
                           rejoinAlongTrackM: reroute.rejoinAlongTrackM,
                       }
                     : null;
-                etaSnapshot = etaCalc.compute(matchResult.alongTrackMeters, Date.now(), offTrailExtra);
+                etaSnapshot = etaCalc.compute(alongTrackMeters, Date.now(), offTrailExtra);
             }
         }
         if (activeRescueSosId) {
@@ -1405,7 +1909,7 @@
         persistSession();
         if (latestFix) {
             // Re-match current position onto the reversed track without altering breadcrumb
-            if (matcher && etaCalc) {
+            if (matcher && etaCalc && coaster) {
                 const matched = matcher.update({
                     lat: latestFix.lat,
                     lon: latestFix.lon,
@@ -1414,8 +1918,23 @@
                     speed: latestFix.speed,
                 });
                 matchResult = matched;
-                alongTrackMeters = matched.alongTrackMeters;
-                if (matched.isOffTrail) {
+                const coasterRes = coaster.ingestFix({
+                    lat: latestFix.lat,
+                    lon: latestFix.lon,
+                    accuracy: latestFix.accuracy,
+                    matchedAlongM: matched.alongTrackMeters,
+                    crossTrackM: matched.crossTrackMeters,
+                    isPaused: paused,
+                    paceFactor: etaCalc.getPaceFactor(),
+                    nowMs: lastRealFixMs ?? Date.now(),
+                });
+                signalState = coasterRes.signalState;
+                alongTrackMeters = coasterRes.effectiveAlongM;
+                if (matched.crossTrackMeters > FAR_PREVIEW_THRESHOLD_METERS) {
+                    isFarPreview = true;
+                    farFromTrailDistanceM = matched.crossTrackMeters;
+                    reroute = null;
+                } else if (!coasterRes.suppressOffTrail && matched.isOffTrail) {
                     reroute = recomputeRerouteForFix(latestFix, matched, true);
                 }
                 const offTrailExtra = reroute
@@ -1725,10 +2244,28 @@
             }
         }, 45_000);
 
+        coastingTimer = setInterval(() => {
+            runCoastingTick(Date.now());
+        }, 1_000);
+
+        groupPingTimer = setInterval(() => {
+            if (typeof document === "undefined" || document.visibilityState === "visible") {
+                void triggerGroupPingIfDue(false);
+            }
+        }, 6_000);
+
+        const savedGroup = getSavedGroupSession(trail.id);
+        if (savedGroup?.displayName) {
+            savedGroupName = savedGroup.displayName;
+        }
+        const urlGroupCode = normalizeGroupCode(page.url.searchParams.get("group"));
+        const initialGroupCode = urlGroupCode ?? savedGroup?.code ?? null;
+
         streamHandle = connectLiveStream({
             trailId: trail.id,
             lat: trail.lat ?? null,
             lon: trail.lon ?? null,
+            groupCode: initialGroupCode,
             callbacks: {
                 onReportUpdate: (rep) => {
                     liveReports = mergeReportIntoList(liveReports, rep);
@@ -1749,20 +2286,53 @@
                         syncNavGeoJson();
                     }
                 },
+                onGroupMemberUpdate: (member) => {
+                    if (!groupSession) return;
+                    groupSession = {
+                        ...groupSession,
+                        members: mergeGroupMemberIntoList(groupSession.members, member),
+                    };
+                },
+                onGroupMemberLeft: ({ groupCode, memberId }) => {
+                    if (!groupSession || (groupCode && groupCode !== groupSession.code)) return;
+                    groupSession = {
+                        ...groupSession,
+                        members: removeGroupMemberFromList(groupSession.members, memberId),
+                    };
+                },
             },
         });
+
+        if (urlGroupCode) {
+            void joinLiveGroup(urlGroupCode, {
+                displayName: savedGroup?.displayName || "Drumeț",
+                trailId: trail.id,
+                inNavigation: true,
+            }).then((joined) => {
+                if (joined) {
+                    groupSession = joined;
+                    streamHandle?.updateGroupCode(joined.code);
+                }
+            });
+        } else if (savedGroup?.code) {
+            void fetchLiveGroup(savedGroup.code).then((fetched) => {
+                if (fetched) {
+                    groupSession = fetched;
+                    streamHandle?.updateGroupCode(fetched.code);
+                }
+            });
+        }
 
         // Expose deterministic E2E test hook
         if (typeof window !== "undefined") {
             (window as unknown as Record<string, unknown>).__wandererNavTest = {
                 pushFix: (fix: NavFixInput) => handleGpsFix(fix),
+                tickCoasting: (nowMs?: number) => runCoastingTick(nowMs ?? Date.now()),
                 setCompass: (headingDeg: number, accuracyDeg: number | null = 10) =>
                     handleCompassReading(headingDeg, accuracyDeg),
-                setCustomDemSampler: (
-                    sampler: ((lat: number, lon: number) => number | null) | null,
-                ) => {
-                    customDemSampler = sampler;
-                    if (latestFix && matchResult?.isOffTrail) {
+                setCustomObstacles: (obstacles: ObstaclePolygon[] | null) => {
+                    customObstacles = obstacles;
+                    if (latestFix && matchResult?.isOffTrail && !isFarPreview) {
                         reroute = recomputeRerouteForFix(latestFix, matchResult, true);
                         if (etaCalc) {
                             const offTrailExtra = reroute
@@ -1774,7 +2344,36 @@
                                   }
                                 : null;
                             etaSnapshot = etaCalc.compute(
-                                matchResult.alongTrackMeters,
+                                alongTrackMeters,
+                                Date.now(),
+                                offTrailExtra,
+                            );
+                        }
+                        syncNavGeoJson();
+                    }
+                },
+                injectGroupSession: (session: GroupSessionDto | null) => {
+                    groupSession = session;
+                    streamHandle?.updateGroupCode(session?.code ?? null);
+                    syncLiveMapOverlays();
+                },
+                setCustomDemSampler: (
+                    sampler: ((lat: number, lon: number) => number | null) | null,
+                ) => {
+                    customDemSampler = sampler;
+                    if (latestFix && matchResult?.isOffTrail && !isFarPreview) {
+                        reroute = recomputeRerouteForFix(latestFix, matchResult, true);
+                        if (etaCalc) {
+                            const offTrailExtra = reroute
+                                ? {
+                                      distanceM: reroute.distanceM,
+                                      durationSec: reroute.estimatedSeconds,
+                                      ascentM: reroute.ascentM,
+                                      rejoinAlongTrackM: reroute.rejoinAlongTrackM,
+                                  }
+                                : null;
+                            etaSnapshot = etaCalc.compute(
+                                alongTrackMeters,
                                 Date.now(),
                                 offTrailExtra,
                             );
@@ -1830,6 +2429,14 @@
             clearInterval(heartbeatTimer);
             heartbeatTimer = null;
         }
+        if (coastingTimer) {
+            clearInterval(coastingTimer);
+            coastingTimer = null;
+        }
+        if (groupPingTimer) {
+            clearInterval(groupPingTimer);
+            groupPingTimer = null;
+        }
         streamHandle?.close();
         streamHandle = null;
         compassSensor?.stop();
@@ -1843,6 +2450,8 @@
         reportMarkers = [];
         for (const m of sosMarkers) m.remove();
         sosMarkers = [];
+        for (const m of groupMarkers) m.remove();
+        groupMarkers = [];
         if (rejoinTimer) {
             clearTimeout(rejoinTimer);
             rejoinTimer = null;
@@ -1869,7 +2478,7 @@
     >
         {#if activePoints.length === 0}
             <div
-                class="bg-menu-background/95 text-content rounded-2xl shadow-xl p-4 pointer-events-auto border border-input-border/60 flex items-center justify-between gap-3"
+                class="bg-menu-background/94 backdrop-blur-md text-content rounded-2xl shadow-xl p-4 pointer-events-auto border border-input-border/60 flex items-center justify-between gap-3"
             >
                 <span class="text-sm font-semibold">
                     {$_("nav-no-gpx", { default: "This trail has no GPX route for navigation." })}
@@ -1877,7 +2486,7 @@
                 <button
                     type="button"
                     onclick={handleExitNavigation}
-                    class="px-3 py-1.5 rounded-full bg-red-600 text-white text-xs font-semibold cursor-pointer shrink-0"
+                    class="px-3 py-1.5 rounded-full bg-[#242734] text-white text-xs font-semibold cursor-pointer shrink-0"
                 >
                     {$_("back", { default: "Back" })}
                 </button>
@@ -1924,7 +2533,7 @@
         {/if}
     </div>
 
-    <!-- Floating Left Controls: SOS Emergency Button & Push Bell -->
+    <!-- Floating Left Controls: SOS Emergency Button & Push Bell (Unified 40px Slate/Frosted) -->
     <div
         class="fixed left-3 z-40 flex flex-col items-start gap-2 pointer-events-none transition-all duration-200"
         style="bottom: calc({floatingBottomPx}px + env(safe-area-inset-bottom, 0px));"
@@ -1936,9 +2545,9 @@
                 onclick={handleEnableWebPush}
                 title="Activează notificările SOS pe o rază de 5 km"
                 aria-label="Activează notificările SOS"
-                class="pointer-events-auto h-10 w-10 rounded-full bg-menu-background/95 backdrop-blur text-content border border-input-border/60 shadow-lg text-sm flex items-center justify-center hover:bg-secondary-hover cursor-pointer"
+                class="pointer-events-auto h-10 w-10 rounded-full bg-menu-background/94 backdrop-blur-md text-content/80 border border-input-border/60 shadow-md text-sm flex items-center justify-center hover:bg-secondary-hover cursor-pointer transition-colors"
             >
-                <i class="fa-solid fa-bell text-amber-500" aria-hidden="true"></i>
+                <i class="fa-solid fa-bell text-sm" aria-hidden="true"></i>
             </button>
         {/if}
 
@@ -1951,30 +2560,50 @@
                 void handleEnableWebPush();
                 sosModalOpen = true;
             }}
-            class={`pointer-events-auto h-11 w-11 rounded-full shadow-lg flex items-center justify-center cursor-pointer transition-colors border ${
+            class={`pointer-events-auto h-10 w-10 rounded-full shadow-md flex items-center justify-center cursor-pointer transition-colors border ${
                 myActiveSos
                     ? "bg-red-600 text-white border-white/60 animate-pulse"
-                    : "bg-menu-background/95 backdrop-blur hover:bg-secondary-hover text-red-500 border-input-border/60"
+                    : "bg-menu-background/94 backdrop-blur-md hover:bg-secondary-hover text-content/80 border-input-border/60"
             }`}
         >
-            <i class="fa-solid fa-life-ring text-base" aria-hidden="true"></i>
+            <i class="fa-solid fa-life-ring text-sm" aria-hidden="true"></i>
         </button>
     </div>
 
-    <!-- Floating Right Controls: Waze Report Icon, 3D/2D Pitch Toggle & Recenter Pill -->
+    <!-- Floating Right Controls: Live Group, Calm Report Pin, 3D/2D Pitch Toggle & Recenter Pill -->
     <div
         class="fixed right-3 z-40 flex flex-col items-end gap-2 pointer-events-none transition-all duration-200"
         style="bottom: calc({floatingBottomPx}px + env(safe-area-inset-bottom, 0px));"
     >
         <button
             type="button"
+            data-testid="nav-group-btn"
+            onclick={() => (groupSheetOpen = true)}
+            aria-label="Grup Live"
+            title="Grup Live"
+            class="pointer-events-auto relative h-10 w-10 rounded-full bg-menu-background/94 backdrop-blur-md hover:bg-secondary-hover text-content/85 border border-input-border/60 shadow-md flex items-center justify-center cursor-pointer transition-colors"
+        >
+            <i class="fa-solid fa-user-group text-sm" aria-hidden="true"></i>
+            {#if groupMembers.length > 1}
+                <span
+                    data-testid="nav-group-count-badge"
+                    class="absolute -top-1 -right-1 min-w-[18px] h-[18px] px-1 rounded-full bg-[#242734] text-white text-[10px] font-extrabold flex items-center justify-center border border-white"
+                >
+                    {groupMembers.length}
+                </span>
+            {/if}
+        </button>
+
+        <button
+            type="button"
             data-testid="nav-waze-report-btn"
             onclick={() => (reportSheetOpen = true)}
             aria-label="Raportează pe potecă"
             title="Raportează pe potecă"
-            class="pointer-events-auto h-11 w-11 rounded-full bg-menu-background/95 backdrop-blur hover:bg-secondary-hover text-orange-500 border border-input-border/60 shadow-lg flex items-center justify-center cursor-pointer transition-colors"
+            class="pointer-events-auto relative h-10 w-10 rounded-full bg-menu-background/94 backdrop-blur-md hover:bg-secondary-hover text-content/85 border border-input-border/60 shadow-md flex items-center justify-center cursor-pointer transition-colors"
         >
-            <i class="fa-solid fa-triangle-exclamation text-base" aria-hidden="true"></i>
+            <i class="fa-solid fa-location-dot text-sm" aria-hidden="true"></i>
+            <span class="absolute top-1.5 right-1.5 text-[9px] font-black leading-none" aria-hidden="true">+</span>
         </button>
 
         <button
@@ -1985,7 +2614,7 @@
                 ? $_("nav-switch-2d", { default: "2D" })
                 : $_("nav-switch-3d", { default: "3D" })}
             onclick={handleTogglePitch}
-            class="pointer-events-auto h-10 px-3 rounded-full bg-menu-background/95 backdrop-blur text-content border border-input-border/60 shadow-lg text-xs font-bold flex items-center gap-1.5 hover:bg-secondary-hover cursor-pointer"
+            class="pointer-events-auto h-10 px-3 rounded-full bg-menu-background/94 backdrop-blur-md text-content border border-input-border/60 shadow-md text-xs font-bold flex items-center gap-1.5 hover:bg-secondary-hover cursor-pointer transition-colors"
         >
             <i class="fa-solid fa-cube text-[11px]" aria-hidden="true"></i>
             <span>{is3D ? $_("nav-switch-3d", { default: "3D" }) : $_("nav-switch-2d", { default: "2D" })}</span>
@@ -1996,13 +2625,27 @@
                 type="button"
                 data-testid="nav-recenter-btn"
                 onclick={handleRecenter}
-                class="pointer-events-auto h-10 px-4 rounded-full bg-blue-600 hover:bg-blue-700 text-white shadow-lg text-xs font-bold flex items-center gap-2 cursor-pointer transition-colors"
+                class="pointer-events-auto h-10 px-3.5 rounded-full bg-menu-background/94 backdrop-blur-md hover:bg-secondary-hover text-content border border-input-border/60 shadow-md text-xs font-bold flex items-center gap-1.5 cursor-pointer transition-colors"
             >
                 <i class="fa-solid fa-crosshairs" aria-hidden="true"></i>
                 <span>{$_("nav-recenter", { default: "Recenter" })}</span>
             </button>
         {/if}
     </div>
+
+    <GroupSheet
+        bind:open={groupSheetOpen}
+        {groupSession}
+        busy={groupBusy}
+        initialDisplayName={savedGroupName}
+        selfLat={liveUserPos?.lat ?? null}
+        selfLon={liveUserPos?.lon ?? null}
+        selfAlongTrackM={forwardAlongTrackMeters()}
+        onCreateGroup={handleCreateGroup}
+        onJoinGroup={handleJoinGroup}
+        onLeaveGroup={handleLeaveGroup}
+        onFocusMember={handleFocusGroupMember}
+    />
 
     <WazeReportSheet
         bind:open={reportSheetOpen}
@@ -2030,6 +2673,15 @@
             onTogglePause={handleTogglePause}
             onReverse={handleReverseDirection}
             onExit={handleExitNavigation}
+            {offTrailMode}
+            onOffTrailModeChange={handleOffTrailModeChange}
+            {signalState}
+            {effectiveAccuracyM}
+            {isFarPreview}
+            {farFromTrailDistanceM}
+            {accessRouteActive}
+            onRequestAccessRoute={handleRequestAccessRoute}
+            {groupMembers}
         />
     </div>
 </main>

@@ -14,6 +14,8 @@ import {
 	synthesizeTrailManeuvers,
 	toblerHikingSpeedKmh,
 	type NavTrackPoint,
+	type ObstaclePolygon,
+	type PreferredCorridor,
 } from "./index";
 
 const BASE_LAT = 45.5;
@@ -199,6 +201,64 @@ describe("RouteMapMatcher", () => {
 		const jumpFar = matcher.update({ ...offsetLatLon(450, 115), accuracy: 10 });
 		expect(jumpFar.isOffTrail).toBe(true);
 		expect(jumpFar.crossTrackMeters).toBeGreaterThan(90);
+	});
+
+	it("widens canopy threshold for accuracy > 25m (up to 140m) and advances alongTrackMeters monotonically when walking 400m parallel in forest", () => {
+		const trail = makeStraightEastTrail(1500, 25);
+		const matcher = new RouteMapMatcher(trail);
+
+		// Start on trail at 100m
+		const start = matcher.update({ ...offsetLatLon(100, 0), accuracy: 8 });
+		expect(start.isOffTrail).toBe(false);
+		expect(start.alongTrackMeters).toBeCloseTo(100, 0);
+
+		// Canopy GPS (accuracy 55m -> threshold = min(140, 121) = 121m): 95m drift does NOT trigger off-trail
+		for (let i = 0; i < 4; i++) {
+			const canopyRes = matcher.update({
+				...offsetLatLon(105 + i * 5, -95),
+				accuracy: 55,
+			});
+			expect(canopyRes.isOffTrail).toBe(false);
+		}
+
+		// Now genuine 60m off-trail walk in forest with sharp GPS (accuracy 8m) from x=100m to x=500m
+		const forestMatcher = new RouteMapMatcher(trail);
+		forestMatcher.update({ ...offsetLatLon(100, 0), accuracy: 8 });
+		for (let k = 0; k < 3; k++) {
+			forestMatcher.update({ ...offsetLatLon(100, -60), accuracy: 8 });
+		}
+
+		let prevAlong = 100;
+		let lastMatch = forestMatcher.update({ ...offsetLatLon(100, -60), accuracy: 8 });
+		expect(lastMatch.isOffTrail).toBe(true);
+
+		for (let x = 150; x <= 500; x += 50) {
+			lastMatch = forestMatcher.update({
+				...offsetLatLon(x, -60),
+				accuracy: 8,
+				heading: 90,
+				speed: 1.4,
+			});
+			expect(lastMatch.isOffTrail).toBe(true);
+			expect(lastMatch.alongTrackMeters).toBeGreaterThan(prevAlong);
+			prevAlong = lastMatch.alongTrackMeters;
+		}
+
+		expect(lastMatch.alongTrackMeters).toBeCloseTo(500, -1);
+
+		const userAt500 = offsetLatLon(500, -60);
+		const reroute = computeOffTrailReroute({
+			userLat: userAt500.lat,
+			userLon: userAt500.lon,
+			userEle: 1000,
+			trailPoints: trail,
+			lastAlongTrackM: lastMatch.alongTrackMeters,
+			sampler: () => 1000,
+			mode: "min-climb",
+			locale: "ro",
+		});
+		expect(reroute).not.toBeNull();
+		expect(reroute!.rejoinAlongTrackM).toBeGreaterThanOrEqual(lastMatch.alongTrackMeters);
 	});
 });
 
@@ -442,15 +502,16 @@ describe("computeOffTrailReroute", () => {
 			locale: "ro",
 		});
 
-		expect(reroute.mode).toBe("min-climb");
-		expect(reroute.points.length).toBeGreaterThan(2);
-		expect(reroute.maxSlopeDeg).toBeLessThan(37);
-		expect(reroute.avoidedSteepHazard).toBe(true);
-		expect(reroute.distanceM).toBeGreaterThan(140);
-		expect(reroute.initialBearingDeg).toBeGreaterThanOrEqual(0);
-		expect(reroute.initialBearingDeg).toBeLessThan(360);
-		expect(reroute.instruction).toContain("potecă");
-		expect(reroute.slopeAdvice).toContain("abrupt");
+		expect(reroute).not.toBeNull();
+		expect(reroute!.mode).toBe("min-climb");
+		expect(reroute!.points.length).toBeGreaterThan(2);
+		expect(reroute!.maxSlopeDeg).toBeLessThan(37);
+		expect(reroute!.avoidedSteepHazard).toBe(true);
+		expect(reroute!.distanceM).toBeGreaterThan(140);
+		expect(reroute!.initialBearingDeg).toBeGreaterThanOrEqual(0);
+		expect(reroute!.initialBearingDeg).toBeLessThan(360);
+		expect(reroute!.instruction).toContain("potecă");
+		expect(reroute!.slopeAdvice).toContain("abrupt");
 	});
 
 	it("falls back cleanly to IDW elevation interpolation when DEM sampler returns null", () => {
@@ -468,12 +529,13 @@ describe("computeOffTrailReroute", () => {
 			locale: "en",
 		});
 
-		expect(reroute.mode).toBe("shortest-safe");
-		expect(reroute.points.length).toBeGreaterThanOrEqual(2);
-		expect(Number.isFinite(reroute.distanceM)).toBe(true);
-		expect(Number.isFinite(reroute.rejoinEleM)).toBe(true);
-		expect(reroute.distanceM).toBeGreaterThanOrEqual(95);
-		expect(reroute.instruction).toContain("to trail");
+		expect(reroute).not.toBeNull();
+		expect(reroute!.mode).toBe("shortest-safe");
+		expect(reroute!.points.length).toBeGreaterThanOrEqual(2);
+		expect(Number.isFinite(reroute!.distanceM)).toBe(true);
+		expect(Number.isFinite(reroute!.rejoinEleM)).toBe(true);
+		expect(reroute!.distanceM).toBeGreaterThanOrEqual(95);
+		expect(reroute!.instruction).toContain("to trail");
 	});
 
 	it("contours around a synthetic 45° ravine and differentiates min-climb vs shortest-safe", () => {
@@ -501,8 +563,9 @@ describe("computeOffTrailReroute", () => {
 			mode: "min-climb",
 			locale: "en",
 		});
-		expect(ravineReroute.maxSlopeDeg).toBeLessThan(37);
-		expect(ravineReroute.avoidedSteepHazard).toBe(true);
+		expect(ravineReroute).not.toBeNull();
+		expect(ravineReroute!.maxSlopeDeg).toBeLessThan(37);
+		expect(ravineReroute!.avoidedSteepHazard).toBe(true);
 
 		// Moderate hill (30m climb over 100m = 30% slope, <37°) directly north vs flat detour around east side.
 		const hillSampler = (lat: number, lon: number): number => {
@@ -536,8 +599,98 @@ describe("computeOffTrailReroute", () => {
 			locale: "en",
 		});
 
-		expect(minClimb.ascentM).toBeLessThanOrEqual(shortestSafe.ascentM + 1e-6);
-		expect(shortestSafe.distanceM).toBeLessThanOrEqual(minClimb.distanceM + 20);
+		expect(minClimb).not.toBeNull();
+		expect(shortestSafe).not.toBeNull();
+		expect(minClimb!.ascentM).toBeLessThanOrEqual(shortestSafe!.ascentM + 1e-6);
+		expect(shortestSafe!.distanceM).toBeLessThanOrEqual(minClimb!.distanceM + 20);
+	});
+
+	it("100% avoids an ObstaclePolygon building between user and trail with smooth curved Chaikin geometry (>= 6 points) and supports start-inside exit + PreferredCorridor", () => {
+		const trail = makeStraightEastTrail(1000, 25, () => 1000);
+		const userPos = offsetLatLon(200, -130);
+
+		// School building blocking [e: 130..310, n: -95..-35] directly between user and forward rejoin
+		const bMinE = 130;
+		const bMaxE = 310;
+		const bMinN = -95;
+		const bMaxN = -35;
+		const c1 = offsetLatLon(bMinE, bMinN);
+		const c2 = offsetLatLon(bMaxE, bMinN);
+		const c3 = offsetLatLon(bMaxE, bMaxN);
+		const c4 = offsetLatLon(bMinE, bMaxN);
+
+		const schoolBuilding: ObstaclePolygon = {
+			rings: [
+				[c1.lon, c1.lat],
+				[c2.lon, c2.lat],
+				[c3.lon, c3.lat],
+				[c4.lon, c4.lat],
+				[c1.lon, c1.lat],
+			],
+		};
+
+		const preferredFootpath: PreferredCorridor = {
+			coords: [
+				[offsetLatLon(200, -130).lon, offsetLatLon(200, -130).lat],
+				[offsetLatLon(335, -105).lon, offsetLatLon(335, -105).lat],
+				[offsetLatLon(350, -20).lon, offsetLatLon(350, -20).lat],
+				[offsetLatLon(370, 0).lon, offsetLatLon(370, 0).lat],
+			],
+		};
+
+		const reroute = computeOffTrailReroute({
+			userLat: userPos.lat,
+			userLon: userPos.lon,
+			userEle: 1000,
+			trailPoints: trail,
+			lastAlongTrackM: 200,
+			sampler: () => 1000,
+			mode: "min-climb",
+			locale: "ro",
+			obstacles: [schoolBuilding],
+			preferredPaths: [preferredFootpath],
+		});
+
+		expect(reroute).not.toBeNull();
+		expect(reroute!.points.length).toBeGreaterThanOrEqual(6);
+
+		// Verify NO vertex and NO interpolated sub-point along any segment enters [bMinE..bMaxE] x [bMinN..bMaxN]
+		for (let i = 0; i < reroute!.points.length; i++) {
+			const pt = reroute!.points[i];
+			const e = (pt.lon - BASE_LON) * M_PER_DEG_LON;
+			const n = (pt.lat - BASE_LAT) * M_PER_DEG_LAT;
+			const insideBuilding = e > bMinE && e < bMaxE && n > bMinN && n < bMaxN;
+			expect(insideBuilding).toBe(false);
+
+			if (i + 1 < reroute!.points.length) {
+				const next = reroute!.points[i + 1];
+				for (let k = 1; k < 40; k++) {
+					const t = k / 40;
+					const sLat = pt.lat + t * (next.lat - pt.lat);
+					const sLon = pt.lon + t * (next.lon - pt.lon);
+					const se = (sLon - BASE_LON) * M_PER_DEG_LON;
+					const sn = (sLat - BASE_LAT) * M_PER_DEG_LAT;
+					expect(se > bMinE && se < bMaxE && sn > bMinN && sn < bMaxN).toBe(false);
+				}
+			}
+		}
+
+		// Start-inside-building due to indoor GPS drift still exits outward cleanly to trail
+		const insideStart = offsetLatLon(220, -65);
+		const exitReroute = computeOffTrailReroute({
+			userLat: insideStart.lat,
+			userLon: insideStart.lon,
+			userEle: 1000,
+			trailPoints: trail,
+			lastAlongTrackM: 200,
+			sampler: () => 1000,
+			mode: "min-climb",
+			locale: "ro",
+			obstacles: [schoolBuilding],
+		});
+		expect(exitReroute).not.toBeNull();
+		expect(exitReroute!.points.length).toBeGreaterThanOrEqual(2);
+		expect(exitReroute!.rejoinLat).toBeCloseTo(BASE_LAT, 4);
 	});
 });
 
@@ -625,17 +778,18 @@ describe("additional edge cases across maneuvers and DEM bilinear interpolation"
 		}
 	});
 
-	it("returns O(1) direct geodesic guidance when user is >5 km away (e.g. 306 km desktop Start) without millions of DEM samples", () => {
-		const trail = [
+	it("returns null in O(1) Preview Mode when user is >3 km away (e.g. 3.2 km or 222 km București -> Mediaș) without drawing lines across the country", () => {
+		const mediasTrail = [
 			{ lat: 46.16, lon: 24.35, ele: 320, distanceM: 0, gradePct: 0 },
 			{ lat: 46.17, lon: 24.36, ele: 340, distanceM: 1350, gradePct: 1.5 },
 		];
 		let samplerCalls = 0;
-		const res = computeOffTrailReroute({
-			userLat: 47.1584,
-			userLon: 27.6014, // ~270+ km away
-			userEle: 120,
-			trailPoints: trail,
+		// București (~222 km away from Mediaș)
+		const bucharestRes = computeOffTrailReroute({
+			userLat: 44.4268,
+			userLon: 26.1025,
+			userEle: 85,
+			trailPoints: mediasTrail,
 			lastAlongTrackM: 0,
 			sampler: () => {
 				samplerCalls++;
@@ -644,9 +798,22 @@ describe("additional edge cases across maneuvers and DEM bilinear interpolation"
 			mode: "min-climb",
 			locale: "ro",
 		});
+		expect(bucharestRes).toBeNull();
+		expect(samplerCalls).toBe(0);
 
-		expect(samplerCalls).toBeLessThanOrEqual(8);
-		expect(res.points.length).toBe(2);
-		expect(res.distanceM).toBeGreaterThan(200_000);
+		// Just past the 3 km threshold (3.2 km South of trail)
+		const trail = makeStraightEastTrail(500, 25);
+		const pos3200m = offsetLatLon(200, -3200);
+		const over3kmRes = computeOffTrailReroute({
+			userLat: pos3200m.lat,
+			userLon: pos3200m.lon,
+			userEle: 1000,
+			trailPoints: trail,
+			lastAlongTrackM: 100,
+			sampler: () => 1000,
+			mode: "min-climb",
+			locale: "ro",
+		});
+		expect(over3kmRes).toBeNull();
 	});
 });

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"maps"
 	"net/http"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -31,6 +32,7 @@ type Subscriber struct {
 	HasCoords  bool
 	TrailID    string
 	DeviceHash string
+	GroupCode  string
 	Ch         chan string
 }
 
@@ -75,9 +77,15 @@ func (h *TrailLiveHub) SetKeepaliveInterval(d time.Duration) {
 	}
 }
 
-// Subscribe registers a new SSE subscriber and returns it alongside an
-// unsubscribe cleanup function.
+// Subscribe registers a new SSE subscriber without a private group channel and
+// returns it alongside an unsubscribe cleanup function.
 func (h *TrailLiveHub) Subscribe(lat, lon float64, hasCoords bool, trailID, deviceHash string) (*Subscriber, func()) {
+	return h.SubscribeWithGroup(lat, lon, hasCoords, trailID, deviceHash, "")
+}
+
+// SubscribeWithGroup registers a new SSE subscriber optionally scoped to a
+// private hiking group code (normalized uppercase) alongside geo/trail scope.
+func (h *TrailLiveHub) SubscribeWithGroup(lat, lon float64, hasCoords bool, trailID, deviceHash, groupCode string) (*Subscriber, func()) {
 	id := h.nextID.Add(1)
 	sub := &Subscriber{
 		ID:         id,
@@ -86,6 +94,7 @@ func (h *TrailLiveHub) Subscribe(lat, lon float64, hasCoords bool, trailID, devi
 		HasCoords:  hasCoords,
 		TrailID:    trailID,
 		DeviceHash: deviceHash,
+		GroupCode:  strings.ToUpper(strings.TrimSpace(groupCode)),
 		Ch:         make(chan string, subscriberBufferSize),
 	}
 
@@ -212,6 +221,45 @@ func (h *TrailLiveHub) BroadcastSosUpdate(
 			continue
 		}
 
+		select {
+		case sub.Ch <- frame:
+		default:
+			select {
+			case <-sub.Ch:
+			default:
+			}
+			select {
+			case sub.Ch <- frame:
+			default:
+			}
+		}
+	}
+}
+
+// PublishGroupEvent sends `event: <eventName>\ndata: <json>\n\n` strictly to
+// active SSE subscribers subscribed to the matching non-empty groupCode.
+func (h *TrailLiveHub) PublishGroupEvent(groupCode, eventName string, payload any) {
+	if h == nil {
+		return
+	}
+	normalizedCode := strings.ToUpper(strings.TrimSpace(groupCode))
+	cleanEvent := strings.TrimSpace(eventName)
+	if normalizedCode == "" || cleanEvent == "" {
+		return
+	}
+
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		return
+	}
+	frame := fmt.Sprintf("event: %s\ndata: %s\n\n", cleanEvent, encoded)
+
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	for _, sub := range h.subs {
+		if sub.GroupCode == "" || sub.GroupCode != normalizedCode {
+			continue
+		}
 		select {
 		case sub.Ch <- frame:
 		default:

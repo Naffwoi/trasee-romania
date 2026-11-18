@@ -1,6 +1,7 @@
 import { proxyJsonResponse } from "#lib/server/http.ts";
 import {
 	forwardLiveToDb,
+	isValidGroupCode,
 	resolveActorId,
 	resolveDeviceIdentity,
 } from "#lib/server/live/device_identity.ts";
@@ -23,6 +24,10 @@ export async function GET(event: RequestEvent) {
 		if (val !== null && val.trim().length > 0) {
 			forwardParams.set(key, val.trim());
 		}
+	}
+	const rawGroupCode = event.url.searchParams.get("groupCode")?.trim().toUpperCase() ?? "";
+	if (isValidGroupCode(rawGroupCode)) {
+		forwardParams.set("groupCode", rawGroupCode);
 	}
 	const qs = forwardParams.toString();
 	const upstreamPath = qs ? `/stream?${qs}` : "/stream";

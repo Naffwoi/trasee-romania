@@ -1,5 +1,6 @@
 import 'dart:math' as math;
 
+import 'package:flutter/foundation.dart' show ValueListenable;
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:maplibre/maplibre.dart' as ml;
@@ -18,6 +19,7 @@ class LocationPuck extends StatelessWidget {
     this.size = 88,
     this.dotSize = 18,
     this.heading,
+    this.headingListenable,
     this.headingAccuracy,
     this.showHeading = true,
   });
@@ -30,16 +32,38 @@ class LocationPuck extends StatelessWidget {
   final double dotSize;
 
   final double? heading;
+  final ValueListenable<double?>? headingListenable;
   final double? headingAccuracy;
 
   /// Whether to draw the heading flashlight cone at all.
   final bool showHeading;
 
+  Widget _buildCone(double? resolvedHeading, double halfAngleDeg) {
+    final hasValidHeading =
+        showHeading &&
+        resolvedHeading != null &&
+        resolvedHeading.isFinite &&
+        resolvedHeading >= 0 &&
+        size > dotSize;
+    if (!hasValidHeading) {
+      return const SizedBox.shrink();
+    }
+    return RepaintBoundary(
+      child: Transform.rotate(
+        key: const ValueKey('gmaps-heading-cone'),
+        angle: resolvedHeading * math.pi / 180.0,
+        child: CustomPaint(
+          size: Size(size, size),
+          painter: _FlashlightConePainter(halfAngleDeg: halfAngleDeg),
+        ),
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
-    final hasValidHeading =
-        showHeading && heading != null && heading!.isFinite && heading! >= 0;
     final halfAngleDeg = coneHalfAngleFromAccuracy(headingAccuracy);
+    final listenable = headingListenable;
 
     return IgnorePointer(
       child: SizedBox(
@@ -48,31 +72,30 @@ class LocationPuck extends StatelessWidget {
         child: Stack(
           alignment: Alignment.center,
           children: [
-            if (hasValidHeading && size > dotSize)
-              Transform.rotate(
-                key: const ValueKey('gmaps-heading-cone'),
-                angle: heading! * math.pi / 180.0,
-                child: CustomPaint(
-                  size: Size(size, size),
-                  painter: _FlashlightConePainter(
-                    halfAngleDeg: halfAngleDeg,
-                  ),
+            if (listenable != null)
+              ValueListenableBuilder<double?>(
+                valueListenable: listenable,
+                builder: (context, liveHeading, _) =>
+                    _buildCone(liveHeading, halfAngleDeg),
+              )
+            else
+              _buildCone(heading, halfAngleDeg),
+            RepaintBoundary(
+              child: Container(
+                width: dotSize,
+                height: dotSize,
+                decoration: BoxDecoration(
+                  color: kGoogleMapsBlue,
+                  shape: BoxShape.circle,
+                  border: Border.all(color: Colors.white, width: 3),
+                  boxShadow: [
+                    BoxShadow(
+                      color: Colors.black.withValues(alpha: .35),
+                      blurRadius: 4,
+                      offset: const Offset(0, 1),
+                    ),
+                  ],
                 ),
-              ),
-            Container(
-              width: dotSize,
-              height: dotSize,
-              decoration: BoxDecoration(
-                color: kGoogleMapsBlue,
-                shape: BoxShape.circle,
-                border: Border.all(color: Colors.white, width: 3),
-                boxShadow: [
-                  BoxShadow(
-                    color: Colors.black.withValues(alpha: .35),
-                    blurRadius: 4,
-                    offset: const Offset(0, 1),
-                  ),
-                ],
               ),
             ),
           ],
@@ -87,6 +110,26 @@ class _FlashlightConePainter extends CustomPainter {
 
   final double halfAngleDeg;
 
+  static double? _cachedRadius;
+  static Shader? _cachedShader;
+
+  static Shader _shaderForRadius(double radius) {
+    if (_cachedShader != null && _cachedRadius == radius) {
+      return _cachedShader!;
+    }
+    final rect = Rect.fromCircle(center: Offset(radius, radius), radius: radius);
+    _cachedRadius = radius;
+    _cachedShader = RadialGradient(
+      colors: [
+        kGoogleMapsBlue.withValues(alpha: 0.72),
+        kGoogleMapsBlue.withValues(alpha: 0.34),
+        kGoogleMapsBlue.withValues(alpha: 0.0),
+      ],
+      stops: const [0.18, 0.62, 1.0],
+    ).createShader(rect);
+    return _cachedShader!;
+  }
+
   @override
   void paint(Canvas canvas, Size size) {
     final radius = size.width / 2;
@@ -97,15 +140,7 @@ class _FlashlightConePainter extends CustomPainter {
     final startAngle = -math.pi / 2 - sweepRadians / 2;
 
     final rect = Rect.fromCircle(center: center, radius: radius);
-    final paint = Paint()
-      ..shader = RadialGradient(
-        colors: [
-          kGoogleMapsBlue.withValues(alpha: 0.72),
-          kGoogleMapsBlue.withValues(alpha: 0.34),
-          kGoogleMapsBlue.withValues(alpha: 0.0),
-        ],
-        stops: const [0.18, 0.62, 1.0],
-      ).createShader(rect);
+    final paint = Paint()..shader = _shaderForRadius(radius);
 
     final path = Path()
       ..moveTo(center.dx, center.dy)

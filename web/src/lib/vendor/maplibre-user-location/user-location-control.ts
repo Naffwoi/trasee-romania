@@ -244,11 +244,11 @@ export class UserLocationControl implements IControl {
             this.refreshHeadingVisuals();
             if (this._mode === "followHeadingUp" && this.map) {
                 this.runProgrammaticCamera(() => {
-                    this.map!.easeTo({
-                        bearing: reading.heading,
-                        duration: this.options.animate === false ? 0 : 120,
-                        easing: (t) => t,
-                    });
+                    if (typeof this.map!.jumpTo === "function") {
+                        this.map!.jumpTo({ bearing: reading.heading });
+                    } else {
+                        this.map!.easeTo({ bearing: reading.heading, duration: 0 });
+                    }
                 });
             }
         });

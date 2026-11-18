@@ -92,6 +92,18 @@ describe("CompassSensor", () => {
         });
         expect(readings).toHaveLength(2);
 
+        // Sub-1.2 deg stationary micro-jitter around last emitted heading must be suppressed
+        // (even when smoothed step ~0.88 deg exceeds filter's 0.5 deg threshold)
+        const settled = readings[readings.length - 1].heading;
+        listeners["deviceorientation"]?.({
+            webkitCompassHeading: (settled + 4) % 360,
+            webkitCompassAccuracy: 8,
+            alpha: null,
+            beta: null,
+            gamma: null,
+        });
+        expect(readings).toHaveLength(2);
+
         sensor.stop();
         expect(Object.keys(listeners)).toHaveLength(0);
     });

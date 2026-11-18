@@ -35,5 +35,17 @@ describe('GET /api/v1/map/style-sources', () => {
 
     expect(body.tileUrl).toBe('https://tiles.example/{z}/{x}/{y}.mvt');
     expect(body.spriteUrl).toBe('https://assets.example/sprites/v4');
+    expect(body.ancpiOrthoAvailable).toBe(false);
+  });
+
+  it('reports ancpiOrthoAvailable when ANCPI_ORTHO_URL_TEMPLATE is configured', async () => {
+    env.TILE_SERVER_URL = 'https://tiles.example/{z}/{x}/{y}.mvt';
+    env.ANCPI_ORTHO_URL_TEMPLATE = 'https://geoportal.ancpi.ro/wms?bbox={bbox-epsg-3857}';
+    try {
+      const body = await (await GET(event())).json();
+      expect(body.ancpiOrthoAvailable).toBe(true);
+    } finally {
+      delete env.ANCPI_ORTHO_URL_TEMPLATE;
+    }
   });
 });

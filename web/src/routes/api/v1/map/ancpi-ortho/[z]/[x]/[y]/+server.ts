@@ -1,9 +1,10 @@
 import * as privateEnv from "$app/env/private";
 import { xyzToEpsg3857Bbox } from "#lib/map/dynamic_raster_overlays.ts";
+import { readOptionalPrivateEnv } from "#lib/server/optional_private_env.ts";
 import type { RequestEvent } from "@sveltejs/kit";
 
 export async function GET(event: RequestEvent) {
-	const tpl = ((privateEnv as Record<string, string | undefined>).ANCPI_ORTHO_URL_TEMPLATE ?? "").trim();
+	const tpl = readOptionalPrivateEnv(privateEnv, "ANCPI_ORTHO_URL_TEMPLATE");
 	if (!tpl) {
 		return new Response("ANCPI_ORTHO_URL_TEMPLATE not configured", { status: 404 });
 	}

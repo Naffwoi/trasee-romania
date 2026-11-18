@@ -7,6 +7,7 @@ import (
 	"log"
 	"os"
 	"pocketbase/federation"
+	"pocketbase/services/live"
 	"pocketbase/util"
 	"time"
 
@@ -16,6 +17,26 @@ import (
 	"github.com/pocketbase/pocketbase/core"
 )
 
+const trailGeometryPrecomputedKey = "__geometry_precomputed"
+
+// PrepareTrailBeforeSaveHandler populates iri, polyline, and bounds in memory before SQLite INSERT/UPDATE
+// when an uploaded GPX file is attached, eliminating 2 redundant post-commit UPDATE statements.
+func PrepareTrailBeforeSaveHandler() func(e *core.RecordEvent) error {
+	return func(e *core.RecordEvent) error {
+		if origin := os.Getenv("ORIGIN"); origin != "" && e.Record.Id != "" && e.Record.GetString("iri") == "" {
+			e.Record.Set("iri", fmt.Sprintf("%s/api/v1/trail/%s", origin, e.Record.Id))
+		}
+		if len(e.Record.GetUnsavedFiles("gpx")) > 0 {
+			if err := util.ApplyGeometryFields(e.App, e.Record); err != nil {
+				log.Printf("failed to precompute polyline for trail %s: %v", e.Record.Id, err)
+			} else {
+				e.Record.Set(trailGeometryPrecomputedKey, true)
+			}
+		}
+		return e.Next()
+	}
+}
+
 func CreateTrailHandler(client meilisearch.ServiceManager) func(e *core.RecordEvent) error {
 	return func(e *core.RecordEvent) error {
 		record := e.Record
@@ -24,8 +45,10 @@ func CreateTrailHandler(client meilisearch.ServiceManager) func(e *core.RecordEv
 		if err != nil {
 			return err
 		}
-		if err := util.SavePolyline(e.App, record); err != nil {
-			log.Printf("failed to save polyline for trail %s: %v", record.Id, err)
+		if pre, _ := record.GetRaw(trailGeometryPrecomputedKey).(bool); !pre && record.GetString("polyline") == "" && record.GetString("gpx") != "" {
+			if err := util.SavePolyline(e.App, record); err != nil {
+				log.Printf("failed to save polyline for trail %s: %v", record.Id, err)
+			}
 		}
 
 		// add local iri
@@ -100,12 +123,13 @@ func setTrailCompletedAt(record *core.Record, now time.Time) {
 func UpdateTrailHandler(client meilisearch.ServiceManager) func(e *core.RecordEvent) error {
 	return func(e *core.RecordEvent) error {
 		record := e.Record
+		live.DefaultMemoryStore().InvalidateTrailCorridor(record.Id)
 		userActor, err := e.App.FindRecordById("activitypub_actors", record.GetString(("author")))
 		if err != nil {
 			return err
 		}
 
-		if record.GetString("gpx") != record.Original().GetString("gpx") {
+		if pre, _ := record.GetRaw(trailGeometryPrecomputedKey).(bool); !pre && record.GetString("gpx") != record.Original().GetString("gpx") {
 			if err := util.SavePolyline(e.App, record); err != nil {
 				log.Printf("failed to save polyline for trail %s: %v", record.Id, err)
 			}
@@ -176,6 +200,7 @@ func CollectTrailDeleteRecipientsHandler() func(e *core.RecordEvent) error {
 func DeleteTrailHandler(client meilisearch.ServiceManager) func(e *core.RecordEvent) error {
 	return func(e *core.RecordEvent) error {
 		record := e.Record
+		live.DefaultMemoryStore().InvalidateTrailCorridor(record.Id)
 		ctx, cancel := context.WithTimeout(e.Context, 5*time.Second)
 		defer cancel()
 		task, err := client.Index("trails").DeleteDocumentWithContext(ctx, record.Id, nil)

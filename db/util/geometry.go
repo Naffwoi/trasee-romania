@@ -1,12 +1,11 @@
 package util
 
 import (
-	"bytes"
 	"fmt"
-	"io"
+	"strings"
 
 	"github.com/pocketbase/pocketbase/core"
-	"github.com/tkrajina/gpxgo/gpx"
+	"github.com/twpayne/go-polyline"
 )
 
 type TrailGeometryMetrics struct {
@@ -22,6 +21,16 @@ type trailPoint struct {
 }
 
 func TrailCoordinates(app core.App, r *core.Record) ([][2]float64, error) {
+	if poly := strings.TrimSpace(r.GetString("polyline")); poly != "" {
+		if decoded, _, err := polyline.DecodeCoords([]byte(poly)); err == nil && len(decoded) >= 2 {
+			pts := make([][2]float64, len(decoded))
+			for i, c := range decoded {
+				pts[i] = [2]float64{c[0], c[1]}
+			}
+			return pts, nil
+		}
+	}
+
 	gpxPath := r.GetString("gpx")
 	if gpxPath == "" {
 		return nil, nil
@@ -39,25 +48,15 @@ func TrailCoordinates(app core.App, r *core.Record) ([][2]float64, error) {
 	}
 	defer reader.Close()
 
-	content := new(bytes.Buffer)
-	if _, err := io.Copy(content, reader); err != nil {
-		return nil, err
-	}
-
-	gpxData, err := gpx.Parse(content)
+	streamed, err := StreamGPXData(reader)
 	if err != nil {
 		return nil, err
 	}
 
 	points := make([][2]float64, 0)
-	for _, trk := range gpxData.Tracks {
-		for _, seg := range trk.Segments {
-			for _, pt := range seg.Points {
-				points = append(points, [2]float64{pt.Latitude, pt.Longitude})
-			}
-		}
+	for _, seg := range streamed.TrackSegments {
+		points = append(points, seg...)
 	}
-
 	return points, nil
 }
 

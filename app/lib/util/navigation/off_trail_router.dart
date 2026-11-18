@@ -203,12 +203,15 @@ class OffTrailRouter {
     String localeCode = 'ro',
     bool isCycling = false,
     List<List<Geographic>> obstacles = const [],
+    EtaCalculator? precomputedEta,
+    bool Function()? isCancelled,
   }) {
     if (trailPoints.length < 2 ||
         !userPos.lat.isFinite ||
         !userPos.lon.isFinite) {
       return null;
     }
+    if (isCancelled != null && isCancelled()) return null;
 
     const mPerDegLat = 111320.0;
     final mPerDegLon =
@@ -261,7 +264,9 @@ class OffTrailRouter {
       return null;
     }
 
-    final etaCalc = EtaCalculator.fromPoints(trailPoints, isCycling: isCycling);
+    final etaCalc =
+        precomputedEta ??
+        EtaCalculator.fromPoints(trailPoints, isCycling: isCycling);
     final totalDistM = etaCalc.totalDistanceM;
     final totalBaseSec = etaCalc.baseSecondsAt(totalDistM);
 
@@ -603,7 +608,13 @@ class OffTrailRouter {
     var bestGoalIdx = -1;
     var bestTotalCost = double.infinity;
 
+    var popIterations = 0;
     while (!openHeap.isEmpty) {
+      if ((++popIterations & 63) == 0 &&
+          isCancelled != null &&
+          isCancelled()) {
+        return null;
+      }
       final curr = openHeap.pop();
       if (fScore[curr] >= bestTotalCost) break;
       if (closed[curr] != 0) continue;
@@ -766,18 +777,23 @@ class OffTrailRouter {
     bool isCycling = false,
     List<List<Geographic>> obstacles = const [],
     CancelToken? cancelToken,
+    OffTrailRerouteResult? precomputedLocalResult,
+    EtaCalculator? precomputedEta,
   }) async {
-    final localResult = compute(
-      userPos: userPos,
-      userEleM: userEleM,
-      trailPoints: trailPoints,
-      lastAlongTrackM: lastAlongTrackM,
-      sampler: sampler,
-      mode: mode,
-      localeCode: localeCode,
-      isCycling: isCycling,
-      obstacles: obstacles,
-    );
+    final localResult =
+        precomputedLocalResult ??
+        compute(
+          userPos: userPos,
+          userEleM: userEleM,
+          trailPoints: trailPoints,
+          lastAlongTrackM: lastAlongTrackM,
+          sampler: sampler,
+          mode: mode,
+          localeCode: localeCode,
+          isCycling: isCycling,
+          obstacles: obstacles,
+          precomputedEta: precomputedEta,
+        );
     if (localResult == null || dio == null) {
       return localResult;
     }

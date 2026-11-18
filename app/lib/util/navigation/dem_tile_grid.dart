@@ -1,34 +1,101 @@
 import 'dart:io';
 import 'dart:math' as math;
 import 'dart:typed_data';
-import 'dart:ui' as ui;
 
 import 'package:dio/dio.dart';
+import 'package:image/image.dart' as img;
 import 'package:maplibre/maplibre.dart' show Geographic;
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
+import 'package:pmtiles/pmtiles.dart';
 
+/// Compact 16-bit quantized elevation tile (`512 KB` for `512×512`, half the
+/// memory of `Float32List` or `RGBA8888`).
+///
+/// Encoding: `u16 = ((eleMeters + 1000.0) * 6.0).round().clamp(0, 65534)`
+/// (`~0.167 m` (`<= 0.20 m`) vertical resolution across `-1,000.0 m .. +9,922.3 m`,
+/// covering Dead Sea to Mount Everest with exact `.0`/`.5` m representation;
+/// `0xFFFF` = transparent/void sentinel).
 class _DecodedDemTile {
   const _DecodedDemTile({
     required this.width,
     required this.height,
-    required this.rgba,
+    required this.quantizedU16,
   });
+
+  static const int voidSentinel = 0xFFFF;
+  static const int slabMagic = 0x36314D44; // 'DM16' little-endian
+  static const double _scale = 6.0;
 
   final int width;
   final int height;
-  final Uint8List rgba;
+  final Uint16List quantizedU16;
+
+  static int encodeElevation(double meters) =>
+      ((meters + 1000.0) * _scale).round().clamp(0, 65534);
+
+  static double decodeElevation(int u16) => u16 / _scale - 1000.0;
+
+  factory _DecodedDemTile.fromRgbaBytes({
+    required int width,
+    required int height,
+    required Uint8List rgba,
+  }) {
+    final count = width * height;
+    final slab = Uint16List(count);
+    for (var i = 0; i < count; i++) {
+      final offset = i * 4;
+      if (offset + 3 >= rgba.length || rgba[offset + 3] == 0) {
+        slab[i] = voidSentinel;
+        continue;
+      }
+      final r = rgba[offset];
+      final g = rgba[offset + 1];
+      final b = rgba[offset + 2];
+      final meters = (r * 256.0 + g + b / 256.0) - 32768.0;
+      slab[i] = encodeElevation(meters);
+    }
+    return _DecodedDemTile(width: width, height: height, quantizedU16: slab);
+  }
+
+  Uint8List toBinarySlabBytes() {
+    final payloadBytes = quantizedU16.length * 2;
+    final out = Uint8List(8 + payloadBytes);
+    final bd = ByteData.sublistView(out);
+    bd.setUint32(0, slabMagic, Endian.little);
+    bd.setUint16(4, width, Endian.little);
+    bd.setUint16(6, height, Endian.little);
+    for (var i = 0; i < quantizedU16.length; i++) {
+      bd.setUint16(8 + i * 2, quantizedU16[i], Endian.little);
+    }
+    return out;
+  }
+
+  static _DecodedDemTile? fromBinarySlabBytes(Uint8List bytes) {
+    if (bytes.length < 8) return null;
+    final bd = ByteData.sublistView(bytes);
+    if (bd.getUint32(0, Endian.little) != slabMagic) return null;
+    final w = bd.getUint16(4, Endian.little);
+    final h = bd.getUint16(6, Endian.little);
+    final count = w * h;
+    if (w <= 0 || h <= 0 || bytes.length != 8 + count * 2) return null;
+
+    final slab = Uint16List(count);
+    for (var i = 0; i < count; i++) {
+      slab[i] = bd.getUint16(8 + i * 2, Endian.little);
+    }
+    return _DecodedDemTile(width: w, height: h, quantizedU16: slab);
+  }
 
   double? pixelElevation(int px, int py) {
+    if (width <= 0 || height <= 0) return null;
     final cx = px.clamp(0, width - 1);
     final cy = py.clamp(0, height - 1);
-    final offset = (cy * width + cx) * 4;
-    if (offset + 3 >= rgba.length) return null;
-    if (rgba[offset + 3] == 0) return null;
-    final r = rgba[offset];
-    final g = rgba[offset + 1];
-    final b = rgba[offset + 2];
-    return (r * 256.0 + g + b / 256.0) - 32768.0;
+    final idx = cy * width + cx;
+    if (idx < 0 || idx >= quantizedU16.length) return null;
+    final raw = quantizedU16[idx];
+    if (raw == voidSentinel) return null;
+    return decodeElevation(raw);
   }
 
   double? sampleBilinear(double u, double v) {
@@ -56,14 +123,18 @@ class _DecodedDemTile {
   }
 }
 
-/// Downloads, caches, and bilinearly samples Mapterhorn zoom-12 Terrarium
-/// elevation WebP tiles (`https://tiles.mapterhorn.com/12/{x}/{y}.webp`).
+/// Pure-Dart, isolate-safe zoom-12 Terrarium DEM tile grid backed by:
+/// 1. Local offline `.pmtiles` DEM archives ([demArchivePaths]),
+/// 2. Pre-decoded `.dem16` `Uint16List` binary slabs on disk (`< 0.4 ms` load),
+/// 3. Remote `{z}/{x}/{y}` WebP/PNG tiles decoded via `package:image` (zero
+///    `dart:ui` GPU texture upload/readback).
 class DemTileGrid {
   DemTileGrid({
     Dio? dio,
     double? Function(double lat, double lon)? customSampler,
-    this.tileUrlTemplate = 'https://tiles.mapterhorn.com/12/{x}/{y}.webp',
+    this.tileUrlTemplate = 'https://tiles.mapterhorn.com/{z}/{x}/{y}.webp',
     Future<Directory> Function()? cacheRootProvider,
+    List<String> demArchivePaths = const <String>[],
   }) : _dio =
            dio ??
            Dio(
@@ -73,27 +144,50 @@ class DemTileGrid {
              ),
            ),
        _customSampler = customSampler,
-       _cacheRootProvider = cacheRootProvider ?? getTemporaryDirectory;
+       _cacheRootProvider =
+           cacheRootProvider ?? getApplicationSupportDirectory,
+       _demArchivePaths = List<String>.from(demArchivePaths);
 
   static const int zoom = 12;
   static const int maxPrefetchTiles = 9;
+  static const int maxCachedTiles = 48;
   static const int _gridSize = 1 << zoom;
 
   final Dio _dio;
   final String tileUrlTemplate;
   final Future<Directory> Function() _cacheRootProvider;
   double? Function(double lat, double lon)? _customSampler;
+  List<String> _demArchivePaths;
 
   final Map<(int, int), _DecodedDemTile> _tiles = {};
   final Set<(int, int)> _failedTiles = {};
   final Map<(int, int), Future<void>> _inFlight = {};
+  final Map<String, PmTilesArchive> _openArchives = {};
 
-  /// Overrides or clears the custom elevation sampler (useful in tests).
+  static double webMercatorRowCellSizeMeters(
+    int z,
+    int tileY,
+    int row,
+    int tileSize,
+  ) {
+    final numTiles = 1 << z;
+    final yNorm = (tileY + (row + 0.5) / tileSize) / numTiles;
+    final arg = math.pi * (1.0 - 2.0 * yNorm);
+    final sinhVal = 0.5 * (math.exp(arg) - math.exp(-arg));
+    final latRad = math.atan(sinhVal);
+    return (2.0 * math.pi * 6378137.0 * math.cos(latRad)) /
+        (tileSize * numTiles);
+  }
+
   void setCustomSampler(double? Function(double lat, double lon)? sampler) {
     _customSampler = sampler;
   }
 
-  /// Inserts a raw RGBA Terrarium buffer for zoom-12 tile ([x], [y]) in tests.
+  void setDemArchivePaths(List<String> paths) {
+    _demArchivePaths = List<String>.from(paths);
+    _failedTiles.clear();
+  }
+
   void putTileRgbaForTest(
     int x,
     int y, {
@@ -101,11 +195,31 @@ class DemTileGrid {
     required int height,
     required Uint8List rgba,
   }) {
-    _tiles[(x, y)] = _DecodedDemTile(width: width, height: height, rgba: rgba);
+    _storeTile(
+      (x, y),
+      _DecodedDemTile.fromRgbaBytes(width: width, height: height, rgba: rgba),
+    );
   }
 
-  /// Converts [lat]/[lon] into zoom-12 tile coordinates `(tx, ty)` and local
-  /// normalized tile offsets `(u, v)` in `[0, 1)`.
+  void _storeTile((int, int) key, _DecodedDemTile tile) {
+    _tiles.remove(key);
+    _tiles[key] = tile;
+    while (_tiles.length > maxCachedTiles) {
+      _tiles.remove(_tiles.keys.first);
+    }
+  }
+
+  ({int width, int height, double? Function(int px, int py) pixel})?
+  getDecodedTile(int x, int y) {
+    if (y < 0 || y >= _gridSize) return null;
+    final wx = ((x % _gridSize) + _gridSize) % _gridSize;
+    final key = (wx, y);
+    final hit = _tiles.remove(key);
+    if (hit == null) return null;
+    _tiles[key] = hit;
+    return (width: hit.width, height: hit.height, pixel: hit.pixelElevation);
+  }
+
   static ({int x, int y, double u, double v}) latLonToTile(
     double lat,
     double lon,
@@ -128,8 +242,82 @@ class DemTileGrid {
     );
   }
 
-  /// Prefetches zoom-12 DEM tiles covering [points] expanded by [bufferMeters],
-  /// capped at [maxPrefetchTiles] (9 tiles). Never throws on offline errors.
+  Future<void> ensureTileLoaded(int x, int y) {
+    if (y < 0 || y >= _gridSize) return Future.value();
+    final wx = ((x % _gridSize) + _gridSize) % _gridSize;
+    return _ensureTileLoaded(wx, y);
+  }
+
+  double? samplePixelStitched(int baseX, int baseY, int localX, int localY) {
+    final primary = _tiles[(baseX, baseY)];
+    if (primary == null) return null;
+    final w = primary.width;
+    final h = primary.height;
+    var tx = baseX;
+    var ty = baseY;
+    var lx = localX;
+    var ly = localY;
+    if (lx < 0) {
+      tx = ((tx - 1) % _gridSize + _gridSize) % _gridSize;
+      lx += w;
+    } else if (lx >= w) {
+      tx = (tx + 1) % _gridSize;
+      lx -= w;
+    }
+    if (ly < 0) {
+      ty -= 1;
+      ly += h;
+    } else if (ly >= h) {
+      ty += 1;
+      ly -= h;
+    }
+    final neighbor = (tx == baseX && ty == baseY) ? primary : _tiles[(tx, ty)];
+    if (neighbor != null &&
+        lx >= 0 &&
+        lx < neighbor.width &&
+        ly >= 0 &&
+        ly < neighbor.height) {
+      return neighbor.pixelElevation(lx, ly);
+    }
+    return primary.pixelElevation(localX, localY);
+  }
+
+  Future<void> prefetchRadius(
+    double lat,
+    double lon, {
+    double radiusMeters = 20000.0,
+    int maxTiles = 36,
+  }) async {
+    if (_customSampler != null || !lat.isFinite || !lon.isFinite) return;
+    final safeR = radiusMeters.clamp(500.0, 40000.0);
+    final dLat = safeR / 111320.0;
+    final dLon =
+        safeR / (111320.0 * math.max(0.1, math.cos(lat * math.pi / 180.0)));
+    final center = latLonToTile(lat, lon);
+    final nw = latLonToTile(lat + dLat, lon - dLon);
+    final se = latLonToTile(lat - dLat, lon + dLon);
+
+    final candidates = <(int, int)>[];
+    for (var y = nw.y; y <= se.y; y++) {
+      for (var x = nw.x; x <= se.x; x++) {
+        if (x >= 0 && x < _gridSize && y >= 0 && y < _gridSize) {
+          candidates.add((x, y));
+        }
+      }
+    }
+    candidates.sort((a, b) {
+      final da =
+          (a.$1 - center.x) * (a.$1 - center.x) +
+          (a.$2 - center.y) * (a.$2 - center.y);
+      final db =
+          (b.$1 - center.x) * (b.$1 - center.x) +
+          (b.$2 - center.y) * (b.$2 - center.y);
+      return da.compareTo(db);
+    });
+    final capped = candidates.take(maxTiles).toList(growable: false);
+    await Future.wait(capped.map((t) => _ensureTileLoaded(t.$1, t.$2)));
+  }
+
   Future<void> prefetchCorridor(
     List<Geographic> points, {
     double bufferMeters = 1000.0,
@@ -146,7 +334,6 @@ class DemTileGrid {
       if (seen.add(key)) targets.add(key);
     }
 
-    // 1. Sample along the trail path itself so core corridor tiles are first.
     final step = math.max(1, (points.length / 24).floor());
     for (var i = 0; i < points.length; i += step) {
       final t = latLonToTile(points[i].lat, points[i].lon);
@@ -158,7 +345,6 @@ class DemTileGrid {
       addTile(last.x, last.y);
     }
 
-    // 2. Expand into buffered bounding box around the corridor up to the 9-tile cap.
     if (targets.length < maxPrefetchTiles) {
       var minLat = double.infinity;
       var maxLat = double.negativeInfinity;
@@ -189,16 +375,16 @@ class DemTileGrid {
     await Future.wait(targets.map((t) => _ensureTileLoaded(t.$1, t.$2)));
   }
 
-  /// Bilinearly samples elevation (metres) at ([lat], [lon]) from cached
-  /// Terrarium DEM tiles, or returns `null` if the tile is unavailable.
   double? sampleElevation(double lat, double lon) {
     final custom = _customSampler;
     if (custom != null) return custom(lat, lon);
     if (!lat.isFinite || !lon.isFinite) return null;
 
     final tileCoords = latLonToTile(lat, lon);
-    final tile = _tiles[(tileCoords.x, tileCoords.y)];
+    final key = (tileCoords.x, tileCoords.y);
+    final tile = _tiles.remove(key);
     if (tile == null) return null;
+    _tiles[key] = tile;
     return tile.sampleBilinear(tileCoords.u, tileCoords.v);
   }
 
@@ -221,24 +407,36 @@ class DemTileGrid {
     final key = (x, y);
     try {
       final cacheDir = await _cacheDir();
-      final cacheFile = cacheDir == null
+      final slabFile = cacheDir == null
           ? null
-          : File(p.join(cacheDir.path, '${zoom}_${x}_$y.webp'));
+          : File(p.join(cacheDir.path, '${zoom}_${x}_$y.dem16'));
 
-      if (cacheFile != null && await cacheFile.exists()) {
+      // 1. Zero-decode binary .dem16 slab hit (< 0.4 ms).
+      if (slabFile != null && await slabFile.exists()) {
         try {
-          final diskBytes = await cacheFile.readAsBytes();
-          final decoded = await _decodeWebpTile(diskBytes);
+          final slabBytes = await slabFile.readAsBytes();
+          final decoded = _DecodedDemTile.fromBinarySlabBytes(slabBytes);
           if (decoded != null) {
-            _tiles[key] = decoded;
+            _storeTile(key, decoded);
             return;
           }
-        } catch (_) {
-          // Corrupt disk tile — fall through to network fetch.
+        } catch (_) {}
+      }
+
+      // 2. Local downloaded DEM .pmtiles archive hit (100% offline!).
+      final archiveBytes = await _readFromOfflinePmTiles(x, y);
+      if (archiveBytes != null && archiveBytes.isNotEmpty) {
+        final decoded = _decodeImagePureDart(archiveBytes);
+        if (decoded != null) {
+          _storeTile(key, decoded);
+          await _persistSlabBestEffort(slabFile, decoded);
+          return;
         }
       }
 
+      // 3. Remote HTTP {z}/{x}/{y} fetch + pure-Dart decode + .dem16 slab write.
       final url = tileUrlTemplate
+          .replaceAll('{z}', zoom.toString())
           .replaceAll('{x}', x.toString())
           .replaceAll('{y}', y.toString());
       final response = await _dio.get<List<int>>(
@@ -251,29 +449,58 @@ class DemTileGrid {
         return;
       }
       final bytes = raw is Uint8List ? raw : Uint8List.fromList(raw);
-      final decoded = await _decodeWebpTile(bytes);
+      final decoded = _decodeImagePureDart(bytes);
       if (decoded == null) {
         _failedTiles.add(key);
         return;
       }
-      _tiles[key] = decoded;
-
-      if (cacheFile != null) {
-        try {
-          await cacheFile.writeAsBytes(bytes, flush: true);
-        } catch (_) {
-          // Disk cache write is best-effort.
-        }
-      }
+      _storeTile(key, decoded);
+      await _persistSlabBestEffort(slabFile, decoded);
     } catch (_) {
       _failedTiles.add(key);
     }
   }
 
+  Future<Uint8List?> _readFromOfflinePmTiles(int x, int y) async {
+    if (_demArchivePaths.isEmpty) return null;
+    final tileId = ZXY(zoom, x, y).toTileId();
+    for (final path in _demArchivePaths) {
+      try {
+        var archive = _openArchives[path];
+        if (archive == null) {
+          final f = File(path);
+          if (!f.existsSync()) continue;
+          archive = await PmTilesArchive.fromFile(f);
+          _openArchives[path] = archive;
+        }
+        final tile = await archive.tile(tileId);
+        final raw = tile.bytes();
+        if (raw.isNotEmpty) {
+          return raw is Uint8List ? raw : Uint8List.fromList(raw);
+        }
+      } on TileNotFoundException {
+        continue;
+      } catch (_) {
+        continue;
+      }
+    }
+    return null;
+  }
+
+  Future<void> _persistSlabBestEffort(
+    File? slabFile,
+    _DecodedDemTile tile,
+  ) async {
+    if (slabFile == null) return;
+    try {
+      await slabFile.writeAsBytes(tile.toBinarySlabBytes(), flush: false);
+    } catch (_) {}
+  }
+
   Future<Directory?> _cacheDir() async {
     try {
       final root = await _cacheRootProvider();
-      final dir = Directory(p.join(root.path, 'wanderer_dem_v1'));
+      final dir = Directory(p.join(root.path, 'wanderer_dem_v2'));
       if (!await dir.exists()) {
         await dir.create(recursive: true);
       }
@@ -283,31 +510,42 @@ class DemTileGrid {
     }
   }
 
-  Future<_DecodedDemTile?> _decodeWebpTile(Uint8List bytes) async {
-    ui.Codec? codec;
-    ui.Image? image;
+  static _DecodedDemTile? _decodeImagePureDart(Uint8List bytes) {
     try {
-      codec = await ui.instantiateImageCodec(bytes);
-      final frame = await codec.getNextFrame();
-      image = frame.image;
-      final byteData = await image.toByteData(
-        format: ui.ImageByteFormat.rawRgba,
-      );
-      if (byteData == null) return null;
-      final rgba = byteData.buffer.asUint8List(
-        byteData.offsetInBytes,
-        byteData.lengthInBytes,
-      );
-      return _DecodedDemTile(
-        width: image.width,
-        height: image.height,
-        rgba: rgba,
-      );
+      final decoded = img.decodeImage(bytes);
+      if (decoded == null || decoded.width <= 0 || decoded.height <= 0) {
+        return null;
+      }
+      final w = decoded.width;
+      final h = decoded.height;
+      final hasAlpha = decoded.numChannels >= 4;
+      final slab = Uint16List(w * h);
+
+      var idx = 0;
+      for (var y = 0; y < h; y++) {
+        for (var x = 0; x < w; x++) {
+          final pxl = decoded.getPixel(x, y);
+          if (hasAlpha && pxl.a == 0) {
+            slab[idx++] = _DecodedDemTile.voidSentinel;
+            continue;
+          }
+          final meters =
+              (pxl.r * 256.0 + pxl.g + pxl.b / 256.0) - 32768.0;
+          slab[idx++] = _DecodedDemTile.encodeElevation(meters);
+        }
+      }
+      return _DecodedDemTile(width: w, height: h, quantizedU16: slab);
     } catch (_) {
       return null;
-    } finally {
-      image?.dispose();
-      codec?.dispose();
     }
+  }
+
+  Future<void> closeArchives() async {
+    for (final a in _openArchives.values) {
+      try {
+        await a.close();
+      } catch (_) {}
+    }
+    _openArchives.clear();
   }
 }

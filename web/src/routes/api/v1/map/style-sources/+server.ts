@@ -1,4 +1,6 @@
+import * as privateEnv from '$app/env/private';
 import { MAP_ASSETS_URL, PROTOMAPS_API_KEY, TILE_SERVER_URL } from '$app/env/private';
+import { readOptionalPrivateEnv } from '#lib/server/optional_private_env.ts';
 import { handleError } from '#lib/util/api_util.ts';
 import { json, type RequestEvent } from '@sveltejs/kit';
 
@@ -54,8 +56,11 @@ export async function GET(event: RequestEvent) {
 
         const glyphUrl = `${assetsBase}/fonts/{fontstack}/{range}.pbf`;
         const spriteUrl = `${assetsBase}/sprites/v4`;
+        const ancpiOrthoAvailable = Boolean(
+            readOptionalPrivateEnv(privateEnv, 'ANCPI_ORTHO_URL_TEMPLATE'),
+        );
 
-        return json({ tileUrl, glyphUrl, spriteUrl });
+        return json({ tileUrl, glyphUrl, spriteUrl, ancpiOrthoAvailable });
     } catch (e) {
         return handleError(e);
     }

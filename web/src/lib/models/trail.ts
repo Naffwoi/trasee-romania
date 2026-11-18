@@ -54,6 +54,13 @@ class Trail {
     max_lat?: number;
     min_lon?: number;
     max_lon?: number;
+    max_ele?: number;
+    train_accessible?: boolean;
+    rail_station_name?: string;
+    rail_station_distance_m?: number;
+    rail_station_lat?: number;
+    rail_station_lon?: number;
+    is_water_gorge?: boolean;
     expand?: {
         tags?: Tag[]
         category?: Category;
@@ -305,6 +312,7 @@ interface TrailFilter {
     endDate?: string;
     completed?: boolean;
     liked?: boolean;
+    trainAccessible?: boolean;
     sort: "relevance" | "name" | "distance" | "duration" | "difficulty" | "elevation_gain" | "elevation_loss" | "like_count" | "created" | "date";
     sortOrder: "+" | "-"
 }
@@ -364,6 +372,10 @@ interface TrailSearchResult {
     iri?: string;
     gpx: string;
     bounding_box_diagonal: number;
+    train_accessible?: boolean;
+    rail_station_name?: string;
+    rail_station_distance_m?: number;
+    is_water_gorge?: boolean;
     _geo: {
         lat: number,
         lng: number
@@ -404,6 +416,10 @@ export const defaultTrailSearchAttributes = [
     "iri",
     "polyline",
     "bounding_box_diagonal",
+    "train_accessible",
+    "rail_station_name",
+    "rail_station_distance_m",
+    "is_water_gorge",
     "_geo",]
 
 export const trailCardSearchAttributes = defaultTrailSearchAttributes.filter(

@@ -1276,7 +1276,19 @@
         };
         map = new M.Map(finalMapOptions);
 
-        layerManager = new LayerManager(map, { overpassActionFactory: buildPoiAnchorAction });
+        layerManager = new LayerManager(map, {
+            overpassActionFactory: buildPoiAnchorAction,
+            salvamontOptions: {
+                locale: $locale ?? "ro",
+                getUserContext: () => {
+                    const t = trails?.[0];
+                    if (t && t.lat !== undefined && t.lon !== undefined) {
+                        return { lat: t.lat, lon: t.lon, mode: "trail" };
+                    }
+                    return null;
+                },
+            },
+        });
 
         elevationMarker = new FontawesomeMarker(
             {

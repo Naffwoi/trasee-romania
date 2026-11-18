@@ -260,7 +260,11 @@ export function forwardLiveToDb(
 	const targetUrl = `${pbBaseUrl}/live${normalizedPath}`;
 
 	const headers = new Headers(init.headers);
-	if (init.body !== undefined && !headers.has("Content-Type")) {
+	if (
+		init.body !== undefined &&
+		!(typeof FormData !== "undefined" && init.body instanceof FormData) &&
+		!headers.has("Content-Type")
+	) {
 		headers.set("Content-Type", "application/json");
 	}
 	headers.set(

@@ -294,6 +294,7 @@
   "hero_section_1_text_alternative": "Get started by saving your latest adventure.",
   "hero_section_2_text": "Did you know? You cannot only save you hiking trails. There are many categories for all your adventures.",
   "hiking": "Hiking",
+  "salvamont": "Mountain Rescue (Salvamont)",
   "home": "Home",
   "hotel": "Hotel",
   "hungarian": "Hungarian",
@@ -827,5 +828,13 @@
   "nav-no-gpx": "This trail has no GPX route for navigation.",
   "nav-arrived": "Destination reached",
   "nav-switch-3d": "3D",
-  "nav-switch-2d": "2D"
+  "nav-switch-2d": "2D",
+  "avalancheSlope": "Avalanche slope (>27°)",
+  "solarShadows": "Solar shadows",
+  "snowCover": "Satellite snow cover (NASA)",
+  "dailySatellite": "Daily satellite pass (True Color)",
+  "weatherRadar": "Live precipitation radar",
+  "forestDisturbance": "Recent forest disturbance (GFW)",
+  "satellite-pass-date": "Satellite pass date",
+  "satellite-latest-pass": "Latest available pass"
 }

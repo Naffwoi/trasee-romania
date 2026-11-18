@@ -4,9 +4,17 @@
         type SosAlertDto,
         type SosReason,
     } from "#lib/live/live_client.ts";
+    import {
+        formatRoPhoneDisplay,
+        resolveNearestSalvamont,
+        type SalvamontPoint,
+    } from "#lib/emergency/salvamont_resolver.ts";
+    import type { GsmSignalRecommendation } from "#lib/emergency/gsm_viewshed.ts";
+    import type { DemTileGrid } from "#lib/navigation/dem_tile_grid.ts";
     import { haversineMeters } from "#lib/navigation/index.ts";
     import type { DirectRescueRouteResult } from "#lib/navigation/off_trail_router.ts";
     import { formatDistance } from "#lib/util/format_util.ts";
+    import RescueCoordinatesAndSignalCard from "./rescue_coordinates_and_signal_card.svelte";
 
     interface Props {
         modalOpen?: boolean;
@@ -15,6 +23,11 @@
         userLat?: number | null;
         userLon?: number | null;
         userEle?: number | null;
+        userAccuracy?: number | null;
+        demGrid?: Pick<DemTileGrid, "sampleElevation"> | null;
+        trailPoints?: ReadonlyArray<{ lat: number; lon: number; distanceM?: number }>;
+        alongTrackM?: number;
+        onShowSignalTarget?: (rec: GsmSignalRecommendation) => void;
         activeRescueRoute?: DirectRescueRouteResult | null;
         activeRescueSosId?: string | null;
         submitting?: boolean;
@@ -26,6 +39,7 @@
         onResolveMySos?: () => Promise<void> | void;
         onRespondSos?: (sos: SosAlertDto) => Promise<void> | void;
         onCancelRespondSos?: (sos: SosAlertDto) => Promise<void> | void;
+        onRouteToSalvamont?: (point: SalvamontPoint) => void;
     }
 
     let {
@@ -35,6 +49,11 @@
         userLat = null,
         userLon = null,
         userEle = null,
+        userAccuracy = null,
+        demGrid = null,
+        trailPoints = [],
+        alongTrackM = 0,
+        onShowSignalTarget,
         activeRescueRoute = null,
         activeRescueSosId = null,
         submitting = false,
@@ -42,7 +61,14 @@
         onResolveMySos,
         onRespondSos,
         onCancelRespondSos,
+        onRouteToSalvamont,
     }: Props = $props();
+
+    const salvamontRes = $derived(
+        userLat !== null && userLon !== null && Number.isFinite(userLat) && Number.isFinite(userLon)
+            ? resolveNearestSalvamont(userLat, userLon, { userEle, locale: "ro" })
+            : null,
+    );
 
     let selectedReason = $state<SosReason>("lost");
     let message = $state("");
@@ -134,10 +160,19 @@
                 <p class="text-xs font-extrabold leading-snug">
                     {mySosStatusText}
                 </p>
-                <div class="mt-0.5 flex items-center gap-2 text-[11px] text-red-100">
+                <div class="mt-0.5 flex items-center gap-2 text-[11px] text-red-100 flex-wrap">
                     <a href="tel:112" class="underline font-bold text-white">112</a>
                     <span>·</span>
-                    <a href="tel:0725826668" class="underline font-bold text-white">Salvamont</a>
+                    <a href="tel:+40725826668" class="underline font-bold text-white">0-SALVAMONT</a>
+                    {#if salvamontRes?.activeServices[0]}
+                        <span>·</span>
+                        <a
+                            href={`tel:${salvamontRes.activeServices[0].service.primaryPhone}`}
+                            class="underline font-bold text-white"
+                        >
+                            {salvamontRes.activeServices[0].service.shortName}
+                        </a>
+                    {/if}
                 </div>
             </div>
             <button
@@ -233,7 +268,7 @@
 
         <div
             style="padding-bottom: calc(1rem + env(safe-area-inset-bottom, 0px));"
-            class="relative z-10 w-full max-w-sm bg-menu-background text-content rounded-t-3xl sm:rounded-3xl shadow-2xl border border-red-500/40 px-4 pt-3"
+            class="relative z-10 w-full max-w-sm max-h-[90dvh] overflow-y-auto bg-menu-background text-content rounded-t-3xl sm:rounded-3xl shadow-2xl border border-red-500/40 px-4 pt-3"
         >
             <div class="w-10 h-1 rounded-full bg-content/20 mx-auto mb-2.5"></div>
 
@@ -261,14 +296,81 @@
                     <span>112</span>
                 </a>
                 <a
-                    href="tel:0725826668"
+                    href="tel:+40725826668"
                     data-testid="sos-call-salvamont"
-                    class="py-2.5 px-3 rounded-xl bg-slate-900 hover:bg-slate-800 text-white font-extrabold text-xs flex items-center justify-center gap-1.5 shadow-sm"
+                    class="py-2.5 px-3 rounded-xl bg-[#242734] hover:opacity-90 text-white font-extrabold text-xs flex items-center justify-center gap-1.5 shadow-sm"
                 >
                     <i class="fa-solid fa-mountain" aria-hidden="true"></i>
-                    <span>Salvamont</span>
+                    <span>0-SALVAMONT</span>
                 </a>
             </div>
+
+            {#if salvamontRes?.isMountainZone && salvamontRes.nearestBases.length > 0}
+                {@const primaryBase = salvamontRes.nearestBases[0]}
+                <div
+                    data-testid="sos-salvamont-nearest-card"
+                    class="mb-3 rounded-2xl bg-content/[0.04] border border-input-border/60 p-2.5 text-xs space-y-2"
+                >
+                    <div class="flex items-center justify-between gap-2 flex-wrap">
+                        <span class="font-extrabold text-content">
+                            📍 {primaryBase.point.name} ({formatDistance(Math.round(primaryBase.distanceM), { compact: true })} {primaryBase.cardinal})
+                        </span>
+                        {#if salvamontRes.isRidgeBorderZone}
+                            <span
+                                data-testid="sos-ridge-border-badge"
+                                class="px-2 py-0.5 rounded-full bg-amber-500/15 text-amber-800 dark:text-amber-300 text-[10px] font-bold"
+                            >
+                                Graniță ({salvamontRes.borderCountyCodes.join(" / ")})
+                            </span>
+                        {/if}
+                    </div>
+
+                    {#if salvamontRes.nearestRefuge && salvamontRes.nearestRefuge.distanceM < primaryBase.distanceM}
+                        <p class="text-[11px] text-content/75">
+                            🛖 Refugiu mai apropiat: <strong>{salvamontRes.nearestRefuge.point.name}</strong> ({formatDistance(Math.round(salvamontRes.nearestRefuge.distanceM), { compact: true })} {salvamontRes.nearestRefuge.cardinal})
+                        </p>
+                    {/if}
+
+                    <div class="flex flex-wrap gap-1.5">
+                        {#each salvamontRes.activeServices as svcEntry (svcEntry.service.id)}
+                            <a
+                                href={`tel:${svcEntry.service.primaryPhone}`}
+                                data-testid={`sos-call-local-${svcEntry.service.id}`}
+                                class="px-2.5 py-1.5 rounded-xl bg-menu-background border border-input-border/70 text-content font-bold text-[11px] inline-flex items-center gap-1 shadow-2xs"
+                            >
+                                <i class="fa-solid fa-phone text-[10px]" aria-hidden="true"></i>
+                                <span>{svcEntry.service.shortName}: {formatRoPhoneDisplay(svcEntry.service.primaryPhone)}</span>
+                            </a>
+                        {/each}
+                    </div>
+
+                    {#if onRouteToSalvamont}
+                        <button
+                            type="button"
+                            data-testid="sos-route-to-salvamont-btn"
+                            onclick={() => {
+                                modalOpen = false;
+                                onRouteToSalvamont(primaryBase.point);
+                            }}
+                            class="w-full py-1.5 px-3 rounded-xl bg-[#242734] text-white font-bold text-[11px] cursor-pointer"
+                        >
+                            🧭 Rută pe teren spre {primaryBase.point.name}
+                        </button>
+                    {/if}
+                </div>
+            {/if}
+            <!-- Phase 2 mounts Multi-Format Rescue Coordinates & GSM Viewshed Finder right below this block -->
+            <RescueCoordinatesAndSignalCard
+                lat={userLat ?? null}
+                lon={userLon ?? null}
+                ele={userEle ?? null}
+                accuracy={userAccuracy ?? null}
+                reasonRo={SHORT_REASON_RO[selectedReason]}
+                {demGrid}
+                {trailPoints}
+                {alongTrackM}
+                {onShowSignalTarget}
+            />
 
             <div class="grid grid-cols-4 gap-1.5 mb-2.5">
                 {#each reasons as r (r)}

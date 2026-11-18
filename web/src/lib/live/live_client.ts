@@ -31,6 +31,9 @@ export interface TrailReportDto {
 	lon: number;
 	ele: number;
 	alongTrackM: number;
+	photoUrl?: string | null;
+	photoThumbUrl?: string | null;
+	photoVerified?: boolean;
 	confirmCount: number;
 	dismissCount: number;
 	createdAt: string;
@@ -453,6 +456,10 @@ export function normalizeReportDto(raw: Record<string, unknown>): TrailReportDto
 		lon: Number(raw.lon ?? 0),
 		ele: Number(raw.ele ?? 0),
 		alongTrackM: Number(raw.alongTrackM ?? 0),
+		photoUrl: typeof raw.photoUrl === "string" && raw.photoUrl ? raw.photoUrl : null,
+		photoThumbUrl:
+			typeof raw.photoThumbUrl === "string" && raw.photoThumbUrl ? raw.photoThumbUrl : null,
+		photoVerified: Boolean(raw.photoVerified && raw.photoUrl),
 		confirmCount: Math.max(0, Number(raw.confirmCount ?? 1)),
 		dismissCount: Math.max(0, Number(raw.dismissCount ?? 0)),
 		createdAt: String(raw.createdAt ?? ""),
@@ -557,7 +564,11 @@ async function liveJsonFetch<T = Record<string, unknown>>(
 	try {
 		const headers = new Headers(init.headers ?? {});
 		headers.set("X-Device-Token", getOrCreateDeviceToken());
-		if (init.body && !headers.has("Content-Type")) {
+		if (
+			init.body &&
+			!(typeof FormData !== "undefined" && init.body instanceof FormData) &&
+			!headers.has("Content-Type")
+		) {
 			headers.set("Content-Type", "application/json");
 		}
 		const res = await fetch(path, {
@@ -699,18 +710,38 @@ export async function createReport(params: {
 	lon: number;
 	ele?: number | null;
 	alongTrackM?: number | null;
+	photoBlob?: Blob | null;
+	photoFilename?: string;
+	photoVerified?: boolean;
 }): Promise<TrailReportDto | null> {
-	const data = await liveJsonFetch<Record<string, unknown>>("/api/v1/live/reports", {
-		method: "POST",
-		body: JSON.stringify({
+	const cleanNote = (params.note ?? "").trim().slice(0, 160);
+	let body: BodyInit;
+	if (params.photoBlob && params.photoBlob.size > 0) {
+		const fd = new FormData();
+		fd.set("trailId", params.trailId ?? "");
+		fd.set("category", params.category);
+		fd.set("note", cleanNote);
+		fd.set("lat", String(params.lat));
+		fd.set("lon", String(params.lon));
+		fd.set("ele", String(params.ele ?? 0));
+		fd.set("alongTrackM", String(params.alongTrackM ?? 0));
+		fd.set("photoVerified", params.photoVerified ? "true" : "false");
+		fd.set("photo", params.photoBlob, params.photoFilename ?? "report.jpg");
+		body = fd;
+	} else {
+		body = JSON.stringify({
 			trailId: params.trailId ?? "",
 			category: params.category,
-			note: (params.note ?? "").trim().slice(0, 160),
+			note: cleanNote,
 			lat: params.lat,
 			lon: params.lon,
 			ele: params.ele ?? 0,
 			alongTrackM: params.alongTrackM ?? 0,
-		}),
+		});
+	}
+	const data = await liveJsonFetch<Record<string, unknown>>("/api/v1/live/reports", {
+		method: "POST",
+		body,
 	});
 	if (!data) return null;
 	const rawReport = (data.report ?? data) as Record<string, unknown>;

@@ -1,13 +1,19 @@
 import * as M from "maplibre-gl";
 import { DebugLayer } from "./debug-layer";
-import { baseMapStyles, defaultMapState, type BaseLayer, type MapState } from "./layers";
+import { baseMapStyles, defaultMapState, type BaseLayer, type MapState, type OverlayName } from "./layers";
 import { OverlayLayer } from "./overlay-layer";
 import { OverpassLayer, type OverpassPopupActionFactory } from "./overpass-layer";
+import { SalvamontLayer, type SalvamontLayerOptions } from "./salvamont-layer";
+import {
+    buildGibsSnowOverlaySpec,
+    buildGibsTrueColorOverlaySpec,
+    resolveRainViewerOverlaySpec,
+} from "#lib/map/dynamic_raster_overlays.ts";
 
 const DEFAULT_GLYPHS = "https://tiles.openfreemap.org/fonts/{fontstack}/{range}.pbf";
 
 
-function normalizeMapState(raw: unknown): MapState {
+export function normalizeMapState(raw: unknown): MapState {
     const cleanDefault: MapState = JSON.parse(JSON.stringify(defaultMapState));
     if (!raw || typeof raw !== "object") {
         return cleanDefault;
@@ -18,7 +24,7 @@ function normalizeMapState(raw: unknown): MapState {
     }
     if (candidate.overlays && typeof candidate.overlays === "object") {
         const ov = candidate.overlays as Record<string, unknown>;
-        for (const key of Object.keys(cleanDefault.overlays)) {
+        for (const key of Object.keys(cleanDefault.overlays) as OverlayName[]) {
             if (typeof ov[key] === "boolean") {
                 cleanDefault.overlays[key] = ov[key];
             }
@@ -39,6 +45,12 @@ function normalizeMapState(raw: unknown): MapState {
             }
         }
     }
+    if (
+        typeof candidate.satelliteDate === "string" &&
+        (candidate.satelliteDate === "default" || /^\d{4}-\d{2}-\d{2}$/.test(candidate.satelliteDate))
+    ) {
+        cleanDefault.satelliteDate = candidate.satelliteDate;
+    }
     return cleanDefault;
 }
 
@@ -48,10 +60,18 @@ export class LayerManager {
     layers: Record<string, BaseLayer> = {};
     private addedListeners: Set<string> = new Set();
     private overpassActionFactory?: OverpassPopupActionFactory;
+    private salvamontOptions?: SalvamontLayerOptions;
 
-    constructor(map: M.Map, options?: { overpassActionFactory?: OverpassPopupActionFactory }) {
+    constructor(
+        map: M.Map,
+        options?: {
+            overpassActionFactory?: OverpassPopupActionFactory;
+            salvamontOptions?: SalvamontLayerOptions;
+        },
+    ) {
         this.map = map;
         this.overpassActionFactory = options?.overpassActionFactory;
+        this.salvamontOptions = options?.salvamontOptions;
 
         try {
             const storedMapState = localStorage.getItem("wanderer-ro-map-state-v3");
@@ -92,20 +112,62 @@ export class LayerManager {
             this.updateBaseLayer(baseMapStyles[newState.base])
         }
 
-        for (const [name, active] of Object.entries(newState.overlays)) {
-            const oldOverlayActive = oldState.overlays[name]
-
-            if (active && (!oldOverlayActive || initialize)) {
-                this.addLayer(name, new OverlayLayer(name))
-            } else if (oldOverlayActive && !active) {
-                this.removeLayer(name)
-            }
-        }
-
+        this.applyOverlayState(oldState, newState, initialize);
         this.updateOverpassLayer(newState);
 
         this.state = newState
         localStorage.setItem("wanderer-ro-map-state-v3", JSON.stringify(this.state));
+    }
+
+    syncActiveOverlays(options?: { skipSalvamont?: boolean }) {
+        this.applyOverlayState(this.state, this.state, true, options);
+    }
+
+    private applyOverlayState(
+        oldState: MapState,
+        newState: MapState,
+        initialize: boolean,
+        options?: { skipSalvamont?: boolean },
+    ) {
+        const dateChanged = (oldState.satelliteDate ?? "default") !== (newState.satelliteDate ?? "default");
+
+        for (const [name, active] of Object.entries(newState.overlays)) {
+            if (options?.skipSalvamont && name === "salvamont") {
+                continue;
+            }
+            const oldOverlayActive = oldState.overlays[name as OverlayName];
+
+            if (name === "weatherRadar") {
+                if (active && (!oldOverlayActive || initialize)) {
+                    void resolveRainViewerOverlaySpec().then((spec) => {
+                        if (spec && this.state.overlays.weatherRadar) {
+                            this.addLayer("weatherRadar", { spec });
+                        }
+                    });
+                } else if (oldOverlayActive && !active) {
+                    this.removeLayer("weatherRadar");
+                }
+                continue;
+            }
+
+            if (active && (name === "snowCover" || name === "dailySatellite") && dateChanged && oldOverlayActive) {
+                this.removeLayer(name);
+            }
+
+            if (active && (!oldOverlayActive || initialize || ((name === "snowCover" || name === "dailySatellite") && dateChanged))) {
+                if (name === "salvamont") {
+                    this.addLayer("salvamont", new SalvamontLayer(this.map, this.salvamontOptions));
+                } else if (name === "snowCover") {
+                    this.addLayer(name, { spec: buildGibsSnowOverlaySpec(newState.satelliteDate ?? "default") });
+                } else if (name === "dailySatellite") {
+                    this.addLayer(name, { spec: buildGibsTrueColorOverlaySpec(newState.satelliteDate ?? "default") });
+                } else {
+                    this.addLayer(name, new OverlayLayer(name));
+                }
+            } else if (oldOverlayActive && !active) {
+                this.removeLayer(name);
+            }
+        }
     }
 
     updateOverpassLayerAfterMapMoveBinded = this.updateOverpassLayerAfterMapMove.bind(this);
@@ -158,9 +220,20 @@ export class LayerManager {
             this.map.setGlyphs(layer.spec.glyphs ?? DEFAULT_GLYPHS);
         }
 
+        const firstSymbolOrTrailId =
+            id === "avalancheSlope" ||
+            id === "solarShadows" ||
+            id === "snowCover" ||
+            id === "dailySatellite" ||
+            id === "weatherRadar" ||
+            id === "forestDisturbance"
+                ? this.map
+                      .getStyle()
+                      ?.layers?.find((existing) => existing.type === "symbol" || existing.id.startsWith("nav-"))?.id
+                : undefined;
         for (const l of layer.spec.layers) {
             if (!this.map.getLayer(l.id)) {
-                this.map.addLayer(l)
+                this.map.addLayer(l, firstSymbolOrTrailId)
             }
         }
 
@@ -245,6 +318,9 @@ export class LayerManager {
 
     private restoreLayers() {
         for (const [id, layer] of Object.entries(this.layers)) {
+            if (id === "salvamont" && layer instanceof SalvamontLayer) {
+                layer.ensureImagesLoaded();
+            }
             this.addLayer(id, layer)
         }
     }

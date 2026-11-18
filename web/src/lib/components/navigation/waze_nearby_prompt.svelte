@@ -64,6 +64,24 @@
                         „{report.note}”
                     </p>
                 {/if}
+                {#if report.photoVerified}
+                    <div class="mt-1">
+                        <span
+                            data-testid="report-photo-verified-badge"
+                            class="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-emerald-500/12 text-emerald-700 dark:text-emerald-300 text-[10.5px] font-bold"
+                        >
+                            ✓ Foto verificată la fața locului
+                        </span>
+                    </div>
+                {/if}
+                {#if report.photoThumbUrl}
+                    <img
+                        src={report.photoThumbUrl}
+                        loading="lazy"
+                        alt={meta.labelRo}
+                        class="mt-2 w-full max-h-36 object-cover rounded-xl border border-input-border/50"
+                    />
+                {/if}
             </div>
         </div>
 

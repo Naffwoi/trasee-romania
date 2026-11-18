@@ -88,12 +88,15 @@ const ACTIVE_CACHES = new Set([
 	STATIC_SHELL_CACHE,
 	"wanderer-gpx-v1",
 	"wanderer-dem16-v1",
+	"wanderer-emergency-v1",
+	"wanderer-peaks-v1",
 ]);
 
 function isStaticShellAsset(pathname: string): boolean {
 	return (
 		pathname.startsWith("/styles/") ||
 		pathname.startsWith("/fonts/") ||
+		pathname.startsWith("/data/") ||
 		pathname.startsWith("/favicon") ||
 		pathname === "/apple-touch-icon.png" ||
 		pathname === "/manifest.json"

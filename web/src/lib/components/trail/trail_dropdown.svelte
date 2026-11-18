@@ -18,24 +18,23 @@
     import { handleFromRecordWithIRI } from "#lib/util/activitypub_util.ts";
     import { getFileURL, saveAs } from "#lib/util/file_util.ts";
     import { trail2gpx } from "#lib/util/gpx_util.ts";
-    import { type Snippet } from "svelte";
+    import { tick, type Snippet } from "svelte";
     import { _ } from "svelte-i18n";
     import Dropdown, { type DropdownItem } from "../base/dropdown.svelte";
     import ConfirmModal from "../confirm_modal.svelte";
-    import ListSearchModal from "../list/list_search_modal.svelte";
-    import TrailExportModal from "./trail_export_modal.svelte";
-    import TrailBulkEditModal, {
-        type TrailBulkEditChanges,
-    } from "./trail_bulk_edit_modal.svelte";
-    import TrailSendModal from "./trail_send_modal.svelte";
-    import TrailShareModal from "./trail_share_modal.svelte";
-    import TrailDuplicateModal from "./trail_duplicate_modal.svelte";
+    import type ListSearchModal from "../list/list_search_modal.svelte";
+    import type TrailExportModal from "./trail_export_modal.svelte";
+    import type TrailBulkEditModal from "./trail_bulk_edit_modal.svelte";
+    import type { TrailBulkEditChanges } from "./trail_bulk_edit_modal.svelte";
+    import type TrailSendModal from "./trail_send_modal.svelte";
+    import type TrailShareModal from "./trail_share_modal.svelte";
+    import type TrailDuplicateModal from "./trail_duplicate_modal.svelte";
     import {
         mergeStore,
         processMergeQueue,
         type Merge,
     } from "#lib/stores/trail_merge_store.svelte.ts";
-    import TrailMergeModal from "./trail_merge_modal.svelte";
+    import type TrailMergeModal from "./trail_merge_modal.svelte";
     import type { MergeSelection, MergeSettings } from "./trail_merge_modal.svelte";
     import MergeDialog from "#lib/components/trail/trail_merge_dialog.svelte";
     import { trail_merge } from "#lib/stores/trail_merge_api.ts";
@@ -61,13 +60,33 @@
     let { trails, mode, toggle, showMergeDialog = true, onDelete, onShare, onUpdate, onMerge }: Props = $props();
 
     let confirmModal: ConfirmModal;
-    let listSelectModal: ListSearchModal;
-    let trailExportModal: TrailExportModal;
-    let trailSendModal: TrailSendModal;
-    let trailShareModal: TrailShareModal;
-    let trailMergeModal: TrailMergeModal;
-    let trailBulkEditModal: TrailBulkEditModal;
-    let trailDuplicateModal: TrailDuplicateModal;
+    let listSelectModal: ListSearchModal | undefined = $state();
+    let trailExportModal: TrailExportModal | undefined = $state();
+    let trailSendModal: TrailSendModal | undefined = $state();
+    let trailShareModal: TrailShareModal | undefined = $state();
+    let trailMergeModal: TrailMergeModal | undefined = $state();
+    let trailBulkEditModal: TrailBulkEditModal | undefined = $state();
+    let trailDuplicateModal: TrailDuplicateModal | undefined = $state();
+
+    let ListSearchModalComp = $state<typeof ListSearchModal | null>(null);
+    let TrailExportModalComp = $state<typeof TrailExportModal | null>(null);
+    let TrailSendModalComp = $state<typeof TrailSendModal | null>(null);
+    let TrailShareModalComp = $state<typeof TrailShareModal | null>(null);
+    let TrailMergeModalComp = $state<typeof TrailMergeModal | null>(null);
+    let TrailBulkEditModalComp = $state<typeof TrailBulkEditModal | null>(null);
+    let TrailDuplicateModalComp = $state<typeof TrailDuplicateModal | null>(null);
+
+    async function ensureModalLoaded<T>(
+        current: T | null,
+        loader: () => Promise<{ default: T }>,
+        assign: (comp: T) => void,
+    ): Promise<void> {
+        if (!current) {
+            const mod = await loader();
+            assign(mod.default);
+            await tick();
+        }
+    }
 
     let lists: List[] = $state([]);
 
@@ -553,14 +572,20 @@
                 goto(url + "?" + page.url.searchParams);
             }
         } else if (ddVal == "list") {
-            lists = (
-                await lists_index(
+            const [loadedLists] = await Promise.all([
+                lists_index(
                     { q: "", author: $currentUser?.actor ?? "" },
                     1,
                     -1,
-                )
-            ).items;
-            listSelectModal.openModal();
+                ),
+                ensureModalLoaded(
+                    ListSearchModalComp,
+                    () => import("../list/list_search_modal.svelte"),
+                    (c) => (ListSearchModalComp = c),
+                ),
+            ]);
+            lists = loadedLists.items;
+            listSelectModal?.openModal();
         } else if (ddVal == "direction") {
             if (hasTrail()) {
                 window
@@ -577,11 +602,26 @@
                 );
             }
         } else if (ddVal == "share") {
-            trailShareModal.openModal();
+            await ensureModalLoaded(
+                TrailShareModalComp,
+                () => import("./trail_share_modal.svelte"),
+                (c) => (TrailShareModalComp = c),
+            );
+            trailShareModal?.openModal();
         } else if (ddVal == "send-to") {
-            trailSendModal.openModal();
+            await ensureModalLoaded(
+                TrailSendModalComp,
+                () => import("./trail_send_modal.svelte"),
+                (c) => (TrailSendModalComp = c),
+            );
+            trailSendModal?.openModal();
         } else if (ddVal == "download") {
-            trailExportModal.openModal();
+            await ensureModalLoaded(
+                TrailExportModalComp,
+                () => import("./trail_export_modal.svelte"),
+                (c) => (TrailExportModalComp = c),
+            );
+            trailExportModal?.openModal();
         } else if (ddVal == "edit") {
             if (hasTrail()) {
                 goto(`/trail/edit/${trailId()}`);
@@ -589,19 +629,39 @@
         } else if (ddVal == "copy") {
             if (hasTrail()) {
                 const sourceTrail = trail()!;
-                trailDuplicateModal.openModal(sourceTrail, isFromCurrentUser(sourceTrail));
+                await ensureModalLoaded(
+                    TrailDuplicateModalComp,
+                    () => import("./trail_duplicate_modal.svelte"),
+                    (c) => (TrailDuplicateModalComp = c),
+                );
+                trailDuplicateModal?.openModal(sourceTrail, isFromCurrentUser(sourceTrail));
             }
         } else if (ddVal == "publish") {
             updateTrailsVisibility();
         } else if (ddVal == "bulk-edit") {
-            trailBulkEditModal.openModal();
+            await ensureModalLoaded(
+                TrailBulkEditModalComp,
+                () => import("./trail_bulk_edit_modal.svelte"),
+                (c) => (TrailBulkEditModalComp = c),
+            );
+            trailBulkEditModal?.openModal();
         } else if (ddVal == "delete") {
             confirmModal.openModal();
         } else if (item.value == "merge") {
-            await trailMergeModal.openModal(Array.from(trails ?? []));
+            await ensureModalLoaded(
+                TrailMergeModalComp,
+                () => import("./trail_merge_modal.svelte"),
+                (c) => (TrailMergeModalComp = c),
+            );
+            await trailMergeModal?.openModal(Array.from(trails ?? []));
         } else if (item.value == "find-similar-trails") {
             if (trail()) {
-                await trailMergeModal.openSimilarTrailsModal(trail()!);
+                await ensureModalLoaded(
+                    TrailMergeModalComp,
+                    () => import("./trail_merge_modal.svelte"),
+                    (c) => (TrailMergeModalComp = c),
+                );
+                await trailMergeModal?.openSimilarTrailsModal(trail()!);
             }
         }
     }
@@ -1002,40 +1062,54 @@
     bind:this={confirmModal}
     onconfirm={deleteTrails}
 ></ConfirmModal>
-<ListSearchModal
+{#if ListSearchModalComp}
+<ListSearchModalComp
     {lists}
     trails={getTrails()}
     bind:this={listSelectModal}
     onchange={(list) => handleListSelection(list)}
-></ListSearchModal>
-<TrailExportModal
+></ListSearchModalComp>
+{/if}
+{#if TrailExportModalComp}
+<TrailExportModalComp
     bind:this={trailExportModal}
     onexport={(settings) => exportTrails(settings)}
-></TrailExportModal>
-<TrailShareModal
+></TrailExportModalComp>
+{/if}
+{#if TrailShareModalComp}
+<TrailShareModalComp
     trail={trail()}
     onsave={handleShareUpdate}
     bind:this={trailShareModal}
-></TrailShareModal>
-<TrailDuplicateModal
+></TrailShareModalComp>
+{/if}
+{#if TrailDuplicateModalComp}
+<TrailDuplicateModalComp
     bind:this={trailDuplicateModal}
     onduplicate={(settings) => duplicateTrail(settings)}
-></TrailDuplicateModal>
-<TrailSendModal
+></TrailDuplicateModalComp>
+{/if}
+{#if TrailSendModalComp}
+<TrailSendModalComp
     trail={trail()}
     share={page.url.searchParams.get("share") ?? undefined}
     bind:this={trailSendModal}
-></TrailSendModal>
-<TrailMergeModal
+></TrailSendModalComp>
+{/if}
+{#if TrailMergeModalComp}
+<TrailMergeModalComp
     bind:this={trailMergeModal}
     onmerge={(settings, selection) => mergeTrails(settings, selection)}
-></TrailMergeModal>
-<TrailBulkEditModal
+></TrailMergeModalComp>
+{/if}
+{#if TrailBulkEditModalComp}
+<TrailBulkEditModalComp
     selectedCount={trails?.size ?? 0}
     initialCategorySelection={selectedCategorySelection()}
     initialDifficulty={selectedDifficulty()}
     bind:this={trailBulkEditModal}
     onapply={(changes) => updateTrailsBulk(changes)}
-></TrailBulkEditModal>
+></TrailBulkEditModalComp>
+{/if}
 
 {#if showMergeDialog}<MergeDialog />{/if}

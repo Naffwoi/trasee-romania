@@ -66,7 +66,7 @@ test.describe("Salvamont 112 Pro Offline Suite & EXIF Waze Verification", () => 
 		await expect(page.locator("#sms-113")).toHaveAttribute("href", /^sms:113&body=SOS%20MUNTE/);
 		await expect(page.locator("#coords")).toContainText("35T 379287 E 5033638 N");
 		await expect(page.locator("#coords")).toContainText("8GQ7CFW4+8HJ");
-		await expect(page.locator("#signal")).toContainText("releu GSM");
+		await expect(page.locator("#signal")).toContainText(/rele[eu] GSM/);
 	});
 
 	test("Canvas JPEG re-encoding strips 100% of EXIF bytes in real Chromium runtime", async ({

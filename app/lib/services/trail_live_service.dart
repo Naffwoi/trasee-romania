@@ -207,6 +207,17 @@ class TrailLiveService {
     return host.isNotEmpty && !host.contains(kUnconfiguredApiHost);
   }
 
+  TrailReportModel _normalizeReport(TrailReportModel report) =>
+      isConfigured ? report.withResolvedPhotoUrls(_dio.options.baseUrl) : report;
+
+  TrailLiveSummary _normalizeSummary(TrailLiveSummary summary) {
+    if (!isConfigured || summary.reports.isEmpty) return summary;
+    final resolvedReports = summary.reports
+        .map(_normalizeReport)
+        .toList(growable: false);
+    return summary.copyWith(reports: resolvedReports);
+  }
+
   /// Returns the installation's persistent anonymous device token.
   Future<String> getDeviceToken() => _tokenLoader();
 
@@ -356,9 +367,11 @@ class TrailLiveService {
         );
       }
     } else {
-      summary = TrailLiveSummary.fromJson(bodyMap).copyWith(
-        trailId: cleanTrailId.isNotEmpty ? cleanTrailId : null,
-        unchanged: false,
+      summary = _normalizeSummary(
+        TrailLiveSummary.fromJson(bodyMap).copyWith(
+          trailId: cleanTrailId.isNotEmpty ? cleanTrailId : null,
+          unchanged: false,
+        ),
       );
     }
     _lastHeartbeatSummary = summary;
@@ -408,7 +421,7 @@ class TrailLiveService {
       queryParameters: queryParams.isEmpty ? null : queryParams,
       options: options,
     );
-    return TrailLiveSummary.fromJson(_asMap(response.data));
+    return _normalizeSummary(TrailLiveSummary.fromJson(_asMap(response.data)));
   }
 
   Future<TrailReportModel> createReport({
@@ -468,9 +481,11 @@ class TrailLiveService {
     final body = _asMap(response.data);
     final rawReport = body['report'];
     if (rawReport is Map) {
-      return TrailReportModel.fromJson(Map<String, dynamic>.from(rawReport));
+      return _normalizeReport(
+        TrailReportModel.fromJson(Map<String, dynamic>.from(rawReport)),
+      );
     }
-    return TrailReportModel.fromJson(body);
+    return _normalizeReport(TrailReportModel.fromJson(body));
   }
 
   Future<TrailReportModel> voteReport({
@@ -486,9 +501,11 @@ class TrailLiveService {
     final body = _asMap(response.data);
     final rawReport = body['report'];
     if (rawReport is Map) {
-      return TrailReportModel.fromJson(Map<String, dynamic>.from(rawReport));
+      return _normalizeReport(
+        TrailReportModel.fromJson(Map<String, dynamic>.from(rawReport)),
+      );
     }
-    return TrailReportModel.fromJson(body);
+    return _normalizeReport(TrailReportModel.fromJson(body));
   }
 
   Future<SosAlertModel> triggerSos({
@@ -855,7 +872,9 @@ class TrailLiveService {
                 isRo: isRo,
               );
             }
-            yield parsed;
+            yield isConfigured
+                ? parsed.withResolvedPhotoUrls(_dio.options.baseUrl)
+                : parsed;
           }
         } else {
           currentEvent = null;
@@ -895,7 +914,9 @@ class TrailLiveService {
             isRo: isRo,
           );
         }
-        yield parsed;
+        yield isConfigured
+            ? parsed.withResolvedPhotoUrls(_dio.options.baseUrl)
+            : parsed;
       }
     }
   }

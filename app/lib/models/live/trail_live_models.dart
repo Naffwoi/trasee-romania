@@ -15,6 +15,24 @@ String? _parseOptionalString(Object? raw) {
   return text.isEmpty ? null : text;
 }
 
+/// Resolves relative backend file paths (e.g. `/api/v1/files/...`) against
+/// [serverBaseUrl] origin so Flutter's `Image.network` receives a full URL.
+String? resolveLivePhotoUrl(String? rawUrl, {String? serverBaseUrl}) {
+  final raw = rawUrl?.trim();
+  if (raw == null || raw.isEmpty) return null;
+  if (raw.startsWith('http://') || raw.startsWith('https://')) return raw;
+  final base = serverBaseUrl?.trim();
+  if (base == null || base.isEmpty) return null;
+  final baseUri = Uri.tryParse(base);
+  if (baseUri == null ||
+      !baseUri.hasScheme ||
+      baseUri.host.isEmpty ||
+      baseUri.host.contains('unknown-server.local')) {
+    return null;
+  }
+  return baseUri.resolve(raw).toString();
+}
+
 double _parseDouble(Object? raw, [double fallback = 0.0]) {
   if (raw is num) {
     final val = raw.toDouble();
@@ -371,6 +389,18 @@ class TrailReportModel {
       lastConfirmedAt: lastConfirmedAt ?? this.lastConfirmedAt,
       expiresAt: clearExpiresAt ? null : (expiresAt ?? this.expiresAt),
     );
+  }
+
+  TrailReportModel withResolvedPhotoUrls(String? serverBaseUrl) {
+    final resolvedPhoto =
+        resolveLivePhotoUrl(photoUrl, serverBaseUrl: serverBaseUrl) ?? photoUrl;
+    final resolvedThumb =
+        resolveLivePhotoUrl(photoThumbUrl, serverBaseUrl: serverBaseUrl) ??
+        photoThumbUrl;
+    if (resolvedPhoto == photoUrl && resolvedThumb == photoThumbUrl) {
+      return this;
+    }
+    return copyWith(photoUrl: resolvedPhoto, photoThumbUrl: resolvedThumb);
   }
 
   factory TrailReportModel.fromJson(Map<String, dynamic> json) {
@@ -1085,6 +1115,23 @@ class TrailLiveSseEvent {
   final String? leftMemberId;
   final String? groupCode;
   final Map<String, dynamic> raw;
+
+  TrailLiveSseEvent withResolvedPhotoUrls(String? serverBaseUrl) {
+    final cur = report;
+    if (cur == null) return this;
+    final resolved = cur.withResolvedPhotoUrls(serverBaseUrl);
+    if (identical(resolved, cur)) return this;
+    return TrailLiveSseEvent(
+      type: type,
+      eventId: eventId,
+      report: resolved,
+      sos: sos,
+      groupMember: groupMember,
+      leftMemberId: leftMemberId,
+      groupCode: groupCode,
+      raw: raw,
+    );
+  }
 
   static TrailLiveSseEvent? tryParse({
     String? eventName,

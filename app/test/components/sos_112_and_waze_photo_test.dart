@@ -58,6 +58,7 @@ void main() {
             body: WazeNearbyPrompt(
               report: report,
               distanceMeters: 65,
+              serverBaseUrl: 'https://maps.example.com/api/v1',
               onVote: (_) {},
               onClose: () {},
             ),
@@ -72,6 +73,24 @@ void main() {
       expect(
         find.textContaining('Foto verificată la fața locului'),
         findsOneWidget,
+      );
+      final imgFinder = find.byType(Image);
+      expect(imgFinder, findsOneWidget);
+      final imageWidget = tester.widget<Image>(imgFinder);
+      expect(
+        (imageWidget.image as NetworkImage).url,
+        'https://maps.example.com/api/v1/files/trail_reports/rep123456789012/report.jpg?thumb=300x300',
+      );
+      final normalized = report.withResolvedPhotoUrls(
+        'https://maps.example.com/api/v1',
+      );
+      expect(
+        normalized.photoUrl,
+        'https://maps.example.com/api/v1/files/trail_reports/rep123456789012/report.jpg?thumb=600x0',
+      );
+      expect(
+        normalized.photoThumbUrl,
+        'https://maps.example.com/api/v1/files/trail_reports/rep123456789012/report.jpg?thumb=300x300',
       );
     },
   );

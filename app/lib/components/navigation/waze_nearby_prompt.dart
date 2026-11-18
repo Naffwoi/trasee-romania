@@ -1,6 +1,8 @@
 import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:wanderer/components/navigation/waze_report_sheet.dart';
 import 'package:wanderer/models/live/trail_live_models.dart';
+import 'package:wanderer/provider/api_provider.dart';
 
 /// Non-blocking Waze confirmation card shown when the hiker is within `<150 m`
 /// of an active report (or taps a report marker on the navigation map).
@@ -13,6 +15,7 @@ class WazeNearbyPrompt extends StatelessWidget {
     required this.onClose,
     this.isSubmitting = false,
     this.isRo = true,
+    this.serverBaseUrl,
   });
 
   final TrailReportModel report;
@@ -21,12 +24,29 @@ class WazeNearbyPrompt extends StatelessWidget {
   final VoidCallback onClose;
   final bool isSubmitting;
   final bool isRo;
+  final String? serverBaseUrl;
 
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final accent = categoryAccentColor(report.category);
     final now = DateTime.now();
+    String? effectiveBase = serverBaseUrl;
+    if (effectiveBase == null || effectiveBase.isEmpty) {
+      try {
+        final base = ProviderScope.containerOf(
+          context,
+          listen: false,
+        ).read(apiProvider).options.baseUrl;
+        if (!base.contains(kUnconfiguredApiHost)) {
+          effectiveBase = base;
+        }
+      } catch (_) {}
+    }
+    final resolvedPhotoUrl = resolveLivePhotoUrl(
+      report.photoThumbUrl ?? report.photoUrl,
+      serverBaseUrl: effectiveBase,
+    );
     final distLabel = (distanceMeters != null && distanceMeters!.isFinite)
         ? (distanceMeters! >= 1000
               ? '${(distanceMeters! / 1000.0).toStringAsFixed(1)} km'
@@ -153,14 +173,12 @@ class WazeNearbyPrompt extends StatelessWidget {
                           ),
                         ),
                       ],
-                      if ((report.photoThumbUrl ?? report.photoUrl)
-                              ?.startsWith('http') ==
-                          true) ...[
+                      if (resolvedPhotoUrl != null) ...[
                         const SizedBox(height: 6),
                         ClipRRect(
                           borderRadius: BorderRadius.circular(10),
                           child: Image.network(
-                            report.photoThumbUrl ?? report.photoUrl!,
+                            resolvedPhotoUrl,
                             height: 88,
                             width: double.infinity,
                             fit: BoxFit.cover,

@@ -6607,6 +6607,7 @@ class _NavigationScreenState extends ConsumerState<NavigationScreen>
               distanceMeters: entry.distanceM,
               isSubmitting: isBusy,
               isRo: _isRo,
+              serverBaseUrl: ref.read(apiProvider).options.baseUrl,
               onVote: (vote) => _handleVoteReport(entry.report, vote),
               onClose: () {
                 _snoozedOrVotedReportIds.add(entry.report.id);

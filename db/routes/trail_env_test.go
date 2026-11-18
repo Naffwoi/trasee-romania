@@ -25,11 +25,12 @@ func TestPublicAndInternalEnvRoutesAndAncpiWms(t *testing.T) {
 	actor := core.NewRecord(actorsCol)
 	actor.Set("username", "ro-env")
 	actor.Set("preferred_username", "ro-env")
+	actor.Set("domain", "local.example")
 	actor.Set("is_local", true)
-	actor.Set("iri", "https://example.com/actors/ro-env")
-	actor.Set("inbox", "https://example.com/actors/ro-env/inbox")
+	actor.Set("iri", "https://local.example/actors/ro-env")
+	actor.Set("inbox", "https://local.example/actors/ro-env/inbox")
 	actor.Set("public_key", "pem")
-	if err := app.UnsafeWithoutHooks().Save(actor); err != nil {
+	if err := app.Save(actor); err != nil {
 		t.Fatal(err)
 	}
 
@@ -42,7 +43,7 @@ func TestPublicAndInternalEnvRoutesAndAncpiWms(t *testing.T) {
 	trail.Set("lon", 21.7825)
 	trail.Set("elevation_gain", 450)
 	trail.Set("is_water_gorge", true)
-	if err := app.UnsafeWithoutHooks().Save(trail); err != nil {
+	if err := app.Save(trail); err != nil {
 		t.Fatal(err)
 	}
 

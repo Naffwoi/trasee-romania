@@ -9,16 +9,45 @@ import (
 	"math"
 	"net/http"
 	"net/http/httptest"
+	"slices"
+	"sort"
 	"testing"
 	"time"
 
 	"github.com/pocketbase/pocketbase/core"
-	"github.com/pocketbase/pocketbase/tests"
 	"github.com/twpayne/go-polyline"
 
 	_ "pocketbase/migrations"
 	"pocketbase/services/env"
 )
+
+func newEnvMigratedTestApp(t *testing.T) *core.BaseApp {
+	t.Helper()
+	t.Setenv("ORIGIN", "https://local.example")
+	app := core.NewBaseApp(core.BaseAppConfig{DataDir: t.TempDir()})
+	app.Settings().Logs.MaxDays = 0
+	if err := app.Bootstrap(); err != nil {
+		t.Fatalf("bootstrap test app: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := app.ResetBootstrapState(); err != nil {
+			t.Error(err)
+		}
+	})
+
+	migrations := slices.Clone(core.AppMigrations.Items())
+	sort.Slice(migrations, func(i, j int) bool { return migrations[i].File < migrations[j].File })
+	for _, m := range migrations {
+		switch m.File {
+		case "1742167033_init_meilisearch.go", "1744651602_add_polyline.go", "1749831369_update_sortable_attributes.go":
+			continue
+		}
+		if err := app.RunInTransaction(m.Up); err != nil {
+			t.Fatalf("apply %s: %v", m.File, err)
+		}
+	}
+	return app
+}
 
 func seedTestTrail(t *testing.T, app core.App, coords [][]float64) *core.Record {
 	t.Helper()
@@ -26,11 +55,12 @@ func seedTestTrail(t *testing.T, app core.App, coords [][]float64) *core.Record 
 	actor := core.NewRecord(actorsCol)
 	actor.Set("username", "tester")
 	actor.Set("preferred_username", "tester")
+	actor.Set("domain", "local.example")
 	actor.Set("is_local", true)
-	actor.Set("iri", "https://example.com/actors/tester")
-	actor.Set("inbox", "https://example.com/actors/tester/inbox")
+	actor.Set("iri", "https://local.example/actors/tester")
+	actor.Set("inbox", "https://local.example/actors/tester/inbox")
 	actor.Set("public_key", "pem")
-	if err := app.UnsafeWithoutHooks().Save(actor); err != nil {
+	if err := app.Save(actor); err != nil {
 		t.Fatalf("save actor: %v", err)
 	}
 
@@ -42,18 +72,14 @@ func seedTestTrail(t *testing.T, app core.App, coords [][]float64) *core.Record 
 	tr.Set("lat", coords[0][0])
 	tr.Set("lon", coords[0][1])
 	tr.Set("polyline", string(polyline.EncodeCoords(coords)))
-	if err := app.UnsafeWithoutHooks().Save(tr); err != nil {
+	if err := app.Save(tr); err != nil {
 		t.Fatalf("save trail: %v", err)
 	}
 	return tr
 }
 
 func TestFirmsIngestorFiltersRomaniaConfidenceAndMatchesTrail(t *testing.T) {
-	app, err := tests.NewTestApp()
-	if err != nil {
-		t.Fatalf("new test app: %v", err)
-	}
-	defer app.Cleanup()
+	app := newEnvMigratedTestApp(t)
 
 	trail := seedTestTrail(t, app, [][]float64{
 		{45.6000, 24.6100},
@@ -104,11 +130,7 @@ func TestGladDisturbancePixelDecodeAndTileScan(t *testing.T) {
 		t.Fatalf("expected 2026-11-10, got %s", dt.Format("2006-01-02"))
 	}
 
-	app, err := tests.NewTestApp()
-	if err != nil {
-		t.Fatalf("new test app: %v", err)
-	}
-	defer app.Cleanup()
+	app := newEnvMigratedTestApp(t)
 
 	lat, lon := 45.6000, 24.6100
 	trail := seedTestTrail(t, app, [][]float64{

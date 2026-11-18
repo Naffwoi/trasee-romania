@@ -1,9 +1,9 @@
 import * as maplibregl from "maplibre-gl";
-import { DemTileGrid } from "#lib/navigation/dem_tile_grid";
+import { DemTileGrid } from "#lib/navigation/dem_tile_grid.ts";
 import {
 	renderAvalancheSlopeTileRgba,
 	renderCastShadowTileRgba,
-} from "#lib/navigation/slope_aspect";
+} from "#lib/navigation/slope_aspect.ts";
 
 export interface ParsedTerrainProtocolUrl {
 	scheme: "terrain-slope" | "terrain-shade";

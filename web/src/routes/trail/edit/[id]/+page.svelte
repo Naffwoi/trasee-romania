@@ -97,7 +97,7 @@
         convertGPSTimestampToDate,
         dateInputValue,
     } from "#lib/util/date_util.ts";
-    import { getIconForLocation } from "#lib/util/icon_util.ts";
+    import { getIconForLocation } from "#lib/util/location_icon_util.ts";
     import { normalizeNewTagName } from "#lib/util/tag_name.ts";
     import {
         createAnchorMarker,

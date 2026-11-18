@@ -66,7 +66,7 @@
     import ConfirmModal from "../confirm_modal.svelte";
     import { handleFromRecordWithIRI } from "#lib/util/activitypub_util.ts";
     import LikeButton from "./like_button.svelte";
-    import Editor from "../base/editor.svelte";
+    import Editor from "../base/lazy_editor.svelte";
     import {
         trails_update,
         trails_update_metadata,

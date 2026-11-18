@@ -10,7 +10,7 @@ import { get } from "svelte/store";
 import { handleFromRecordWithIRI } from "./activitypub_util";
 import { getFileURL } from "./file_util";
 import { formatDistance, formatElevation, formatTimeHHMM, trailDisplayDuration } from "./format_util";
-import { icons } from "./icon_util";
+import { isSafeFontAwesomeSlug } from "./location_icon_util";
 
 export class FontawesomeMarker extends M.Marker {
     constructor(options: { icon: string, fontSize?: string, width?: number, backgroundColor?: string, fontColor?: string, style?: string, id?: string }, markerOptions?: M.MarkerOptions) {
@@ -29,7 +29,7 @@ export class FontawesomeMarker extends M.Marker {
 }
 
 export function createMarkerFromWaypoint(waypoint: Waypoint, onDragEnd?: (marker: M.Marker, wpId?: string) => void): FontawesomeMarker {
-    const safeMarkerIcon = waypoint.icon && icons.includes(waypoint.icon) ? waypoint.icon : "circle";
+    const safeMarkerIcon = isSafeFontAwesomeSlug(waypoint.icon) ? waypoint.icon : "circle";
     const marker = new FontawesomeMarker({
         id: waypoint.id,
         icon: `fa fa-${safeMarkerIcon}`,
@@ -44,7 +44,7 @@ export function createMarkerFromWaypoint(waypoint: Waypoint, onDragEnd?: (marker
 
     const spanElement = document.createElement("span");
     const iconElement = document.createElement("i");
-    const iconName = waypoint.icon && icons.includes(waypoint.icon) ? waypoint.icon : "circle";
+    const iconName = isSafeFontAwesomeSlug(waypoint.icon) ? waypoint.icon : "circle";
     iconElement.classList.add("fa", `fa-${iconName}`)
     spanElement.appendChild(iconElement);
 

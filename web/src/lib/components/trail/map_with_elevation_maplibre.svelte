@@ -13,7 +13,6 @@
         FontawesomeMarker,
     } from "#lib/util/maplibre_util.ts";
     import { decodePolyline } from "#lib/util/polyline_util.ts";
-    import type { ElevationProfileControl } from "#lib/vendor/maplibre-elevation-profile/elevationprofile-control.ts";
     import { FullscreenControl } from "#lib/vendor/maplibre-fullscreen/fullscreen-control.ts";
     import MaplibreGraticule from "#lib/vendor/maplibre-graticule/maplibre-graticule.ts";
     import { CaretLayer } from "#lib/vendor/maplibre-layer-manager/caret-layer.ts";
@@ -139,8 +138,12 @@
         onElevationSummary = undefined,
     }: Props = $props();
 
+    type ElevationProfileControlInstance = InstanceType<
+        Awaited<ReturnType<typeof loadElevationProfileControlModule>>["ElevationProfileControl"]
+    >;
+
     let mapContainer: HTMLDivElement;
-    let epc: ElevationProfileControl;
+    let epc: ElevationProfileControlInstance | undefined;
     let graticule: MaplibreGraticule;
 
     let layerManager: LayerManager;
@@ -1222,11 +1225,6 @@
             lat: 45.9,
             zoom: 6.5,
         };
-        const ElevationProfileControl = (
-            await import(
-                "#lib/vendor/maplibre-elevation-profile/elevationprofile-control.ts"
-            )
-        ).ElevationProfileControl;
 
         if (!mapContainer) {
             return;
@@ -1378,59 +1376,64 @@
             map.addControl(switcherControl);
         }
 
-        if (showElevation) {
-            epc = new ElevationProfileControl({
-                visible: false,
-                size: "195px",
-                showButton: !elevationProfileContainer,
-                paddingTop: 28,
-                paddingBottom: 26,
-                profileBackgroundColor:
-                    $theme == "light"
-                        ? "rgba(53, 73, 187, 0.16)"
-                        : "rgba(96, 165, 250, 0.20)",
-                backgroundColor: "bg-menu-background/95",
-                unit: page.data.settings?.unit ?? "metric",
-                profileLineWidth: 2.5,
-                displayDistanceGrid: true,
-                tooltipDisplayDPlus: false,
-                tooltipBackgroundColor: $theme == "light" ? "#fff" : "#242734",
-                tooltipTextColor: $theme == "light" ? "#000" : "#fff",
-                zoom: false,
-                container: elevationProfileContainer,
-                labels: {
-                    after: $_("elevation-tooltip-after"),
-                    elevation: $_("elevation-tooltip-elevation"),
-                    grade: $_("elevation-tooltip-grade"),
-                    speed: $_("elevation-tooltip-speed"),
-                    toggleButton: $_("toggle-elevation-profile"),
-                },
-                onEnter: () => {
-                    elevationMarker.setOpacity("1");
-                },
-                onLeave: () => {
-                    elevationMarker.setOpacity("0");
-                    onElevationMove?.(null);
-                },
-                onToggle: (visible) => {
-                    elevationProfileVisibilityPreference = visible;
-                },
-                onMove: (data) => {
-                    if (!hoveringTrail) {
-                        elevationMarker.setLngLat(
-                            data.position as M.LngLatLike,
-                        );
-                    }
-                    onElevationMove?.({
-                        distance: data.distance,
-                        elevation: Number(data.position?.[2] ?? 0),
-                        dPlus: data.dPlus,
-                        gradePercent: data.gradePercent,
-                    });
-                },
+        if (showElevation && !clusterTrails) {
+            void loadElevationProfileControlModule().then(({ ElevationProfileControl }) => {
+                if (!map) return;
+                epc = new ElevationProfileControl({
+                    visible: false,
+                    size: "195px",
+                    showButton: !elevationProfileContainer,
+                    paddingTop: 28,
+                    paddingBottom: 26,
+                    profileBackgroundColor:
+                        $theme == "light"
+                            ? "rgba(53, 73, 187, 0.16)"
+                            : "rgba(96, 165, 250, 0.20)",
+                    backgroundColor: "bg-menu-background/95",
+                    unit: page.data.settings?.unit ?? "metric",
+                    profileLineWidth: 2.5,
+                    displayDistanceGrid: true,
+                    tooltipDisplayDPlus: false,
+                    tooltipBackgroundColor: $theme == "light" ? "#fff" : "#242734",
+                    tooltipTextColor: $theme == "light" ? "#000" : "#fff",
+                    zoom: false,
+                    container: elevationProfileContainer,
+                    labels: {
+                        after: $_("elevation-tooltip-after"),
+                        elevation: $_("elevation-tooltip-elevation"),
+                        grade: $_("elevation-tooltip-grade"),
+                        speed: $_("elevation-tooltip-speed"),
+                        toggleButton: $_("toggle-elevation-profile"),
+                    },
+                    onEnter: () => {
+                        elevationMarker.setOpacity("1");
+                    },
+                    onLeave: () => {
+                        elevationMarker.setOpacity("0");
+                        onElevationMove?.(null);
+                    },
+                    onToggle: (visible) => {
+                        elevationProfileVisibilityPreference = visible;
+                    },
+                    onMove: (data) => {
+                        if (!hoveringTrail) {
+                            elevationMarker.setLngLat(
+                                data.position as M.LngLatLike,
+                            );
+                        }
+                        onElevationMove?.({
+                            distance: data.distance,
+                            elevation: Number(data.position?.[2] ?? 0),
+                            dPlus: data.dPlus,
+                            gradePercent: data.gradePercent,
+                        });
+                    },
+                });
+                toggleEpcTheme();
+                map.addControl(epc);
+                refreshElevationProfile();
+                syncElevationProfileVisibility();
             });
-            toggleEpcTheme();
-            map.addControl(epc);
         }
 
         if (showFullscreen) {
@@ -1615,6 +1618,10 @@
             hash |= 0;
         }
         return Math.abs(hash) % max;
+    }
+
+    function loadElevationProfileControlModule() {
+        return import("#lib/vendor/maplibre-elevation-profile/elevationprofile-control.ts");
     }
 </script>
 

@@ -48,6 +48,7 @@ func recordToCachedReport(rec *core.Record) live.CachedReport {
 	if !isPerm {
 		exp = rec.GetDateTime("expires_at").Time().UTC()
 	}
+	photoFile := strings.TrimSpace(rec.GetString("photo"))
 	return live.CachedReport{
 		ID:              rec.Id,
 		TrailID:         rec.GetString("trail_id"),
@@ -60,6 +61,8 @@ func recordToCachedReport(rec *core.Record) live.CachedReport {
 		Lon:             rec.GetFloat("lon"),
 		Ele:             rec.GetFloat("ele"),
 		AlongTrackM:     rec.GetFloat("along_track_m"),
+		PhotoFile:       photoFile,
+		PhotoVerified:   photoFile != "" && rec.GetBool("photo_verified"),
 		DeviceHash:      rec.GetString("device_hash"),
 		AuthorActor:     rec.GetString("author_actor"),
 		ConfirmCount:    rec.GetInt("confirm_count"),
@@ -87,6 +90,7 @@ func cachedReportToDto(rep live.CachedReport) TrailReportDto {
 		v := rep.AlongTrackM
 		alongPtr = &v
 	}
+	photoUrlPtr, photoThumbUrlPtr := reportPhotoURLs(rep.ID, rep.PhotoFile)
 	return TrailReportDto{
 		ID:              rep.ID,
 		TrailID:         rep.TrailID,
@@ -99,6 +103,9 @@ func cachedReportToDto(rep live.CachedReport) TrailReportDto {
 		Lon:             rep.Lon,
 		Ele:             rep.Ele,
 		AlongTrackM:     alongPtr,
+		PhotoUrl:        photoUrlPtr,
+		PhotoThumbUrl:   photoThumbUrlPtr,
+		PhotoVerified:   photoUrlPtr != nil && rep.PhotoVerified,
 		ConfirmCount:    rep.ConfirmCount,
 		DismissCount:    rep.DismissCount,
 		CreatedAt:       createdStr,
@@ -337,6 +344,14 @@ func computeLiveStateHash(reports []TrailReportDto, sosAlerts []SosAlertDto) str
 			writeStr(*r.ExpiresAt)
 		}
 		writeStr(r.Note)
+		if r.PhotoUrl != nil {
+			writeStr(*r.PhotoUrl)
+		}
+		if r.PhotoVerified {
+			writeInt(1)
+		} else {
+			writeInt(0)
+		}
 	}
 
 	writeInt(len(sosIdx))

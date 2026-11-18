@@ -42,6 +42,8 @@ var requestedThumbs = []struct {
 	{"waypoints", "photos", "600x0", "trail_timeline, photo_picker"},
 	{"summit_logs", "photos", "300x300", "summit_log_table_row"},
 	{"summit_logs", "photos", "600x0", "summit_log_card, photo_picker, activity_card"},
+	{"trail_reports", "photo", "300x300", "report_markers popup, waze_nearby_prompt"},
+	{"trail_reports", "photo", "600x0", "report photo full preview"},
 }
 
 func TestRequestedThumbSizesAreRegistered(t *testing.T) {

@@ -25,8 +25,9 @@ var SearchWriteOptions = &meilisearch.DocumentOptions{PrimaryKey: meilisearch.St
 // so a change to any other actor field is only picked up through a bump.
 var SearchDocumentVersions = map[string]int{
 	// feature/app (moving_duration) and main (trails rewritten by migrations)
-	// each moved trails to 2; 3 rebuilds instances coming from either.
-	"trails": 3,
+	// each moved trails to 2; 3 rebuilds instances coming from either;
+	// 4 adds train_accessible, rail_station_*, and is_water_gorge.
+	"trails": 4,
 	"lists":  2,
 	"actors": 2,
 }
@@ -121,6 +122,12 @@ func documentFromTrailRecord(r *core.Record, author *core.Record, includeShares 
 		"min_lon":                    bounds[2],
 		"max_lon":                    bounds[3],
 		"bounding_box_diagonal":      diagonal,
+		"train_accessible":           r.GetBool("train_accessible"),
+		"rail_station_name":          r.GetString("rail_station_name"),
+		"rail_station_distance_m":    r.GetFloat("rail_station_distance_m"),
+		"rail_station_lat":           r.GetFloat("rail_station_lat"),
+		"rail_station_lon":           r.GetFloat("rail_station_lon"),
+		"is_water_gorge":             r.GetBool("is_water_gorge"),
 		"_geo": map[string]float64{
 			"lat": r.GetFloat("lat"),
 			"lng": r.GetFloat("lon"),

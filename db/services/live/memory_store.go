@@ -110,6 +110,8 @@ type CachedReport struct {
 	Lon             float64
 	Ele             float64
 	AlongTrackM     float64
+	PhotoFile       string
+	PhotoVerified   bool
 	DeviceHash      string
 	AuthorActor     string
 	ConfirmCount    int

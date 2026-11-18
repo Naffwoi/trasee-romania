@@ -3,6 +3,7 @@ package routes
 import (
 	"errors"
 	"html"
+	"io"
 	"math"
 	"net/http"
 	"strconv"
@@ -13,8 +14,10 @@ import (
 	"github.com/microcosm-cc/bluemonday"
 	"github.com/pocketbase/dbx"
 	"github.com/pocketbase/pocketbase/core"
+	"github.com/pocketbase/pocketbase/tools/filesystem"
 	"github.com/pocketbase/pocketbase/tools/types"
 
+	"pocketbase/services/env"
 	"pocketbase/services/live"
 	"pocketbase/util"
 )
@@ -82,6 +85,9 @@ type TrailReportDto struct {
 	Lon             float64  `json:"lon"`
 	Ele             float64  `json:"ele"`
 	AlongTrackM     *float64 `json:"alongTrackM"`
+	PhotoUrl        *string  `json:"photoUrl"`
+	PhotoThumbUrl   *string  `json:"photoThumbUrl"`
+	PhotoVerified   bool     `json:"photoVerified"`
 	ConfirmCount    int      `json:"confirmCount"`
 	DismissCount    int      `json:"dismissCount"`
 	CreatedAt       string   `json:"createdAt"`
@@ -122,13 +128,16 @@ type PushTargetDto struct {
 // TrailLiveHandler groups the internal `/live/*` endpoints with an injectable
 // SSE hub and clock for deterministic unit tests.
 type TrailLiveHandler struct {
-	Hub          *live.TrailLiveHub
-	Store        *live.LiveMemoryStore
-	Now          func() time.Time
-	RateLimiters *live.LiveRateLimiterSet
-	Vapid        *live.VapidDispatcher
-	ActorCache   *ActorIDCache
-	vapidOnce    sync.Once
+	Hub           *live.TrailLiveHub
+	Store         *live.LiveMemoryStore
+	Now           func() time.Time
+	RateLimiters  *live.LiveRateLimiterSet
+	Vapid         *live.VapidDispatcher
+	ActorCache    *ActorIDCache
+	EnvService    *env.EnvironmentService
+	StreetService *env.StreetPreviewService
+	Ancpi         *AncpiProxyHandler
+	vapidOnce     sync.Once
 }
 
 // NewTrailLiveHandler creates a handler backed by hub (or live.DefaultHub() if nil).
@@ -269,6 +278,16 @@ func sanitizePlainText(raw string, maxRunes int) string {
 	return stripped
 }
 
+func reportPhotoURLs(recordID, photoFile string) (*string, *string) {
+	cleaned := strings.TrimSpace(photoFile)
+	if cleaned == "" || recordID == "" {
+		return nil, nil
+	}
+	full := "/api/v1/files/trail_reports/" + recordID + "/" + cleaned + "?thumb=600x0"
+	thumb := "/api/v1/files/trail_reports/" + recordID + "/" + cleaned + "?thumb=300x300"
+	return &full, &thumb
+}
+
 func toTrailReportDto(rec *core.Record) TrailReportDto {
 	createdDT := rec.GetDateTime("created")
 	createdStr := ""
@@ -305,6 +324,8 @@ func toTrailReportDto(rec *core.Record) TrailReportDto {
 		alongTrackPtr = &v
 	}
 
+	photoUrlPtr, photoThumbUrlPtr := reportPhotoURLs(rec.Id, rec.GetString("photo"))
+
 	return TrailReportDto{
 		ID:              rec.Id,
 		TrailID:         rec.GetString("trail_id"),
@@ -317,6 +338,9 @@ func toTrailReportDto(rec *core.Record) TrailReportDto {
 		Lon:             rec.GetFloat("lon"),
 		Ele:             rec.GetFloat("ele"),
 		AlongTrackM:     alongTrackPtr,
+		PhotoUrl:        photoUrlPtr,
+		PhotoThumbUrl:   photoThumbUrlPtr,
+		PhotoVerified:   photoUrlPtr != nil && rec.GetBool("photo_verified"),
 		ConfirmCount:    rec.GetInt("confirm_count"),
 		DismissCount:    rec.GetInt("dismiss_count"),
 		CreatedAt:       createdStr,
@@ -553,23 +577,98 @@ func (h *TrailLiveHandler) TrailSummary(e *core.RequestEvent) error {
 		})
 	}
 
+	envHazards := QueryActiveEnvHazards(e.App, trailID, refLat, refLon, hasRefCoords, 5000.0, now)
 	return e.JSON(http.StatusOK, map[string]any{
 		"trailId":         trailID,
 		"activeHikers30m": activeHikers,
 		"stateHash":       stateHash,
 		"reports":         reports,
 		"sosAlerts":       sosAlerts,
+		"envHazards":      envHazards,
 	})
 }
 
 type createReportRequest struct {
-	TrailID     string   `json:"trailId"`
-	Category    string   `json:"category"`
-	Note        string   `json:"note"`
-	Lat         *float64 `json:"lat"`
-	Lon         *float64 `json:"lon"`
-	Ele         *float64 `json:"ele"`
-	AlongTrackM *float64 `json:"alongTrackM"`
+	TrailID       string   `json:"trailId"`
+	Category      string   `json:"category"`
+	Note          string   `json:"note"`
+	Lat           *float64 `json:"lat"`
+	Lon           *float64 `json:"lon"`
+	Ele           *float64 `json:"ele"`
+	AlongTrackM   *float64 `json:"alongTrackM"`
+	PhotoVerified bool     `json:"photoVerified"`
+}
+
+func parseCreateReportPayload(w http.ResponseWriter, r *http.Request, bindJSON func(any) error) (createReportRequest, *filesystem.File, error) {
+	ct := strings.ToLower(r.Header.Get("Content-Type"))
+	if strings.HasPrefix(ct, "multipart/form-data") {
+		if w != nil && r.Body != nil {
+			r.Body = http.MaxBytesReader(w, r.Body, util.MaxReportPhotoBytes+256*1024)
+		}
+		if err := r.ParseMultipartForm(util.MaxReportPhotoBytes + 64*1024); err != nil {
+			var maxErr *http.MaxBytesError
+			if errors.As(err, &maxErr) {
+				return createReportRequest{}, nil, util.ErrPhotoTooLarge
+			}
+			return createReportRequest{}, nil, errors.New("invalid multipart form")
+		}
+		parseOptFloat := func(key string) (*float64, error) {
+			raw := strings.TrimSpace(r.FormValue(key))
+			if raw == "" {
+				return nil, nil
+			}
+			v, err := strconv.ParseFloat(raw, 64)
+			if err != nil {
+				return nil, err
+			}
+			return &v, nil
+		}
+		latPtr, errLat := parseOptFloat("lat")
+		lonPtr, errLon := parseOptFloat("lon")
+		if errLat != nil || errLon != nil {
+			return createReportRequest{}, nil, errors.New("invalid coordinates")
+		}
+		elePtr, _ := parseOptFloat("ele")
+		alongPtr, _ := parseOptFloat("alongTrackM")
+		pvRaw := strings.ToLower(strings.TrimSpace(r.FormValue("photoVerified")))
+		req := createReportRequest{
+			TrailID:       r.FormValue("trailId"),
+			Category:      r.FormValue("category"),
+			Note:          r.FormValue("note"),
+			Lat:           latPtr,
+			Lon:           lonPtr,
+			Ele:           elePtr,
+			AlongTrackM:   alongPtr,
+			PhotoVerified: pvRaw == "true" || pvRaw == "1",
+		}
+
+		var uploadedFile *filesystem.File
+		f, _, fErr := r.FormFile("photo")
+		if fErr == nil && f != nil {
+			defer f.Close()
+			limited := io.LimitReader(f, util.MaxReportPhotoBytes+1)
+			rawBytes, rErr := io.ReadAll(limited)
+			if rErr != nil {
+				return createReportRequest{}, nil, errors.New("failed reading photo")
+			}
+			cleanBytes, ext, _, sErr := util.StripImageMetadata(rawBytes)
+			if sErr != nil {
+				return createReportRequest{}, nil, sErr
+			}
+			pbFile, nErr := filesystem.NewFileFromBytes(cleanBytes, "report"+ext)
+			if nErr != nil {
+				return createReportRequest{}, nil, nErr
+			}
+			uploadedFile = pbFile
+		}
+		return req, uploadedFile, nil
+	}
+
+	var req createReportRequest
+	if err := bindJSON(&req); err != nil {
+		return createReportRequest{}, nil, errors.New("Invalid JSON body")
+	}
+	return req, nil, nil
 }
 
 // CreateReport handles POST /live/reports.
@@ -585,9 +684,9 @@ func (h *TrailLiveHandler) CreateReport(e *core.RequestEvent) error {
 	}
 	actorID := strings.TrimSpace(e.Request.Header.Get("X-Actor-Id"))
 
-	var req createReportRequest
-	if err := e.BindBody(&req); err != nil {
-		return e.BadRequestError("Invalid JSON body", err)
+	req, uploadedPhoto, err := parseCreateReportPayload(e.Response, e.Request, e.BindBody)
+	if err != nil {
+		return e.BadRequestError(err.Error(), nil)
 	}
 
 	category := strings.TrimSpace(req.Category)
@@ -609,6 +708,10 @@ func (h *TrailLiveHandler) CreateReport(e *core.RequestEvent) error {
 		if closest, findErr := e.App.FindRecordById("trail_reports", dup.ID); findErr == nil && closest != nil {
 			if closest.GetString("note") == "" && cleanNote != "" {
 				closest.Set("note", cleanNote)
+			}
+			if uploadedPhoto != nil && closest.GetString("photo") == "" {
+				closest.Set("photo", uploadedPhoto)
+				closest.Set("photo_verified", req.PhotoVerified)
 			}
 			dto, voteErr := h.applyReportVote(e.App, closest, deviceHash, "confirm", now)
 			if voteErr != nil {
@@ -654,6 +757,10 @@ func (h *TrailLiveHandler) CreateReport(e *core.RequestEvent) error {
 	rec.Set("dismiss_count", 0)
 	rec.Set("spam_count", 0)
 	rec.Set("last_confirmed_at", nowDT)
+	if uploadedPhoto != nil {
+		rec.Set("photo", uploadedPhoto)
+		rec.Set("photo_verified", req.PhotoVerified)
+	}
 	if meta.IsPermanent {
 		rec.Set("expires_at", "")
 	} else {
@@ -1621,6 +1728,15 @@ func RunTrailLiveGC(app core.App, hub *live.TrailLiveHub, now time.Time) error {
 	// 4. Clean up expired trail_groups (< now) and stale trail_group_members (< now - 2h).
 	if err := cleanTrailGroupsGC(app, store, now); err != nil {
 		return err
+	}
+
+	// 5. Purge expired env_hazards rows.
+	if _, colErr := app.FindCachedCollectionByNameOrId("env_hazards"); colErr == nil {
+		if _, err := app.DB().NewQuery(
+			"DELETE FROM env_hazards WHERE expires_at != '' AND expires_at < {:now}",
+		).Bind(dbx.Params{"now": nowStr}).Execute(); err != nil {
+			return err
+		}
 	}
 
 	return nil

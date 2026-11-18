@@ -23,6 +23,7 @@ import (
 	"pocketbase/hooks"
 	"pocketbase/pluginsystem"
 	"pocketbase/routes"
+	"pocketbase/services/env"
 	"pocketbase/services/live"
 	"pocketbase/services/regions"
 
@@ -461,6 +462,7 @@ func registerRoutes(se *core.ServeEvent, client meilisearch.ServiceManager) {
 	// Trail Live Community endpoints: direct public /api/v1/live/* (HMAC device
 	// auth + sharded rate limiter + native Go VAPID push) alongside internal /live/*.
 	routes.RegisterTrailLiveRoutes(se, live.DefaultHub())
+	routes.RegisterMapEnvRoutes(se)
 }
 
 func registerCronJobs(app core.App, client meilisearch.ServiceManager) {
@@ -496,6 +498,33 @@ func registerCronJobs(app core.App, client meilisearch.ServiceManager) {
 	})
 	app.Cron().MustAdd("sqlite-pragma-optimize", "0 */6 * * *", func() {
 		runSQLitePlannerOptimize(app)
+	})
+
+	broadcastHazard := func(h env.EnvHazardDto) {
+		trailID := ""
+		if len(h.AffectedTrailIDs) > 0 {
+			trailID = h.AffectedTrailIDs[0]
+		}
+		live.DefaultHub().BroadcastEnvHazardUpdate(live.GeoTarget{
+			TrailID:   trailID,
+			Lat:       h.Lat,
+			Lon:       h.Lon,
+			HasCoords: true,
+		}, h)
+	}
+	app.Cron().MustAdd("firms-wildfire-sync", "*/30 * * * *", func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+		defer cancel()
+		if _, err := env.SyncFirmsActiveFiresWithBroadcast(ctx, app, nil, nil, time.Now().UTC(), broadcastHazard); err != nil {
+			app.Logger().Warn("firms-wildfire-sync failed", "error", err)
+		}
+	})
+	app.Cron().MustAdd("gfw-disturbance-sync", "20 3 * * *", func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+		defer cancel()
+		if _, err := env.ScanDisturbanceTilesWithBroadcast(ctx, app, nil, "", time.Now().UTC(), broadcastHazard); err != nil {
+			app.Logger().Warn("gfw-disturbance-sync failed", "error", err)
+		}
 	})
 }
 
@@ -632,7 +661,7 @@ func searchIndexSettings() map[string]meilisearch.Settings {
 				"id", "_geo", "author", "category_id", "subcategory_id",
 				"is_federated", "completed", "date", "difficulty", "distance",
 				"elevation_gain", "elevation_loss", "likes", "public", "shares",
-				"tags", "min_lat", "max_lat", "min_lon", "max_lon", "bounding_box_diagonal",
+				"tags", "train_accessible", "min_lat", "max_lat", "min_lon", "max_lon", "bounding_box_diagonal",
 			},
 			SortableAttributes: []string{
 				"author", "created", "date", "difficulty", "distance",

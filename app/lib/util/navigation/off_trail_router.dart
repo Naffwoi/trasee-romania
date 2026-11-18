@@ -1365,8 +1365,8 @@ class OffTrailRouter {
   }
 
   /// Applies [passes] iterations of pinned-endpoint Chaikin corner-cutting
-  /// (`0.75 / 0.25`), verifying that every cut corner stays free of steep
-  /// cliff hazards and obstacle polygons.
+  /// (`0.75 / 0.25`), verifying that every subdivided sub-segment and vertex
+  /// stays free of steep cliff hazards, extra climb, and obstacle polygons.
   static List<({double x, double y})> _chaikinSmoothSafely(
     List<({double x, double y})> path, {
     required int passes,
@@ -1376,46 +1376,75 @@ class OffTrailRouter {
   }) {
     if (path.length < 3 || passes <= 0) return path;
 
+    final fineStepM = math.min(stepM, 3.0);
     var current = path;
     for (var pass = 0; pass < passes; pass++) {
       if (current.length < 3) break;
       final next = <({double x, double y})>[current.first];
       for (var i = 1; i < current.length - 1; i++) {
-        final prev = current[i - 1];
+        final prev = next.last;
+        final origPrev = current[i - 1];
         final corner = current[i];
         final after = current[i + 1];
 
         final rPrev = (
-          x: 0.25 * prev.x + 0.75 * corner.x,
-          y: 0.25 * prev.y + 0.75 * corner.y,
+          x: 0.25 * origPrev.x + 0.75 * corner.x,
+          y: 0.25 * origPrev.y + 0.75 * corner.y,
         );
         final qNext = (
           x: 0.75 * corner.x + 0.25 * after.x,
           y: 0.75 * corner.y + 0.25 * after.y,
         );
 
-        final safeBevel =
+        final ePrev = eleAtXY(prev.x, prev.y);
+        final eCorner = eleAtXY(corner.x, corner.y);
+        final eAfter = eleAtXY(after.x, after.y);
+        final eR = eleAtXY(rPrev.x, rPrev.y);
+        final eQ = eleAtXY(qNext.x, qNext.y);
+
+        final origClimb =
+            math.max(0.0, eCorner - ePrev) + math.max(0.0, eAfter - eCorner);
+        final newClimb =
+            math.max(0.0, eR - ePrev) +
+            math.max(0.0, eQ - eR) +
+            math.max(0.0, eAfter - eQ);
+
+        final safeCornerCut =
+            newClimb <= origClimb + 1.5 &&
+            !_lineHitsSteepHazard(
+              x0: prev.x,
+              y0: prev.y,
+              x1: rPrev.x,
+              y1: rPrev.y,
+              stepM: fineStepM,
+              eleAtXY: eleAtXY,
+            ) &&
             !_lineHitsSteepHazard(
               x0: rPrev.x,
               y0: rPrev.y,
               x1: qNext.x,
               y1: qNext.y,
-              stepM: stepM,
+              stepM: fineStepM,
               eleAtXY: eleAtXY,
             ) &&
-            !_segmentHitsObstacles(
-              rPrev.x,
-              rPrev.y,
-              qNext.x,
-              qNext.y,
-              obstacles,
-            );
+            !_lineHitsSteepHazard(
+              x0: qNext.x,
+              y0: qNext.y,
+              x1: after.x,
+              y1: after.y,
+              stepM: fineStepM,
+              eleAtXY: eleAtXY,
+            ) &&
+            !_segmentHitsObstacles(prev.x, prev.y, rPrev.x, rPrev.y, obstacles) &&
+            !_segmentHitsObstacles(rPrev.x, rPrev.y, qNext.x, qNext.y, obstacles) &&
+            !_segmentHitsObstacles(qNext.x, qNext.y, after.x, after.y, obstacles);
 
-        next.add(rPrev);
-        if (!safeBevel) {
+        if (safeCornerCut) {
+          next.add(rPrev);
+          next.add(qNext);
+        } else {
           next.add(corner);
         }
-        next.add(qNext);
       }
       next.add(current.last);
       current = next;
@@ -1434,14 +1463,22 @@ class OffTrailRouter {
     final dx = x1 - x0;
     final dy = y1 - y0;
     final len = math.sqrt(dx * dx + dy * dy);
-    if (len < 5.0) return false;
-    final steps = math.max(2, (len / stepM).ceil());
+    final startEle = eleAtXY(x0, y0);
+    final endEle = eleAtXY(x1, y1);
+    if (len <= 0.5) {
+      return (endEle - startEle).abs() > 0.35;
+    }
+    if (((endEle - startEle) / len).abs() > cliffSlopeRatioThreshold) {
+      return true;
+    }
+    final effStep = math.max(1.5, math.min(stepM, 4.0));
+    final steps = math.max(3, (len / effStep).ceil());
     final segLen = len / steps;
-    var prevEle = eleAtXY(x0, y0);
+    var prevEle = startEle;
     for (var i = 1; i <= steps; i++) {
       final t = i / steps;
-      final currEle = eleAtXY(x0 + dx * t, y0 + dy * t);
-      if (segLen > 0.5 &&
+      final currEle = i == steps ? endEle : eleAtXY(x0 + dx * t, y0 + dy * t);
+      if (segLen > 0.25 &&
           ((currEle - prevEle) / segLen).abs() > cliffSlopeRatioThreshold) {
         return true;
       }

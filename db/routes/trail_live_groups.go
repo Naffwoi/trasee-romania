@@ -340,19 +340,23 @@ func buildGroupSessionDto(
 }
 
 type createGroupRequest struct {
-	TrailID      string   `json:"trailId"`
-	DisplayName  string   `json:"displayName"`
-	Lat          *float64 `json:"lat"`
-	Lon          *float64 `json:"lon"`
-	Ele          *float64 `json:"ele"`
-	Accuracy     *float64 `json:"accuracy"`
-	Heading      *float64 `json:"heading"`
-	Speed        *float64 `json:"speed"`
-	AlongTrackM  *float64 `json:"alongTrackM"`
-	InNavigation *bool    `json:"inNavigation"`
+	TrailID       string   `json:"trailId"`
+	PreferredCode string   `json:"preferredCode"`
+	DisplayName   string   `json:"displayName"`
+	Lat           *float64 `json:"lat"`
+	Lon           *float64 `json:"lon"`
+	Ele           *float64 `json:"ele"`
+	Accuracy      *float64 `json:"accuracy"`
+	Heading       *float64 `json:"heading"`
+	Speed         *float64 `json:"speed"`
+	AlongTrackM   *float64 `json:"alongTrackM"`
+	InNavigation  *bool    `json:"inNavigation"`
 }
 
 // CreateGroup handles POST /live/groups.
+// Supports optional `preferredCode` (`^[A-HJ-NP-Z2-9]{6}$`) so hiking groups
+// formed offline over BLE sync to the exact same 6-character code on 4G return
+// (merging members seamlessly if a groupmate already synced seconds earlier).
 func (h *TrailLiveHandler) CreateGroup(e *core.RequestEvent) error {
 	if err := verifyLiveInternalSecret(e); err != nil {
 		return err
@@ -377,23 +381,8 @@ func (h *TrailLiveHandler) CreateGroup(e *core.RequestEvent) error {
 		return err
 	}
 
-	code, err := generateUniqueGroupCode(e.App)
-	if err != nil {
-		return err
-	}
-
 	now := h.nowUTC()
-	groupRec := core.NewRecord(groupsCol)
-	groupRec.Set("code", code)
-	groupRec.Set("trail_id", strings.TrimSpace(req.TrailID))
-	groupRec.Set("owner_device_hash", deviceHash)
-	groupRec.Set("expires_at", toPBDateTime(now.Add(groupDefaultTTL)))
-
-	if err := e.App.Save(groupRec); err != nil {
-		return err
-	}
-
-	if _, err := upsertGroupMember(e.App, code, deviceHash, groupMemberUpsertInput{
+	memberInput := groupMemberUpsertInput{
 		DisplayName:            req.DisplayName,
 		Lat:                    req.Lat,
 		Lon:                    req.Lon,
@@ -404,7 +393,80 @@ func (h *TrailLiveHandler) CreateGroup(e *core.RequestEvent) error {
 		AlongTrackM:            req.AlongTrackM,
 		InNavigation:           req.InNavigation,
 		ReplaceOptionalMetrics: true,
-	}, now); err != nil {
+	}
+
+	if strings.TrimSpace(req.PreferredCode) != "" {
+		prefCode, ok := normalizeAndValidateGroupCode(req.PreferredCode)
+		if !ok {
+			return e.BadRequestError("Invalid preferredCode", nil)
+		}
+
+		var groupRec *core.Record
+		if err := e.App.RunInTransaction(func(txApp core.App) error {
+			existing, findErr := txApp.FindFirstRecordByData("trail_groups", "code", prefCode)
+			if findErr == nil && existing != nil {
+				expDT := existing.GetDateTime("expires_at")
+				if !expDT.IsZero() && expDT.Time().Before(now) {
+					_, _ = txApp.DB().NewQuery(
+						"DELETE FROM trail_group_members WHERE group_code = {:code}",
+					).Bind(dbx.Params{"code": prefCode}).Execute()
+					if delErr := txApp.Delete(existing); delErr != nil {
+						return delErr
+					}
+					existing = nil
+				}
+			}
+
+			if existing != nil {
+				groupRec = existing
+				groupRec.Set("expires_at", toPBDateTime(now.Add(groupDefaultTTL)))
+				if groupRec.GetString("trail_id") == "" && strings.TrimSpace(req.TrailID) != "" {
+					groupRec.Set("trail_id", strings.TrimSpace(req.TrailID))
+				}
+				if saveErr := txApp.Save(groupRec); saveErr != nil {
+					return saveErr
+				}
+				memberInput.ReplaceOptionalMetrics = false
+			} else {
+				groupRec = core.NewRecord(groupsCol)
+				groupRec.Set("code", prefCode)
+				groupRec.Set("trail_id", strings.TrimSpace(req.TrailID))
+				groupRec.Set("owner_device_hash", deviceHash)
+				groupRec.Set("expires_at", toPBDateTime(now.Add(groupDefaultTTL)))
+				if saveErr := txApp.Save(groupRec); saveErr != nil {
+					return saveErr
+				}
+			}
+
+			_, upErr := upsertGroupMember(txApp, prefCode, deviceHash, memberInput, now)
+			return upErr
+		}); err != nil {
+			return err
+		}
+
+		session, err := buildGroupSessionDto(e.App, groupRec, deviceHash, now)
+		if err != nil {
+			return err
+		}
+		return e.JSON(http.StatusOK, session)
+	}
+
+	code, err := generateUniqueGroupCode(e.App)
+	if err != nil {
+		return err
+	}
+
+	groupRec := core.NewRecord(groupsCol)
+	groupRec.Set("code", code)
+	groupRec.Set("trail_id", strings.TrimSpace(req.TrailID))
+	groupRec.Set("owner_device_hash", deviceHash)
+	groupRec.Set("expires_at", toPBDateTime(now.Add(groupDefaultTTL)))
+
+	if err := e.App.Save(groupRec); err != nil {
+		return err
+	}
+
+	if _, err := upsertGroupMember(e.App, code, deviceHash, memberInput, now); err != nil {
 		return err
 	}
 

@@ -40,6 +40,7 @@ export interface TrailReportDto {
 
 export interface SosAlertDto {
 	id: string;
+	clientSosId?: string;
 	trailId: string;
 	status: SosStatus;
 	reason: SosReason;
@@ -431,9 +432,16 @@ export function normalizeSosDto(raw: Record<string, unknown>): SosAlertDto | nul
 
 	const nearestEtaRaw = raw.nearestEtaSec;
 	const nearestDistRaw = raw.nearestDistanceM;
+	const rawClientSosId =
+		typeof raw.clientSosId === "string" && raw.clientSosId.trim()
+			? raw.clientSosId.trim().toLowerCase()
+			: typeof raw.client_sos_id === "string" && raw.client_sos_id.trim()
+				? raw.client_sos_id.trim().toLowerCase()
+				: undefined;
 
 	return {
 		id,
+		...(rawClientSosId ? { clientSosId: rawClientSosId } : {}),
 		trailId: String(raw.trailId ?? ""),
 		status: (raw.status as SosStatus) ?? "active",
 		reason: (raw.reason as SosReason) ?? "other",
@@ -645,7 +653,17 @@ export async function triggerSos(params: {
 	lat: number;
 	lon: number;
 	ele?: number | null;
+	clientSosId?: string;
+	sosClaimSecret?: string;
 }): Promise<SosAlertDto | null> {
+	const clientSosId =
+		typeof params.clientSosId === "string" && params.clientSosId.trim()
+			? params.clientSosId.trim().toLowerCase()
+			: undefined;
+	const sosClaimSecret =
+		typeof params.sosClaimSecret === "string" && params.sosClaimSecret.trim()
+			? params.sosClaimSecret.trim().toLowerCase()
+			: undefined;
 	const data = await liveJsonFetch<Record<string, unknown>>("/api/v1/live/sos", {
 		method: "POST",
 		body: JSON.stringify({
@@ -656,6 +674,8 @@ export async function triggerSos(params: {
 			lat: params.lat,
 			lon: params.lon,
 			ele: params.ele ?? 0,
+			...(clientSosId ? { clientSosId } : {}),
+			...(sosClaimSecret ? { sosClaimSecret } : {}),
 		}),
 	});
 	if (!data) return null;
@@ -674,14 +694,19 @@ export async function updateSos(
 		lat?: number;
 		lon?: number;
 		ele?: number | null;
+		sosClaimSecret?: string;
 	},
 ): Promise<SosAlertDto | null> {
 	if (!sosId) return null;
+	const normalizedPatch =
+		typeof patch.sosClaimSecret === "string" && patch.sosClaimSecret.trim()
+			? { ...patch, sosClaimSecret: patch.sosClaimSecret.trim().toLowerCase() }
+			: patch;
 	const data = await liveJsonFetch<Record<string, unknown>>(
 		`/api/v1/live/sos/${encodeURIComponent(sosId)}`,
 		{
 			method: "PATCH",
-			body: JSON.stringify(patch),
+			body: JSON.stringify(normalizedPatch),
 		},
 	);
 	if (patch.status === "resolved" || patch.status === "cancelled") {
@@ -882,9 +907,12 @@ export function mergeReportIntoList(
 }
 
 export function mergeSosIntoList(list: SosAlertDto[], incoming: SosAlertDto): SosAlertDto[] {
-	const idx = list.findIndex((s) => s.id === incoming.id);
+	const matchesIncoming = (s: SosAlertDto) =>
+		s.id === incoming.id ||
+		(Boolean(incoming.clientSosId) && s.clientSosId === incoming.clientSosId);
+	const idx = list.findIndex(matchesIncoming);
 	if (incoming.status !== "active") {
-		return idx === -1 ? list : list.filter((s) => s.id !== incoming.id);
+		return idx === -1 ? list : list.filter((s) => !matchesIncoming(s));
 	}
 	if (idx === -1) {
 		return [incoming, ...list];
@@ -1082,6 +1110,7 @@ export function getSavedGroupSession(trailId?: string): SavedGroupSession | null
 export async function createLiveGroup(params: {
 	displayName: string;
 	trailId?: string;
+	preferredCode?: string;
 	lat?: number | null;
 	lon?: number | null;
 	ele?: number | null;
@@ -1096,6 +1125,10 @@ export async function createLiveGroup(params: {
 		displayName,
 		trailId: params.trailId ?? "",
 	};
+	const normPreferredCode = normalizeGroupCode(params.preferredCode);
+	if (normPreferredCode) {
+		body.preferredCode = normPreferredCode;
+	}
 	if (
 		typeof params.lat === "number" &&
 		Number.isFinite(params.lat) &&

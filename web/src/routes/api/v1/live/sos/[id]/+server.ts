@@ -3,6 +3,7 @@ import {
 	liveRateLimiters,
 	resolveActorId,
 	resolveDeviceIdentity,
+	SOS_CLAIM_SECRET_RE,
 } from "#lib/server/live/device_identity.ts";
 import type { RequestEvent } from "@sveltejs/kit";
 
@@ -53,6 +54,19 @@ export async function PATCH(event: RequestEvent) {
 	}
 	if (typeof body.ele === "number" && Number.isFinite(body.ele)) {
 		payload.ele = body.ele;
+	}
+	if (
+		body.sosClaimSecret !== undefined &&
+		body.sosClaimSecret !== null &&
+		body.sosClaimSecret !== ""
+	) {
+		if (
+			typeof body.sosClaimSecret !== "string" ||
+			!SOS_CLAIM_SECRET_RE.test(body.sosClaimSecret.trim())
+		) {
+			return Response.json({ message: "invalid_sos_claim_secret" }, { status: 400 });
+		}
+		payload.sosClaimSecret = body.sosClaimSecret.trim().toLowerCase();
 	}
 
 	return forwardAndProxyLiveJson(

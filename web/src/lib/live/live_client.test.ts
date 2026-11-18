@@ -1103,4 +1103,103 @@ describe("live_client groups API, SSE group events, localStorage persistence, an
 		markerAny.element.listeners.click?.[0]?.({ stopPropagation: () => {} });
 		expect(clicked).toEqual(["peer-diana"]);
 	});
+
+	it("parses optional clientSosId in normalizeSosDto and forwards optional BLE sync fields in live_client", async () => {
+		const withClientId = normalizeSosDto({
+			id: "sos-ble-1",
+			clientSosId: "  A1B2C3D4E5F60718 ",
+			trailId: "bucegi-1",
+			status: "active",
+			reason: "injury",
+			lat: 45.41,
+			lon: 25.45,
+			ele: 1620,
+		});
+		expect(withClientId?.clientSosId).toBe("a1b2c3d4e5f60718");
+
+		const withoutClientId = normalizeSosDto({
+			id: "sos-legacy-1",
+			trailId: "bucegi-1",
+			status: "active",
+			reason: "lost",
+			lat: 45.41,
+			lon: 25.45,
+		});
+		expect(withoutClientId?.clientSosId).toBeUndefined();
+		expect("clientSosId" in (withoutClientId as unknown as Record<string, unknown>)).toBe(false);
+
+		// Deduplicates by clientSosId when local BLE placeholder upgrades to PocketBase ID
+		const localPlaceholder = normalizeSosDto({
+			id: "ble-sos:a1b2c3d4e5f60718",
+			clientSosId: "a1b2c3d4e5f60718",
+			status: "active",
+			reason: "injury",
+			lat: 45.41,
+			lon: 25.45,
+		})!;
+		const mergedUpgraded = mergeSosIntoList([localPlaceholder], withClientId!);
+		expect(mergedUpgraded).toHaveLength(1);
+		expect(mergedUpgraded[0].id).toBe("sos-ble-1");
+		expect(mergedUpgraded[0].clientSosId).toBe("a1b2c3d4e5f60718");
+
+		const calls: Array<{ url: string; body: unknown }> = [];
+		globalThis.fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+			const url = String(input);
+			calls.push({ url, body: init?.body ? JSON.parse(String(init.body)) : null });
+			if (url === "/api/v1/live/groups") {
+				return new Response(
+					JSON.stringify({
+						code: "K7M9P2",
+						trailId: "bucegi-1",
+						expiresAt: "2099-01-01T00:00:00Z",
+						selfMemberId: "m1",
+						members: [],
+					}),
+					{ status: 200, headers: { "content-type": "application/json" } },
+				);
+			}
+			return new Response(
+				JSON.stringify({
+					sos: {
+						id: "sos-ble-1",
+						clientSosId: "a1b2c3d4e5f60718",
+						status: "active",
+					},
+				}),
+				{ status: 200, headers: { "content-type": "application/json" } },
+			);
+		}) as unknown as typeof fetch;
+
+		await triggerSos({
+			trailId: "bucegi-1",
+			reason: "injury",
+			lat: 45.41,
+			lon: 25.45,
+			clientSosId: "A1B2C3D4E5F60718",
+			sosClaimSecret: "00112233445566778899AABBCCDDEEFF",
+		});
+		expect(calls[0].body).toMatchObject({
+			clientSosId: "a1b2c3d4e5f60718",
+			sosClaimSecret: "00112233445566778899aabbccddeeff",
+		});
+
+		await updateSos("sos-ble-1", {
+			status: "resolved",
+			sosClaimSecret: "00112233445566778899aabbccddeeff",
+		});
+		expect(calls[1].body).toEqual({
+			status: "resolved",
+			sosClaimSecret: "00112233445566778899aabbccddeeff",
+		});
+
+		await createLiveGroup({
+			displayName: "Diana",
+			trailId: "bucegi-1",
+			preferredCode: "k7m9p2",
+		});
+		expect(calls[2].body).toMatchObject({
+			displayName: "Diana",
+			preferredCode: "K7M9P2",
+		});
+	});
 });

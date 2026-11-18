@@ -94,6 +94,7 @@ type TrailReportDto struct {
 // SosAlertDto is the exact camelCase wire representation of an SOS alert.
 type SosAlertDto struct {
 	ID               string   `json:"id"`
+	ClientSosID      string   `json:"clientSosId,omitempty"`
 	TrailID          string   `json:"trailId"`
 	Status           string   `json:"status"`
 	Reason           string   `json:"reason"`
@@ -164,6 +165,7 @@ func RegisterTrailLiveRoutes(se *core.ServeEvent, hub *live.TrailLiveHub) {
 	group.POST("/reports", handler.CreateReport)
 	group.POST("/reports/{id}/vote", handler.VoteReport)
 	group.POST("/sos", handler.CreateSos)
+	group.POST("/sos/relay", handler.RelaySos)
 	group.PATCH("/sos/{id}", handler.UpdateSos)
 	group.POST("/sos/{id}/respond", handler.RespondSos)
 	group.POST("/push/subscribe", handler.PushSubscribe)
@@ -333,6 +335,7 @@ func toSosAlertDto(rec *core.Record, callerDeviceHash string, respondingDevices 
 
 	return SosAlertDto{
 		ID:               rec.Id,
+		ClientSosID:      rec.GetString("client_sos_id"),
 		TrailID:          rec.GetString("trail_id"),
 		Status:           rec.GetString("status"),
 		Reason:           rec.GetString("reason"),
@@ -1058,20 +1061,22 @@ func (h *TrailLiveHandler) applyReportVote(app core.App, reportRec *core.Record,
 }
 
 type createSosRequest struct {
-	TrailID       string   `json:"trailId"`
-	Reason        string   `json:"reason"`
-	Message       string   `json:"message"`
-	RequesterName string   `json:"requesterName"`
-	Lat           *float64 `json:"lat"`
-	Lon           *float64 `json:"lon"`
-	Ele           *float64 `json:"ele"`
+	ClientSosID    string   `json:"clientSosId"`
+	SosClaimSecret string   `json:"sosClaimSecret"`
+	TrailID        string   `json:"trailId"`
+	Reason         string   `json:"reason"`
+	Message        string   `json:"message"`
+	RequesterName  string   `json:"requesterName"`
+	Lat            *float64 `json:"lat"`
+	Lon            *float64 `json:"lon"`
+	Ele            *float64 `json:"ele"`
 }
 
 // CreateSos handles POST /live/sos.
-// Creates an active SOS alert (expires_at = now + 6h), selects Web Push targets
-// within 5,000 m Haversine OR matching trailId (cross-referencing 30m trail_presence
-// + push_subscriptions, excluding the caller), broadcasts sos_update on SSE, and
-// returns { sos, pushTargets }.
+// Creates an active SOS alert (expires_at = now + 6h), or seamlessly claims ownership
+// of an already-relayed offline BLE SOS when valid `clientSosId` + `sosClaimSecret`
+// are provided. Selects Web Push targets within 5,000 m Haversine OR matching trailId,
+// broadcasts sos_update on SSE, and returns { sos, pushTargets }.
 func (h *TrailLiveHandler) CreateSos(e *core.RequestEvent) error {
 	if err := verifyLiveInternalSecret(e); err != nil {
 		return err
@@ -1097,6 +1102,21 @@ func (h *TrailLiveHandler) CreateSos(e *core.RequestEvent) error {
 		return e.BadRequestError("Invalid SOS reason", nil)
 	}
 
+	var clientSosID, expectedClaimHash string
+	hasClientSos := strings.TrimSpace(req.ClientSosID) != "" || strings.TrimSpace(req.SosClaimSecret) != ""
+	if hasClientSos {
+		cid, okCid := normalizeLowerHexFixed(req.ClientSosID, 16)
+		if !okCid {
+			return e.BadRequestError("Invalid clientSosId", nil)
+		}
+		claimHash, okSecret := computeSosClaimHashFromSecret(req.SosClaimSecret)
+		if !okSecret {
+			return e.BadRequestError("Invalid sosClaimSecret", nil)
+		}
+		clientSosID = cid
+		expectedClaimHash = claimHash
+	}
+
 	ele := 0.0
 	if req.Ele != nil && !math.IsNaN(*req.Ele) && !math.IsInf(*req.Ele, 0) {
 		ele = *req.Ele
@@ -1112,6 +1132,107 @@ func (h *TrailLiveHandler) CreateSos(e *core.RequestEvent) error {
 		return err
 	}
 
+	if hasClientSos {
+		var sosRec *core.Record
+		var respondingDevices map[string]bool
+		claimedExisting := false
+
+		txErr := e.App.RunInTransaction(func(txApp core.App) error {
+			existing, findErr := txApp.FindFirstRecordByFilter(
+				"sos_alerts",
+				"client_sos_id = {:cid}",
+				dbx.Params{"cid": clientSosID},
+			)
+			if findErr == nil && existing != nil {
+				if !verifySosClaimHashConstantTime(expectedClaimHash, existing.GetString("sos_claim_hash")) {
+					return errSosRelayForbidden
+				}
+				existing.Set("device_hash", deviceHash)
+				existing.Set("lat", *req.Lat)
+				existing.Set("lon", *req.Lon)
+				existing.Set("ele", ele)
+				existing.Set("origin_lat", *req.Lat)
+				existing.Set("origin_lon", *req.Lon)
+				existing.Set("last_packet_epoch", now.Unix())
+				if trailID != "" {
+					existing.Set("trail_id", trailID)
+				}
+				if cleanMessage != "" {
+					existing.Set("message", cleanMessage)
+				}
+				if cleanRequester != "" {
+					existing.Set("requester_name", cleanRequester)
+				}
+				if existing.GetString("status") == "active" {
+					existing.Set("expires_at", toPBDateTime(now.Add(sosDefaultTTL)))
+				}
+
+				var statsErr error
+				respondingDevices, statsErr = recomputeSosResponderStats(txApp, existing, now)
+				if statsErr != nil {
+					return statsErr
+				}
+				if saveErr := txApp.Save(existing); saveErr != nil {
+					return saveErr
+				}
+				sosRec = existing
+				claimedExisting = true
+				return nil
+			}
+
+			rec := core.NewRecord(sosCol)
+			rec.Set("trail_id", trailID)
+			rec.Set("status", "active")
+			rec.Set("reason", reason)
+			rec.Set("message", cleanMessage)
+			rec.Set("requester_name", cleanRequester)
+			rec.Set("lat", *req.Lat)
+			rec.Set("lon", *req.Lon)
+			rec.Set("ele", ele)
+			rec.Set("origin_lat", *req.Lat)
+			rec.Set("origin_lon", *req.Lon)
+			rec.Set("device_hash", deviceHash)
+			rec.Set("client_sos_id", clientSosID)
+			rec.Set("sos_claim_hash", expectedClaimHash)
+			rec.Set("last_packet_epoch", now.Unix())
+			rec.Set("responder_count", 0)
+			rec.Set("nearest_distance_m", 0)
+			rec.Set("nearest_eta_sec", 0)
+			rec.Set("expires_at", toPBDateTime(now.Add(sosDefaultTTL)))
+
+			if saveErr := txApp.Save(rec); saveErr != nil {
+				return saveErr
+			}
+			sosRec = rec
+			respondingDevices = map[string]bool{}
+			return nil
+		})
+		if txErr != nil {
+			if errors.Is(txErr, errSosRelayForbidden) {
+				return e.ForbiddenError("Invalid sosClaimSecret for existing SOS alert", nil)
+			}
+			return txErr
+		}
+
+		pushTargets := []PushTargetDto{}
+		if !claimedExisting {
+			pts, ptErr := selectSosPushTargets(e.App, deviceHash, trailID, *req.Lat, *req.Lon, now)
+			if ptErr != nil {
+				return ptErr
+			}
+			if len(pts) > 0 {
+				pushTargets = pts
+			}
+		}
+
+		h.broadcastSosRecord(sosRec, respondingDevices)
+		dto := toSosAlertDto(sosRec, deviceHash, respondingDevices)
+		return e.JSON(http.StatusOK, map[string]any{
+			"sos":         dto,
+			"pushTargets": pushTargets,
+		})
+	}
+
 	sosRec := core.NewRecord(sosCol)
 	sosRec.Set("trail_id", trailID)
 	sosRec.Set("status", "active")
@@ -1121,6 +1242,8 @@ func (h *TrailLiveHandler) CreateSos(e *core.RequestEvent) error {
 	sosRec.Set("lat", *req.Lat)
 	sosRec.Set("lon", *req.Lon)
 	sosRec.Set("ele", ele)
+	sosRec.Set("origin_lat", *req.Lat)
+	sosRec.Set("origin_lon", *req.Lon)
 	sosRec.Set("device_hash", deviceHash)
 	sosRec.Set("responder_count", 0)
 	sosRec.Set("nearest_distance_m", 0)
@@ -1233,15 +1356,17 @@ func selectSosPushTargets(app core.App, callerDeviceHash, sosTrailID string, sos
 }
 
 type updateSosRequest struct {
-	Status *string  `json:"status"`
-	Lat    *float64 `json:"lat"`
-	Lon    *float64 `json:"lon"`
-	Ele    *float64 `json:"ele"`
+	Status         *string  `json:"status"`
+	Lat            *float64 `json:"lat"`
+	Lon            *float64 `json:"lon"`
+	Ele            *float64 `json:"ele"`
+	SosClaimSecret string   `json:"sosClaimSecret"`
 }
 
 // UpdateSos handles PATCH /live/sos/{id}.
-// Verifies caller ownership (`sos.device_hash == X-Device-Hash`), updates status
-// and/or GPS coordinates, broadcasts sos_update, and returns { sos }.
+// Verifies caller ownership (`sos.device_hash == X-Device-Hash` OR valid Lamport
+// `sosClaimSecret` preimage), updates status and/or GPS coordinates, broadcasts
+// sos_update, and returns { sos }.
 func (h *TrailLiveHandler) UpdateSos(e *core.RequestEvent) error {
 	if err := verifyLiveInternalSecret(e); err != nil {
 		return err
@@ -1257,17 +1382,41 @@ func (h *TrailLiveHandler) UpdateSos(e *core.RequestEvent) error {
 	}
 
 	sosRec, err := e.App.FindRecordById("sos_alerts", sosID)
+	if (err != nil || sosRec == nil) && len(sosID) == 16 {
+		if normCid, ok := normalizeLowerHexFixed(sosID, 16); ok {
+			sosRec, err = e.App.FindFirstRecordByFilter(
+				"sos_alerts",
+				"client_sos_id = {:cid}",
+				dbx.Params{"cid": normCid},
+			)
+		}
+	}
 	if err != nil || sosRec == nil {
 		return e.NotFoundError("SOS alert not found", nil)
-	}
-	if sosRec.GetString("device_hash") != deviceHash {
-		return e.ForbiddenError("Only the SOS requester may update this alert", nil)
 	}
 
 	var req updateSosRequest
 	if err := e.BindBody(&req); err != nil {
 		return e.BadRequestError("Invalid JSON body", err)
 	}
+
+	ownerHash := sosRec.GetString("device_hash")
+	authorizedByDevice := ownerHash != "" && ownerHash == deviceHash
+	authorizedBySecret := false
+	if strings.TrimSpace(req.SosClaimSecret) != "" {
+		if computedHash, ok := computeSosClaimHashFromSecret(req.SosClaimSecret); ok &&
+			verifySosClaimHashConstantTime(computedHash, sosRec.GetString("sos_claim_hash")) {
+			authorizedBySecret = true
+		}
+	}
+	if !authorizedByDevice && !authorizedBySecret {
+		return e.ForbiddenError("Only the SOS requester may update this alert", nil)
+	}
+	if authorizedBySecret && ownerHash == "" {
+		sosRec.Set("device_hash", deviceHash)
+	}
+
+	now := h.nowUTC()
 
 	if req.Status != nil {
 		st := strings.TrimSpace(*req.Status)
@@ -1281,18 +1430,21 @@ func (h *TrailLiveHandler) UpdateSos(e *core.RequestEvent) error {
 			return e.BadRequestError("invalid latitude", nil)
 		}
 		sosRec.Set("lat", *req.Lat)
+		sosRec.Set("origin_lat", *req.Lat)
+		sosRec.Set("last_packet_epoch", now.Unix())
 	}
 	if req.Lon != nil {
 		if math.IsNaN(*req.Lon) || math.IsInf(*req.Lon, 0) || *req.Lon < -180 || *req.Lon > 180 {
 			return e.BadRequestError("invalid longitude", nil)
 		}
 		sosRec.Set("lon", *req.Lon)
+		sosRec.Set("origin_lon", *req.Lon)
+		sosRec.Set("last_packet_epoch", now.Unix())
 	}
 	if req.Ele != nil && !math.IsNaN(*req.Ele) && !math.IsInf(*req.Ele, 0) {
 		sosRec.Set("ele", *req.Ele)
 	}
 
-	now := h.nowUTC()
 	respondingDevices, err := recomputeSosResponderStats(e.App, sosRec, now)
 	if err != nil {
 		return err
@@ -1334,6 +1486,15 @@ func (h *TrailLiveHandler) RespondSos(e *core.RequestEvent) error {
 	}
 
 	sosRec, err := e.App.FindRecordById("sos_alerts", sosID)
+	if (err != nil || sosRec == nil) && len(sosID) == 16 {
+		if normCid, ok := normalizeLowerHexFixed(sosID, 16); ok {
+			sosRec, err = e.App.FindFirstRecordByFilter(
+				"sos_alerts",
+				"client_sos_id = {:cid}",
+				dbx.Params{"cid": normCid},
+			)
+		}
+	}
 	if err != nil || sosRec == nil {
 		return e.NotFoundError("SOS alert not found", nil)
 	}

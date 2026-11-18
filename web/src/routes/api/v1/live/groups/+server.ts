@@ -1,5 +1,6 @@
 import {
 	forwardAndProxyLiveJson,
+	GROUP_CODE_RE,
 	liveRateLimiters,
 	resolveActorId,
 	resolveDeviceIdentity,
@@ -37,6 +38,21 @@ export async function POST(event: RequestEvent) {
 		displayName,
 		trailId: typeof body.trailId === "string" ? body.trailId.trim() : "",
 	};
+
+	if (
+		body.preferredCode !== undefined &&
+		body.preferredCode !== null &&
+		body.preferredCode !== ""
+	) {
+		if (typeof body.preferredCode !== "string") {
+			return Response.json({ message: "invalid_group_code" }, { status: 400 });
+		}
+		const normalizedPreferred = body.preferredCode.trim().toUpperCase();
+		if (!GROUP_CODE_RE.test(normalizedPreferred)) {
+			return Response.json({ message: "invalid_group_code" }, { status: 400 });
+		}
+		payload.preferredCode = normalizedPreferred;
+	}
 
 	const hasLat = body.lat !== undefined && body.lat !== null;
 	const hasLon = body.lon !== undefined && body.lon !== null;

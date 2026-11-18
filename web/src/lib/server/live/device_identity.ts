@@ -8,6 +8,9 @@ export const FALLBACK_HMAC_SECRET = "wanderer-live-fallback";
 export const DEVICE_TOKEN_MIN_LENGTH = 24;
 export const DEVICE_TOKEN_MAX_LENGTH = 128;
 export const GROUP_CODE_RE = /^[A-HJ-NP-Z2-9]{6}$/;
+export const CLIENT_SOS_ID_RE = /^[0-9a-f]{16}$/i;
+export const SOS_CLAIM_HASH_RE = /^[0-9a-f]{16}$/i;
+export const SOS_CLAIM_SECRET_RE = /^[0-9a-f]{32}$/i;
 
 const ASCII_PRINTABLE_TOKEN_RE = /^[\x21-\x7E]+$/;
 const MAX_TRACKED_DEVICES = 10_000;
@@ -233,6 +236,7 @@ export const liveRateLimiters = {
 	reports: createSlidingWindowRateLimiter(6, 10 * 60_000),
 	votes: createSlidingWindowRateLimiter(20, 5 * 60_000),
 	sos: createSlidingWindowRateLimiter(3, 15 * 60_000),
+	sosRelay: createSlidingWindowRateLimiter(20, 5 * 60_000),
 	sosUpdate: createSlidingWindowRateLimiter(30, 60_000),
 	sosRespond: createSlidingWindowRateLimiter(30, 60_000),
 	pushSubscribe: createSlidingWindowRateLimiter(12, 5 * 60_000),

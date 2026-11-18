@@ -1,9 +1,11 @@
 import { proxyJsonResponse } from "#lib/server/http.ts";
 import {
+	CLIENT_SOS_ID_RE,
 	forwardLiveToDb,
 	liveRateLimiters,
 	resolveActorId,
 	resolveDeviceIdentity,
+	SOS_CLAIM_SECRET_RE,
 } from "#lib/server/live/device_identity.ts";
 import {
 	dispatchSosPushNotifications,
@@ -40,6 +42,29 @@ export async function POST(event: RequestEvent) {
 		return Response.json({ message: "invalid_coordinates" }, { status: 400 });
 	}
 
+	let clientSosId: string | undefined;
+	if (body.clientSosId !== undefined && body.clientSosId !== null && body.clientSosId !== "") {
+		if (typeof body.clientSosId !== "string" || !CLIENT_SOS_ID_RE.test(body.clientSosId.trim())) {
+			return Response.json({ message: "invalid_client_sos_id" }, { status: 400 });
+		}
+		clientSosId = body.clientSosId.trim().toLowerCase();
+	}
+
+	let sosClaimSecret: string | undefined;
+	if (
+		body.sosClaimSecret !== undefined &&
+		body.sosClaimSecret !== null &&
+		body.sosClaimSecret !== ""
+	) {
+		if (
+			typeof body.sosClaimSecret !== "string" ||
+			!SOS_CLAIM_SECRET_RE.test(body.sosClaimSecret.trim())
+		) {
+			return Response.json({ message: "invalid_sos_claim_secret" }, { status: 400 });
+		}
+		sosClaimSecret = body.sosClaimSecret.trim().toLowerCase();
+	}
+
 	const actorId = resolveActorId(event);
 
 	let upstream: Response;
@@ -56,6 +81,8 @@ export async function POST(event: RequestEvent) {
 					lat,
 					lon,
 					ele: typeof body.ele === "number" && Number.isFinite(body.ele) ? body.ele : undefined,
+					...(clientSosId !== undefined ? { clientSosId } : {}),
+					...(sosClaimSecret !== undefined ? { sosClaimSecret } : {}),
 				}),
 			},
 			identity.deviceHash,

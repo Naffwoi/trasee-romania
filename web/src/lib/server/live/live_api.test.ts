@@ -19,6 +19,13 @@ const { privateEnvMock, publicEnvMock } = vi.hoisted(() => ({
 vi.mock("$app/env/private", () => privateEnvMock);
 vi.mock("$app/env/public", () => publicEnvMock);
 vi.mock("$app/env", () => ({ browser: false, dev: false }));
+vi.mock("#lib/server/live/vapid_push.ts", async (importOriginal) => {
+	const actual = await importOriginal<typeof import("./vapid_push.ts")>();
+	return {
+		...actual,
+		dispatchSosPushNotifications: vi.fn(actual.dispatchSosPushNotifications),
+	};
+});
 
 import { isRouteProtected } from "#lib/util/authorization_util.ts";
 import {
@@ -39,7 +46,7 @@ import {
 	getVapidPublicKey,
 	resetVapidKeysCache,
 	VAPID_SUBJECT,
-} from "./vapid_push.ts";
+} from "#lib/server/live/vapid_push.ts";
 import { POST as postCreateGroup } from "../../../routes/api/v1/live/groups/+server.ts";
 import { GET as getGroupByCode } from "../../../routes/api/v1/live/groups/[code]/+server.ts";
 import { POST as postJoinGroup } from "../../../routes/api/v1/live/groups/[code]/join/+server.ts";
@@ -53,6 +60,7 @@ import { POST as postReportVote } from "../../../routes/api/v1/live/reports/[id]
 import { POST as postSos } from "../../../routes/api/v1/live/sos/+server.ts";
 import { PATCH as patchSos } from "../../../routes/api/v1/live/sos/[id]/+server.ts";
 import { POST as postSosRespond } from "../../../routes/api/v1/live/sos/[id]/respond/+server.ts";
+import { POST as postSosRelay } from "../../../routes/api/v1/live/sos/relay/+server.ts";
 import { GET as getStream } from "../../../routes/api/v1/live/stream/+server.ts";
 import { GET as getTrailSummary } from "../../../routes/api/v1/live/trail/[id]/summary/+server.ts";
 
@@ -889,5 +897,377 @@ describe("SvelteKit /api/v1/live route handlers", () => {
 			"http://pocketbase.internal:8090/live/stream?lat=45.44&lon=25.55&trailId=bucegi-1&groupCode=K7M9P2",
 		);
 		await streamRes.body?.cancel();
+	});
+
+	it("validates POST /api/v1/live/sos/relay hex claims, coordinates, 20/5m rate limit, and dispatches VAPID push ONLY when created === true", async () => {
+		expect(isRouteProtected(new URL("https://trasee.skillfy.ro/api/v1/live/sos/relay"))).toBe(false);
+		expect(liveRateLimiters.sosRelay.maxRequests).toBe(20);
+		expect(liveRateLimiters.sosRelay.windowMs).toBe(5 * 60_000);
+		liveRateLimiters.sosRelay.reset();
+
+		const pushMock = vi.mocked(dispatchSosPushNotifications);
+		pushMock.mockClear();
+		pushMock.mockResolvedValue({ sent: 1, staleRemoved: 0, failed: 0 });
+
+		const fetchSpy = vi.fn();
+		vi.stubGlobal("fetch", fetchSpy);
+
+		const makeRelayEvent = (bodyObj: unknown, token = VALID_TOKEN_A) => {
+			const req = new Request("https://trasee.skillfy.ro/api/v1/live/sos/relay", {
+				method: "POST",
+				headers: {
+					"Content-Type": "application/json",
+					"X-Device-Token": token,
+				},
+				body: JSON.stringify(bodyObj),
+			});
+			return {
+				request: req,
+				url: new URL(req.url),
+				locals: { user: { actor: "mule-actor" } },
+			} as never;
+		};
+
+		// 1. Validation failures must return 400 without hitting upstream
+		const badPayloads = [
+			// Invalid clientSosId
+			{ clientSosId: "short", sosClaimHash: "0123456789abcdef", lat: 45.4, lon: 25.5 },
+			{ clientSosId: "zzzzzzzzzzzzzzzz", sosClaimHash: "0123456789abcdef", lat: 45.4, lon: 25.5 },
+			// Missing / invalid sosClaimHash when status !== "resolved"
+			{ clientSosId: "a1b2c3d4e5f60718", lat: 45.4, lon: 25.5 },
+			{ clientSosId: "a1b2c3d4e5f60718", sosClaimHash: "bad-hash", lat: 45.4, lon: 25.5 },
+			// Missing / invalid coordinates when status !== "resolved"
+			{ clientSosId: "a1b2c3d4e5f60718", sosClaimHash: "0123456789abcdef" },
+			{ clientSosId: "a1b2c3d4e5f60718", sosClaimHash: "0123456789abcdef", lat: null, lon: 25.5 },
+			{ clientSosId: "a1b2c3d4e5f60718", sosClaimHash: "0123456789abcdef", lat: 95, lon: 25.5 },
+			// Malformed sosClaimSecret when status === "resolved"
+			{
+				clientSosId: "a1b2c3d4e5f60718",
+				status: "resolved",
+				sosClaimSecret: "not-32-hex",
+			},
+		];
+
+		for (const bad of badPayloads) {
+			liveRateLimiters.sosRelay.reset();
+			const res = await postSosRelay(makeRelayEvent(bad));
+			expect(res.status).toBe(400);
+		}
+		expect(fetchSpy).not.toHaveBeenCalled();
+
+		// 2. First relay (created: true, pushTargets non-empty) -> normalizes hex lowercase, triggers VAPID push, strips pushTargets & created
+		liveRateLimiters.sosRelay.reset();
+		fetchSpy.mockResolvedValueOnce(
+			Response.json({
+				sos: {
+					id: "sos-relayed-1",
+					clientSosId: "a1b2c3d4e5f60718",
+					trailId: "bucegi-1",
+					status: "active",
+					reason: "injury",
+					isMine: false,
+				},
+				pushTargets: [
+					{
+						endpoint: "https://push.example/target-1",
+						p256dh: "p256dh-1",
+						auth: "auth-1",
+						distanceM: 520,
+					},
+				],
+				created: true,
+			}),
+		);
+
+		const firstRes = await postSosRelay(
+			makeRelayEvent({
+				clientSosId: "  A1B2C3D4E5F60718  ",
+				sosClaimHash: "  FEDCBA9876543210 ",
+				trailId: "bucegi-1",
+				reason: "injury",
+				message: "Picior luxat în vale",
+				requesterName: "Mihai",
+				lat: 45.412,
+				lon: 25.456,
+				ele: 1680,
+				packetEpochSec: 1_795_000_120,
+				hopCount: 2,
+			}),
+		);
+		expect(firstRes.status).toBe(200);
+		const firstData = await firstRes.json();
+		expect(firstData).toEqual({
+			sos: {
+				id: "sos-relayed-1",
+				clientSosId: "a1b2c3d4e5f60718",
+				trailId: "bucegi-1",
+				status: "active",
+				reason: "injury",
+				isMine: false,
+			},
+		});
+		expect(firstData.pushTargets).toBeUndefined();
+		expect(firstData.created).toBeUndefined();
+
+		expect(fetchSpy).toHaveBeenCalledTimes(1);
+		const [relayUrl, relayInit] = fetchSpy.mock.calls[0] as [string, RequestInit];
+		expect(relayUrl).toBe("http://pocketbase.internal:8090/live/sos/relay");
+		expect(JSON.parse(String(relayInit.body))).toEqual({
+			clientSosId: "a1b2c3d4e5f60718",
+			sosClaimHash: "fedcba9876543210",
+			trailId: "bucegi-1",
+			reason: "injury",
+			message: "Picior luxat în vale",
+			requesterName: "Mihai",
+			lat: 45.412,
+			lon: 25.456,
+			ele: 1680,
+			packetEpochSec: 1_795_000_120,
+			hopCount: 2,
+		});
+		expect(pushMock).toHaveBeenCalledTimes(1);
+
+		// 3. Duplicate relay (created: false) -> MUST NOT trigger VAPID push even if pushTargets were non-empty
+		pushMock.mockClear();
+		fetchSpy.mockResolvedValueOnce(
+			Response.json({
+				sos: { id: "sos-relayed-1", clientSosId: "a1b2c3d4e5f60718", status: "active" },
+				pushTargets: [
+					{
+						endpoint: "https://push.example/target-1",
+						p256dh: "p256dh-1",
+						auth: "auth-1",
+						distanceM: 520,
+					},
+				],
+				created: false,
+			}),
+		);
+		const dupRes = await postSosRelay(
+			makeRelayEvent(
+				{
+					clientSosId: "a1b2c3d4e5f60718",
+					sosClaimHash: "fedcba9876543210",
+					lat: 45.4125,
+					lon: 25.4565,
+					packetEpochSec: 1_795_000_180,
+				},
+				VALID_TOKEN_B,
+			),
+		);
+		expect(dupRes.status).toBe(200);
+		expect(pushMock).not.toHaveBeenCalled();
+
+		// 4. Relayed resolution (status === "resolved") -> coordinates not required, optional sosClaimSecret normalized lowercase
+		fetchSpy.mockResolvedValueOnce(
+			Response.json({
+				sos: { id: "sos-relayed-1", clientSosId: "a1b2c3d4e5f60718", status: "resolved" },
+				pushTargets: [],
+				created: false,
+			}),
+		);
+		const resolveRes = await postSosRelay(
+			makeRelayEvent({
+				clientSosId: "A1B2C3D4E5F60718",
+				status: "resolved",
+				sosClaimSecret: "00112233445566778899AABBCCDDEEFF",
+				packetEpochSec: 1_795_000_300,
+			}),
+		);
+		expect(resolveRes.status).toBe(200);
+		const [, resolveInit] = fetchSpy.mock.calls[2] as [string, RequestInit];
+		expect(JSON.parse(String(resolveInit.body))).toMatchObject({
+			clientSosId: "a1b2c3d4e5f60718",
+			status: "resolved",
+			sosClaimSecret: "00112233445566778899aabbccddeeff",
+			packetEpochSec: 1_795_000_300,
+		});
+		expect(pushMock).not.toHaveBeenCalled();
+
+		// 5. Rate limiter enforces 20 req / 5 min per deviceHash
+		liveRateLimiters.sosRelay.reset();
+		fetchSpy.mockImplementation(() =>
+			Promise.resolve(
+				Response.json({
+					sos: { id: "sos-r", status: "active" },
+					pushTargets: [],
+					created: false,
+				}),
+			),
+		);
+		for (let i = 0; i < 20; i++) {
+			const okRes = await postSosRelay(
+				makeRelayEvent({
+					clientSosId: "a1b2c3d4e5f60718",
+					sosClaimHash: "fedcba9876543210",
+					lat: 45.4,
+					lon: 25.5,
+				}),
+			);
+			expect(okRes.status).toBe(200);
+		}
+		const rateLimitedRes = await postSosRelay(
+			makeRelayEvent({
+				clientSosId: "a1b2c3d4e5f60718",
+				sosClaimHash: "fedcba9876543210",
+				lat: 45.4,
+				lon: 25.5,
+			}),
+		);
+		expect(rateLimitedRes.status).toBe(429);
+		liveRateLimiters.sosRelay.reset();
+	});
+
+	it("forwards optional clientSosId & sosClaimSecret on POST /sos & PATCH /sos/[id] and optional preferredCode on POST /groups", async () => {
+		liveRateLimiters.sos.reset();
+		liveRateLimiters.sosUpdate.reset();
+		liveRateLimiters.groupCreate.reset();
+
+		const fetchSpy = vi.fn().mockImplementation((url: string) => {
+			if (url.endsWith("/live/groups")) {
+				return Promise.resolve(
+					Response.json({
+						code: "K7M9P2",
+						trailId: "bucegi-1",
+						expiresAt: "2026-11-18T22:00:00Z",
+						selfMemberId: "a1b2c3d4e5f6",
+						members: [],
+					}),
+				);
+			}
+			return Promise.resolve(
+				Response.json({
+					sos: {
+						id: "sos-claimed",
+						clientSosId: "a1b2c3d4e5f60718",
+						status: "active",
+						isMine: true,
+					},
+					pushTargets: [],
+				}),
+			);
+		});
+		vi.stubGlobal("fetch", fetchSpy);
+
+		// 1. POST /api/v1/live/sos rejects bad clientSosId / sosClaimSecret, normalizes & forwards valid ones
+		const badClaimPost = new Request("https://trasee.skillfy.ro/api/v1/live/sos", {
+			method: "POST",
+			headers: { "Content-Type": "application/json", "X-Device-Token": VALID_TOKEN_A },
+			body: JSON.stringify({
+				reason: "injury",
+				lat: 45.41,
+				lon: 25.45,
+				clientSosId: "invalid-hex",
+			}),
+		});
+		expect(
+			(
+				await postSos({
+					request: badClaimPost,
+					url: new URL(badClaimPost.url),
+					locals: {},
+				} as never)
+			).status,
+		).toBe(400);
+
+		const claimPostReq = new Request("https://trasee.skillfy.ro/api/v1/live/sos", {
+			method: "POST",
+			headers: { "Content-Type": "application/json", "X-Device-Token": VALID_TOKEN_A },
+			body: JSON.stringify({
+				trailId: "bucegi-1",
+				reason: "injury",
+				lat: 45.41,
+				lon: 25.45,
+				clientSosId: "A1B2C3D4E5F60718",
+				sosClaimSecret: "00112233445566778899AABBCCDDEEFF",
+			}),
+		});
+		const claimPostRes = await postSos({
+			request: claimPostReq,
+			url: new URL(claimPostReq.url),
+			locals: {},
+		} as never);
+		expect(claimPostRes.status).toBe(200);
+		expect(JSON.parse(String((fetchSpy.mock.calls[0] as [string, RequestInit])[1].body))).toMatchObject({
+			clientSosId: "a1b2c3d4e5f60718",
+			sosClaimSecret: "00112233445566778899aabbccddeeff",
+		});
+
+		// 2. PATCH /api/v1/live/sos/[id] rejects malformed sosClaimSecret, forwards valid lowercase
+		const badPatchReq = new Request("https://trasee.skillfy.ro/api/v1/live/sos/sos-claimed", {
+			method: "PATCH",
+			headers: { "Content-Type": "application/json", "X-Device-Token": VALID_TOKEN_A },
+			body: JSON.stringify({ status: "resolved", sosClaimSecret: "short" }),
+		});
+		expect(
+			(
+				await patchSos({
+					request: badPatchReq,
+					url: new URL(badPatchReq.url),
+					params: { id: "sos-claimed" },
+					locals: {},
+				} as never)
+			).status,
+		).toBe(400);
+
+		const validPatchReq = new Request("https://trasee.skillfy.ro/api/v1/live/sos/sos-claimed", {
+			method: "PATCH",
+			headers: { "Content-Type": "application/json", "X-Device-Token": VALID_TOKEN_A },
+			body: JSON.stringify({
+				status: "resolved",
+				sosClaimSecret: "FFEEDDCCBBAA99887766554433221100",
+			}),
+		});
+		const validPatchRes = await patchSos({
+			request: validPatchReq,
+			url: new URL(validPatchReq.url),
+			params: { id: "sos-claimed" },
+			locals: {},
+		} as never);
+		expect(validPatchRes.status).toBe(200);
+		expect(JSON.parse(String((fetchSpy.mock.calls[1] as [string, RequestInit])[1].body))).toEqual({
+			status: "resolved",
+			sosClaimSecret: "ffeeddccbbaa99887766554433221100",
+		});
+
+		// 3. POST /api/v1/live/groups validates & normalizes optional preferredCode uppercase
+		const badGroupPrefReq = new Request("https://trasee.skillfy.ro/api/v1/live/groups", {
+			method: "POST",
+			headers: { "Content-Type": "application/json", "X-Device-Token": VALID_TOKEN_A },
+			body: JSON.stringify({
+				displayName: "Diana",
+				preferredCode: "AB01IO", // 0, 1, I, O forbidden
+			}),
+		});
+		expect(
+			(
+				await postCreateGroup({
+					request: badGroupPrefReq,
+					url: new URL(badGroupPrefReq.url),
+					locals: {},
+				} as never)
+			).status,
+		).toBe(400);
+
+		const validGroupPrefReq = new Request("https://trasee.skillfy.ro/api/v1/live/groups", {
+			method: "POST",
+			headers: { "Content-Type": "application/json", "X-Device-Token": VALID_TOKEN_A },
+			body: JSON.stringify({
+				displayName: "Diana",
+				trailId: "bucegi-1",
+				preferredCode: "  k7m9p2 ",
+			}),
+		});
+		const validGroupPrefRes = await postCreateGroup({
+			request: validGroupPrefReq,
+			url: new URL(validGroupPrefReq.url),
+			locals: {},
+		} as never);
+		expect(validGroupPrefRes.status).toBe(200);
+		expect(JSON.parse(String((fetchSpy.mock.calls[2] as [string, RequestInit])[1].body))).toEqual({
+			displayName: "Diana",
+			trailId: "bucegi-1",
+			preferredCode: "K7M9P2",
+		});
 	});
 });

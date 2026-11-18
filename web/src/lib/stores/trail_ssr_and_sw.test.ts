@@ -38,7 +38,7 @@ describe("Phase 4 search payload, N+1 summit-log GPX waterfall, SSR deferral, an
 		expect(defaultTrailSearchAttributes).toContain("polyline");
 		expect(trailCardSearchAttributes).not.toContain("polyline");
 
-		const mockFetch = vi.fn(async () =>
+		const mockFetch = vi.fn(async (_url: RequestInfo | URL, _init?: RequestInit) =>
 			Response.json({ hits: [], page: 1, hitsPerPage: 48, totalHits: 0, totalPages: 0 }),
 		);
 		await trails_search_filter(filter, 1, 48, mockFetch);

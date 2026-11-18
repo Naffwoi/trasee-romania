@@ -58,6 +58,13 @@ export interface HybridOffTrailRerouteParams {
 	map?: MapLibreFeatureQueryable | null;
 	fetchImpl?: typeof fetch;
 	timeoutMs?: number;
+	precomputedLocal?: OffTrailRerouteResult | null;
+	connectorSolver?: (params: {
+		fromLat: number;
+		fromLon: number;
+		toLat: number;
+		toLon: number;
+	}) => Promise<Array<{ lat: number; lon: number }>>;
 }
 
 function toCoordPair(raw: unknown): [number, number] | null {
@@ -288,18 +295,21 @@ export async function computeHybridOffTrailReroute(
 	const isRo = (params.locale ?? "ro").trim().toLowerCase().startsWith("ro");
 	const isCycling = params.isCycling ?? false;
 
-	const localResult = computeOffTrailReroute({
-		userLat,
-		userLon,
-		userEle: params.userEle,
-		trailPoints,
-		lastAlongTrackM: params.lastAlongTrackM,
-		sampler: params.sampler,
-		mode,
-		locale: params.locale ?? "ro",
-		obstacles,
-		preferredPaths,
-	});
+	const localResult =
+		params.precomputedLocal !== undefined
+			? params.precomputedLocal
+			: computeOffTrailReroute({
+					userLat,
+					userLon,
+					userEle: params.userEle,
+					trailPoints,
+					lastAlongTrackM: params.lastAlongTrackM,
+					sampler: params.sampler,
+					mode,
+					locale: params.locale ?? "ro",
+					obstacles,
+					preferredPaths,
+				});
 
 	if (localResult === null) {
 		return null;
@@ -399,16 +409,23 @@ export async function computeHybridOffTrailReroute(
 		const firstVal = valhallaCoords[0];
 		const startGapM = haversineMeters(userLat, userLon, firstVal.lat, firstVal.lon);
 		if (startGapM > CONNECTOR_GAP_THRESHOLD_M) {
-			const startConn = computeLocalCurvedConnector({
-				fromLat: userLat,
-				fromLon: userLon,
-				toLat: firstVal.lat,
-				toLon: firstVal.lon,
-				evalEle,
-				mode,
-				obstacles,
-				preferredPaths,
-			});
+			const startConn = params.connectorSolver
+				? await params.connectorSolver({
+						fromLat: userLat,
+						fromLon: userLon,
+						toLat: firstVal.lat,
+						toLon: firstVal.lon,
+					})
+				: computeLocalCurvedConnector({
+						fromLat: userLat,
+						fromLon: userLon,
+						toLat: firstVal.lat,
+						toLon: firstVal.lon,
+						evalEle,
+						mode,
+						obstacles,
+						preferredPaths,
+					});
 			for (let i = 0; i < startConn.length - 1; i++) {
 				stitched.push(startConn[i]);
 				const segD = haversineMeters(
@@ -440,16 +457,23 @@ export async function computeHybridOffTrailReroute(
 			localResult.rejoinLon,
 		);
 		if (endGapM > CONNECTOR_GAP_THRESHOLD_M) {
-			const endConn = computeLocalCurvedConnector({
-				fromLat: lastVal.lat,
-				fromLon: lastVal.lon,
-				toLat: localResult.rejoinLat,
-				toLon: localResult.rejoinLon,
-				evalEle,
-				mode,
-				obstacles,
-				preferredPaths,
-			});
+			const endConn = params.connectorSolver
+				? await params.connectorSolver({
+						fromLat: lastVal.lat,
+						fromLon: lastVal.lon,
+						toLat: localResult.rejoinLat,
+						toLon: localResult.rejoinLon,
+					})
+				: computeLocalCurvedConnector({
+						fromLat: lastVal.lat,
+						fromLon: lastVal.lon,
+						toLat: localResult.rejoinLat,
+						toLon: localResult.rejoinLon,
+						evalEle,
+						mode,
+						obstacles,
+						preferredPaths,
+					});
 			for (let i = 1; i < endConn.length; i++) {
 				const prev = endConn[i - 1];
 				const cur = endConn[i];

@@ -312,4 +312,83 @@ describe("computeHybridOffTrailReroute & computeValhallaAccessRoute", () => {
 		expect(accessPts![2].distanceM).toBeGreaterThan(9_500);
 		expect(accessPts![1].ele).toBe(850);
 	});
+
+	it("reuses precomputedLocal and async connectorSolver without running synchronous A* twice", async () => {
+		const encodePolyline6 = (coords: [number, number][]) =>
+			encodePolyline(
+				coords.map(([lon, lat]) => [lat, lon]),
+				6,
+			);
+
+		let mainThreadSamplerCalls = 0;
+		const sampler = () => {
+			mainThreadSamplerCalls++;
+			return 1020;
+		};
+
+		const trailPoints = [
+			{ lat: 45.44, lon: 25.55, ele: 1000, distanceM: 0, gradePct: 5 },
+			{ lat: 45.445, lon: 25.55, ele: 1030, distanceM: 556, gradePct: 5 },
+		];
+
+		const precomputedLocal = {
+			mode: "min-climb" as const,
+			points: [
+				{ lat: 45.441, lon: 25.548, ele: 1010, distanceM: 0, gradePct: 4 },
+				{ lat: 45.442, lon: 25.55, ele: 1015, distanceM: 190, gradePct: 4 },
+			],
+			rejoinLat: 45.442,
+			rejoinLon: 25.55,
+			rejoinAlongTrackM: 222,
+			rejoinEleM: 1015,
+			distanceM: 190,
+			estimatedSeconds: 210,
+			ascentM: 5,
+			descentM: 0,
+			maxSlopeDeg: 4,
+			avoidedSteepHazard: false,
+			initialBearingDeg: 65,
+			instruction: "Urmează direcția NE (190 m până la potecă)",
+			slopeAdvice: "Pantă ușoară · max 4°",
+		};
+
+		let connectorCalls = 0;
+		const valhallaShape = encodePolyline6([
+			[25.5486, 45.4412], // > 40m gap from user (45.441, 25.548) -> triggers start connector
+			[25.5495, 45.4417],
+			[25.55, 45.442],
+		]);
+
+		const res = await computeHybridOffTrailReroute({
+			userLat: 45.441,
+			userLon: 25.548,
+			userEle: 1010,
+			trailPoints,
+			lastAlongTrackM: 100,
+			sampler,
+			mode: "min-climb",
+			locale: "ro",
+			precomputedLocal,
+			connectorSolver: async ({ fromLat, fromLon, toLat, toLon }) => {
+				connectorCalls++;
+				return [
+					{ lat: fromLat, lon: fromLon },
+					{ lat: (fromLat + toLat) * 0.5, lon: (fromLon + toLon) * 0.5 },
+					{ lat: toLat, lon: toLon },
+				];
+			},
+			fetchImpl: async () =>
+				Response.json({
+					trip: {
+						summary: { time: 165, length: 0.21 },
+						legs: [{ shape: valhallaShape, maneuvers: [{ instruction: "Mergi pe potecă" }] }],
+					},
+				}),
+		});
+
+		expect(res).not.toBeNull();
+		expect(connectorCalls).toBe(1);
+		// Only elevation enrichment along the final Valhalla polyline (<= 10 samples), NOT 32,400 A* grid cells!
+		expect(mainThreadSamplerCalls).toBeLessThan(15);
+	});
 });

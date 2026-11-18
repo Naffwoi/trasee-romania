@@ -34,6 +34,13 @@ export { RouteMapMatcher } from "./route_map_matcher";
 export { EtaCalculator, toblerHikingSpeedKmh } from "./eta_calculator";
 export { synthesizeTrailManeuvers } from "./trail_maneuver_synthesizer";
 export { DemTileGrid } from "./dem_tile_grid";
+export { NavTerrainClient } from "./nav_terrain_client";
+export {
+	packTrackPoints,
+	unpackTrackPoints,
+	reversePackedTrackPoints,
+	parseGpxXmlFastToPackedTrack,
+} from "./nav_terrain_codec";
 export {
 	computeOffTrailReroute,
 	computeLocalCurvedConnector,

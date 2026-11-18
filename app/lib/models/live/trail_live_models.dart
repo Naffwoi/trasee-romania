@@ -704,14 +704,17 @@ class TrailLiveSummary {
 
     final rawSos = json['sosAlerts'] ?? json['activeSosAlerts'];
     final parsedSos = <SosAlertModel>[];
-    final seenSosKeys = <String>{};
+    final seenSosIds = <String>{};
+    final seenDedupeKeys = <String>{};
     if (rawSos is List) {
       for (final item in rawSos) {
         if (item is Map) {
           final model = SosAlertModel.fromJson(Map<String, dynamic>.from(item));
           if (model.id.isNotEmpty &&
-              seenSosKeys.add('id:${model.id}') &&
-              seenSosKeys.add(model.dedupeKey)) {
+              !seenSosIds.contains(model.id) &&
+              !seenDedupeKeys.contains(model.dedupeKey)) {
+            seenSosIds.add(model.id);
+            seenDedupeKeys.add(model.dedupeKey);
             parsedSos.add(model);
           }
         }
@@ -724,8 +727,10 @@ class TrailLiveSummary {
         Map<String, dynamic>.from(rawMySos),
       ).copyWith(isMine: true);
       if (mine.id.isNotEmpty &&
-          seenSosKeys.add('id:${mine.id}') &&
-          seenSosKeys.add(mine.dedupeKey)) {
+          !seenSosIds.contains(mine.id) &&
+          !seenDedupeKeys.contains(mine.dedupeKey)) {
+        seenSosIds.add(mine.id);
+        seenDedupeKeys.add(mine.dedupeKey);
         parsedSos.insert(0, mine);
       }
     }

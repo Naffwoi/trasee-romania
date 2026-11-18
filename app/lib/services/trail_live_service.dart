@@ -243,7 +243,11 @@ class TrailLiveService {
   }) async {
     if (sos == null || sos.id.isEmpty || sos.isMine) return;
     if (!sos.isActiveAt(DateTime.now())) return;
-    if (!_notifiedSosIds.add(sos.dedupeKey)) return;
+    if (_notifiedSosIds.contains(sos.dedupeKey) ||
+        _notifiedSosIds.contains('id:${sos.id}')) {
+      return;
+    }
+    _notifiedSosIds.add(sos.dedupeKey);
     _notifiedSosIds.add('id:${sos.id}');
 
     double? distM;

@@ -42,7 +42,7 @@ final class LocalSettingsNotifierProvider
 }
 
 String _$localSettingsNotifierHash() =>
-    r'906198edb6ddaa4d3cc80d79cd4c6f9501f446a5';
+    r'7ff2df6aee14d13ef9fa0f1b85d8be408facfe46';
 
 abstract class _$LocalSettingsNotifier extends $Notifier<LocalSettingsEntity> {
   LocalSettingsEntity build();

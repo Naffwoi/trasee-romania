@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart' show Provider;
 import 'package:objectbox/objectbox.dart';
 import 'package:riverpod_annotation/riverpod_annotation.dart';
 import 'package:wanderer/entities/local_settings_entity.dart';
@@ -33,6 +34,14 @@ class LocalSettingsNotifier extends _$LocalSettingsNotifier {
     ref.invalidateSelf();
   }
 
+  Future<void> setExpeditionBatteryMode(bool enabled) async {
+    final entity = _box.getAll().firstOrNull ?? LocalSettingsEntity();
+    if (entity.expeditionBatteryMode == enabled) return;
+    entity.expeditionBatteryMode = enabled;
+    _box.put(entity);
+    ref.invalidateSelf();
+  }
+
   String _modeToString(ThemeMode mode) => switch (mode) {
     ThemeMode.light => 'light',
     ThemeMode.dark => 'dark',
@@ -62,3 +71,9 @@ String unit(Ref ref) {
   final settings = ref.watch(settingsProvider);
   return settings?.unit ?? 'metric';
 }
+
+final expeditionBatteryModeProvider = Provider<bool>((ref) {
+  return ref.watch(
+    localSettingsProvider.select((s) => s.expeditionBatteryMode),
+  );
+});
